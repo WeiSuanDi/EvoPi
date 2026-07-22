@@ -4,7 +4,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
+import pytest
+
 from evopi.core.context import AgentContext
+from evopi.core.agent_loop import TurnLimitError
 from evopi.core.messages import AssistantMessage, SystemMessage, ToolResultMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent
 from evopi.core.tool import Tool, ToolCall
@@ -51,6 +54,38 @@ class RecordingPolicy:
     def run(self, context: PolicyContext) -> PolicyDecision:
         self.calls.append(context.hook)
         return PolicyDecision(action="allow", reason=f"observed {context.hook}")
+
+
+@dataclass
+class TerminateAfterTurnPolicy:
+    name: str = "terminate_after_turn"
+    version: str = "1"
+    description: str = "Stop after the current turn"
+    hooks: tuple = ("after_turn",)
+    priority: int = 10
+    enabled: bool = True
+    source: str = "test"
+    risk_level: str = "low"
+    metadata: dict = field(default_factory=dict)
+
+    def run(self, context: PolicyContext) -> PolicyDecision:
+        return PolicyDecision(action="terminate", reason="Turn is complete")
+
+
+@dataclass
+class TerminateAfterToolPolicy:
+    name: str = "terminate_after_tool"
+    version: str = "1"
+    description: str = "Treat the tool result as the final artifact"
+    hooks: tuple = ("after_tool_call",)
+    priority: int = 10
+    enabled: bool = True
+    source: str = "test"
+    risk_level: str = "low"
+    metadata: dict = field(default_factory=dict)
+
+    def run(self, context: PolicyContext) -> PolicyDecision:
+        return PolicyDecision(action="terminate", reason="Tool result is final")
 
 
 class FailingModel:
@@ -110,9 +145,18 @@ def test_harness_dispatches_policy_and_writes_trace(tmp_path) -> None:
     assert result.is_error is True
     assert result.metadata["blocked"] is True
     assert harness.state.status is LifecycleState.COMPLETED
+    assert harness.state.end_reason == "completed"
     records = list(read_trace(trace_path))
     assert "policy_decision" in {record["type"] for record in records}
-    assert "final_message" in {record["type"] for record in records}
+    final_assistant = [
+        record
+        for record in records
+        if record["type"] == "message_end"
+        and record["data"]["message"]["role"] == "assistant"
+    ][-1]
+    assert final_assistant["data"]["message"]["content"] == "The command was blocked."
+    assert records[-1]["type"] == "agent_end"
+    assert records[-1]["data"]["reason"] == "completed"
     assert len({record["run_id"] for record in records}) == 1
     assert records[0]["run_id"] is not None
 
@@ -175,6 +219,79 @@ def test_all_non_error_harness_hooks_are_dispatched() -> None:
     assert "on_error" not in calls
 
 
+def test_after_turn_terminate_policy_stops_through_dedicated_callback(tmp_path) -> None:
+    model = ScriptedModel(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="echo-1", name="echo", arguments={"value": "ok"})],
+                stop_reason="tool_use",
+            )
+        ]
+    )
+    trace_path = tmp_path / "after-turn-terminate.jsonl"
+    harness = BaseHarness(model=model, trace_path=trace_path)
+    harness.register_tool(
+        Tool(
+            name="echo",
+            description="Echo text",
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+            handler=lambda value: value,
+        )
+    )
+    harness.register_policy(TerminateAfterTurnPolicy())
+
+    asyncio.run(harness.prompt("stop after this turn"))
+
+    assert harness.state.status is LifecycleState.COMPLETED
+    assert harness.state.end_reason == "terminated"
+    result = next(
+        message for message in harness.messages if isinstance(message, ToolResultMessage)
+    )
+    assert result.terminate is False
+    agent_end = next(record for record in read_trace(trace_path) if record["type"] == "agent_end")
+    assert agent_end["data"]["reason"] == "terminated"
+
+
+def test_after_tool_policy_changes_the_final_batch_termination_hint() -> None:
+    model = ScriptedModel(
+        [
+            AssistantMessage(
+                content="The tool result is the final artifact.",
+                tool_calls=[ToolCall(id="echo-1", name="echo", arguments={"value": "ok"})],
+                stop_reason="tool_use",
+            )
+        ]
+    )
+    harness = BaseHarness(model=model)
+    harness.register_tool(
+        Tool(
+            name="echo",
+            description="Echo text",
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+            handler=lambda value: value,
+        )
+    )
+    harness.register_policy(TerminateAfterToolPolicy())
+
+    asyncio.run(harness.prompt("produce the artifact"))
+
+    result = next(
+        message for message in harness.messages if isinstance(message, ToolResultMessage)
+    )
+    assert result.terminate is True
+    assert harness.state.status is LifecycleState.COMPLETED
+    assert harness.state.end_reason == "terminated"
+
+
 def test_error_hook_trace_and_failed_lifecycle(tmp_path) -> None:
     calls: list[str] = []
     trace_path = tmp_path / "error.jsonl"
@@ -190,6 +307,7 @@ def test_error_hook_trace_and_failed_lifecycle(tmp_path) -> None:
 
     assert calls == ["before_model_call", "on_error"]
     assert harness.state.status is LifecycleState.FAILED
+    assert harness.state.end_reason == "error"
     records = list(read_trace(trace_path))
     assert any(record["type"] == "error" for record in records)
     assert any(
@@ -202,3 +320,36 @@ def test_error_hook_trace_and_failed_lifecycle(tmp_path) -> None:
         and record["data"]["input"]["error"] == "RuntimeError: provider failed"
         for record in records
     )
+    assert records[-1]["type"] == "agent_end"
+    assert records[-1]["data"]["reason"] == "error"
+
+
+def test_turn_limit_maps_to_failed_harness_state() -> None:
+    model = ScriptedModel(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="echo-1", name="echo", arguments={"value": "ok"})],
+                stop_reason="tool_use",
+            )
+        ]
+    )
+    harness = BaseHarness(model=model, max_turns=1)
+    harness.register_tool(
+        Tool(
+            name="echo",
+            description="Echo text",
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+            handler=lambda value: value,
+        )
+    )
+
+    with pytest.raises(TurnLimitError):
+        asyncio.run(harness.prompt("loop"))
+
+    assert harness.state.status is LifecycleState.FAILED
+    assert harness.state.end_reason == "turn_limit"

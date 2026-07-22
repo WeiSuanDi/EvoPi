@@ -32,7 +32,7 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     def display(event: CoreEvent) -> None:
-        if event.type == "model_delta" and event.data.get("kind") == "text":
+        if event.type == "message_update" and event.data.get("kind") == "text":
             print(event.data.get("delta", ""), end="", flush=True)
 
     harness.subscribe(display)

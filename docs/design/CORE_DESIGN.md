@@ -97,6 +97,39 @@ supervisor
 
 它们属于 Harness / Policy / Evolution。
 
+## Lifecycle v2 与四层终止协议
+
+Core 生命周期事件采用 Pi 风格的语义：
+
+```text
+agent_start / agent_end
+turn_start / turn_end
+message_start / message_update / message_end
+tool_execution_start / tool_execution_end
+```
+
+`model_start` 和 `error` 作为 EvoPi 观测事件保留；Policy 与 Confirmation 事件由
+Harness 通过同一事件通道扩展。`turn_end` 携带 AssistantMessage 和本轮工具结果，
+`agent_end` 携带本次运行新增消息、结构化结束原因和可选错误。自然完成由最后一个
+Assistant `message_end` 表达，不再额外产生 `final_message`。
+
+终止控制分为四层：
+
+```text
+工具级：ToolResult.terminate 是跳过下一次模型调用的提示
+批次级：非空批次中所有最终工具结果均 terminate=True 才早停
+Turn 级：ShouldStopAfterTurn 在 after_turn 观察完成后请求优雅停止
+Run / Provider 级：Agent Abort 与 Provider aborted/error stop reason 独立处理
+```
+
+当前只实现前三层和结构化结束原因。`AgentEndReason` 固定为
+`completed / terminated / aborted / error / turn_limit`，其中主动产生 `aborted`
+留给下一阶段。`Agent.prompt()` 继续返回 AssistantMessage，结束状态由只读
+`Agent.last_run` 和 `agent_end` 暴露。
+
+工具调用仍按 AssistantMessage 中的顺序执行。单个结果的 `terminate=True` 不跳过
+兄弟工具；阻断、拒绝和错误默认不早停，以便模型读取错误 ToolResult 后给出总结。
+
 ## 模型调用边界
 
 EvoPi 第一版不只做 FakeModel。

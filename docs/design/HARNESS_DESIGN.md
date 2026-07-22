@@ -57,6 +57,14 @@ aborted
 
 Core 只负责跑 loop；Harness 负责把一次运行放进生命周期里。
 
+Lifecycle v2 中，Harness 保存 Core 的结构化 `end_reason`：正常回答和主动早停映射为
+`completed` 状态，异常和 turn limit 映射为 `failed`，主动取消将在下一阶段映射为
+`aborted`。
+
+`after_turn` Policy 通过独立的 Core `ShouldStopAfterTurn` 回调应用：Policy 仍在
+`after_turn` Hook 上返回 `terminate` 并把原因写入 Trace，Harness 只把最终动作转换为
+布尔停止决定。它与工具结果的 `terminate` 批次提示互不替代。
+
 ### 2. Hook 点治理
 
 Harness 要提供 Policy 可以插入的治理节点。
@@ -145,21 +153,22 @@ skill
 
 Harness 要把 Core 的运行过程接到 Session / Trace。
 
-第一版至少记录：
+Lifecycle v2 至少记录：
 
 ```text
-用户输入
+message_start / message_update / message_end
 模型开始
-模型 delta
-assistant message
-tool_call
+tool_execution_start / tool_execution_end
+turn_start / turn_end
+agent_start / agent_end
 policy decision
-tool_result
-final message
+policy evaluation
+confirmation request / response
 error
 ```
 
-Trace 是后续 Evo 的原材料。
+新 Trace 顶层带 `schema_version=2`。无版本历史记录按 v1 读取，Replay 同时兼容
+v1 的 `tool_call/tool_result` 和 v2 的工具执行事件。Trace 是后续 Evo 的原材料。
 
 ### 6. Domain Harness 装配能力
 

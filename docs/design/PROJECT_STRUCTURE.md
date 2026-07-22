@@ -158,8 +158,10 @@ Session 负责一个任务或对话窗口如何持续存在。
 - 记录用户输入
 - 记录模型输出
 - 记录工具调用和工具结果
+- 使用 Pi 风格的 message / turn / tool execution 生命周期事件
 - 记录 policy decision
 - 记录包含输入、最终决策和逐条决策的 policy evaluation 快照
+- 为新记录标记 schema v2，并保留 v1 读取兼容
 - 支持后续分析和 replay
 
 Trace 是演进的原材料。

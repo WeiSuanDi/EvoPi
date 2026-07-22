@@ -156,6 +156,9 @@ def load_before_tool_replay_cases(
         )
 
     for line_number, record in _read_records(path):
+        schema_version = _parse_schema_version(
+            record.get("schema_version", 1), line_number
+        )
         event_type = record.get("type")
         run_id = _parse_run_id(record.get("run_id"), line_number)
 
@@ -165,6 +168,24 @@ def load_before_tool_replay_cases(
                 append_pending(previous)
             data = _require_object(record.get("data"), line_number, "data")
             tool_call = _parse_tool_call(data.get("tool_call"), line_number)
+            pending[run_id] = _PendingToolCall(
+                run_id=run_id,
+                source_line=line_number,
+                tool_call=tool_call,
+            )
+            continue
+
+        if event_type == "tool_execution_start":
+            if schema_version != 2:
+                raise TraceReplayError(
+                    line_number,
+                    "tool_execution_start requires Trace schema version 2",
+                )
+            previous = pending.pop(run_id, None)
+            if previous is not None:
+                append_pending(previous)
+            data = _require_object(record.get("data"), line_number, "data")
+            tool_call = _parse_tool_execution_start(data, line_number)
             pending[run_id] = _PendingToolCall(
                 run_id=run_id,
                 source_line=line_number,
@@ -211,7 +232,7 @@ def load_before_tool_replay_cases(
             )
             continue
 
-        if event_type == "tool_result":
+        if event_type in {"tool_result", "tool_execution_end"}:
             item = pending.pop(run_id, None)
             if item is not None:
                 append_pending(item)
@@ -325,6 +346,30 @@ def _parse_run_id(value: Any, line_number: int) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise TraceReplayError(line_number, "run_id must be a string or null")
+
+
+def _parse_schema_version(value: Any, line_number: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TraceReplayError(line_number, "schema_version must be an integer")
+    if value not in {1, 2}:
+        raise TraceReplayError(
+            line_number,
+            f"unsupported Trace schema version: {value}",
+        )
+    return value
+
+
+def _parse_tool_execution_start(
+    data: dict[str, Any], line_number: int
+) -> ToolCall:
+    return _parse_tool_call(
+        {
+            "id": data.get("tool_call_id"),
+            "name": data.get("tool_name"),
+            "arguments": data.get("args"),
+        },
+        line_number,
+    )
 
 
 def _parse_tool_call(value: Any, line_number: int) -> ToolCall:

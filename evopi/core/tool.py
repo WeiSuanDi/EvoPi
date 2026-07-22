@@ -24,6 +24,7 @@ class ToolCall:
 class ToolResult:
     content: str
     is_error: bool = False
+    # A batch-level hint: skip the next model call only when every final result agrees.
     terminate: bool = False
     metadata: Metadata = field(default_factory=dict)
 

@@ -73,9 +73,12 @@ def test_coding_harness_writes_runs_and_traces_demo(tmp_path) -> None:
     assert results[0].tool_name == "write_file"
     assert results[1].content == "hello EvoPi"
     records = list(read_trace(trace_path))
-    assert sum(record["type"] == "tool_call" for record in records) == 2
+    assert all(record["schema_version"] == 2 for record in records)
+    assert sum(record["type"] == "tool_execution_start" for record in records) == 2
+    assert sum(record["type"] == "tool_execution_end" for record in records) == 2
     assert sum(record["type"] == "confirmation_request" for record in records) == 1
-    assert records[-2]["type"] == "agent_end" or records[-1]["type"] == "agent_end"
+    assert records[-1]["type"] == "agent_end"
+    assert records[-1]["data"]["reason"] == "completed"
 
 
 def test_coding_policies_block_escape_and_truncate_before_model_feedback(tmp_path) -> None:

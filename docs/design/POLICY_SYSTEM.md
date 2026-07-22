@@ -319,8 +319,8 @@ unchanged / changed / new / error
 
 `changed` 只表示行为发生变化，需要 Supervisor / Human Review，不自动使报告失败。
 Trace 解析错误、候选执行错误或没有可回放案例时，验证不通过。新 Trace 优先使用
-`policy_evaluation`；旧 Trace 回退解析相邻的 `tool_call + policy_decision`，避免已有
-执行记录失效。
+`policy_evaluation`；没有快照时，v1 Trace 回退解析 `tool_call + policy_decision`，
+v2 Trace 回退解析 `tool_execution_start + policy_decision`，避免已有执行记录失效。
 
 回放过程不得调用模型、执行工具或触发 Confirmation Handler。第一版也不重建完整
 消息历史，不支持依赖工具注册表、`after_tool_call` 结果或非空 `AgentContext` 的 Policy。
