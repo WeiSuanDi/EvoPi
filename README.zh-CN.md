@@ -112,6 +112,7 @@ from pathlib import Path
 
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
+from evopi.cli.confirmation import terminal_confirmation_handler
 
 
 async def main() -> None:
@@ -119,6 +120,7 @@ async def main() -> None:
         model=model_from_environment(),
         workspace=Path.cwd(),
         trace_path=Path(".evopi/trace.jsonl"),
+        confirmation_handler=terminal_confirmation_handler,
     )
     response = await harness.prompt("检查项目结构。")
     print(response.content)
@@ -134,11 +136,14 @@ asyncio.run(main())
 内置 `CodingHarness` 会注册限定在工作区内的目录查看、文件读取、文件写入和 Shell 命令工具。默认 Policy Pack 提供：
 
 - 危险 Shell 模式拦截；
+- 未被阻断的 Shell 命令执行前人工确认；
 - 写入目标工作区边界检查；
 - 工具输出截断；
 - 编辑后的测试提示。
 
 Policy 是普通的类型化 Python 组件，既可以单独注册，也可以组合成可复用的 Policy Pack。Policy 决策会与模型和工具事件一起写入运行时 Trace。
+
+`evopi` CLI 会自动安装交互式 `y/N` Confirmation Handler。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
 
 > [!IMPORTANT]
 > Policy 检查能够降低意外操作风险，但不能替代操作系统级沙箱。在处理不可信 Prompt、仓库或命令之前，请审查并强化相应策略。

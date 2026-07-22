@@ -76,6 +76,31 @@ shell_safety 是 Policy。
 - need_retry
 - validation_report
 
+## 内置工具确认 Policy
+
+`ToolConfirmationPolicy` 是通用的 `before_tool_call` Policy。它接收需要人工确认的
+工具名集合，命中后返回 `require_confirmation`，但不负责展示界面或收集用户输入。
+
+```python
+ToolConfirmationPolicy(tool_names={"shell_command"})
+```
+
+它与安全阻断 Policy 保持独立：
+
+```text
+普通 shell_command
+  → tool_confirmation: require_confirmation
+
+危险 shell_command
+  → tool_confirmation: require_confirmation
+  → shell_safety: block
+  → PolicyEngine 最终选择 block
+```
+
+因此人工确认不能覆盖明确的安全阻断。具体启用哪些工具由 Domain Harness 的 Policy
+Pack 决定，而不是硬编码在通用 Policy 中。当前 Coding Policy Pack 默认对
+`shell_command` 启用确认，工作区内的 `write_file` 不要求交互确认。
+
 ## 第一版 Policy 边界
 
 第一版 Policy 系统固定包含 6 项能力：

@@ -5,6 +5,7 @@ from evopi.policy.builtins import (
     OutputTruncationPolicy,
     ShellSafetyPolicy,
     TestAfterEditPolicy,
+    ToolConfirmationPolicy,
 )
 from evopi.policy.registry import PolicyPack
 
@@ -16,6 +17,7 @@ def coding_policy_pack(
         "coding",
         [
             ShellSafetyPolicy(),
+            ToolConfirmationPolicy(tool_names={"shell_command"}),
             FileWriteGuardPolicy(workspace=Path(workspace)),
             OutputTruncationPolicy(max_chars=max_output_chars),
             TestAfterEditPolicy(),

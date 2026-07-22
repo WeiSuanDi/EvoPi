@@ -207,20 +207,20 @@ Coding 是 EvoPi 的第一个验证场景，不是项目本体。
 
 命令行入口。
 
-第一版用于运行 demo、加载配置、触发简单 Agent 任务。
+负责加载模型与工作区配置、运行 CodingHarness、流式展示模型输出，并通过终端
+Confirmation Handler 收集 Shell 工具的 `y/N` 人工授权。
 
 ## docs
 
-设计和面试文档。
+项目设计文档。内部状态、路线和面试资料由本地协作文档维护，不进入公开仓库。
 
 当前重点：
 
 - 全局架构
 - Core 设计
+- Harness 设计
 - Policy 设计
-- MVP 路线
-- 简历表达
-- 面试问答
+- 项目结构
 
 ## examples
 

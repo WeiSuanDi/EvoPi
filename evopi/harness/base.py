@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 from evopi.core.agent import Agent
@@ -12,6 +13,11 @@ from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
 from evopi.core.tool import Tool, ToolCall, ToolResult
 from evopi.harness.context_manager import ContextManager, ContextProvider
+from evopi.harness.confirmation import (
+    ConfirmationHandler,
+    ConfirmationRequest,
+    ConfirmationResponse,
+)
 from evopi.harness.lifecycle import Lifecycle
 from evopi.harness.policy_manager import PolicyManager
 from evopi.harness.session_manager import SessionManager
@@ -35,6 +41,7 @@ class BaseHarness:
         system_prompt: str = "",
         trace_path: str | Path | None = None,
         max_turns: int = 20,
+        confirmation_handler: ConfirmationHandler | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
@@ -44,6 +51,7 @@ class BaseHarness:
         self.lifecycle = Lifecycle()
         self.session = SessionManager()
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
+        self.confirmation_handler = confirmation_handler
         self.agent = Agent(
             model=model,
             system_prompt=system_prompt,
@@ -133,15 +141,95 @@ class BaseHarness:
             )
         )
         final = evaluation.final
-        blocked = final.action in {"block", "require_confirmation"}
+        blocked = final.action == "block"
         reason = final.reason
         if final.action == "require_confirmation":
-            reason = reason or "Human confirmation is required but not configured"
+            request = ConfirmationRequest(
+                hook="before_tool_call",
+                reason=reason or "Human confirmation is required",
+                risk_level=final.risk_level,
+                policy_names=tuple(
+                    decision.policy_name
+                    for decision in evaluation.decisions
+                    if decision.action == "require_confirmation"
+                    and decision.policy_name is not None
+                ),
+                tool_call=call,
+                arguments=dict(
+                    evaluation.arguments
+                    if evaluation.arguments is not None
+                    else call.arguments
+                ),
+                metadata={"session_id": self.session.session_id},
+            )
+            response = await self._request_confirmation(request)
+            blocked = not response.approved
+            reason = response.reason or (
+                "Human confirmation approved"
+                if response.approved
+                else "Human confirmation denied"
+            )
         return BeforeToolCallResult(
             block=blocked,
             reason=reason,
             arguments=evaluation.arguments,
         )
+
+    async def _request_confirmation(
+        self, request: ConfirmationRequest
+    ) -> ConfirmationResponse:
+        self.lifecycle.wait_for_confirmation()
+        try:
+            await self.agent.emit_event(
+                CoreEvent(type="confirmation_request", data={"request": request})
+            )
+            response = await self._resolve_confirmation(request)
+        finally:
+            self.lifecycle.resume()
+
+        await self.agent.emit_event(
+            CoreEvent(type="confirmation_response", data={"response": response})
+        )
+        return response
+
+    async def _resolve_confirmation(
+        self, request: ConfirmationRequest
+    ) -> ConfirmationResponse:
+        if self.confirmation_handler is None:
+            return ConfirmationResponse(
+                request_id=request.id,
+                decision="deny",
+                reason="Human confirmation is required but no handler is configured",
+                metadata={"automatic": True},
+            )
+
+        try:
+            response = self.confirmation_handler(request)
+            if inspect.isawaitable(response):
+                response = await response
+        except Exception as exc:
+            return ConfirmationResponse(
+                request_id=request.id,
+                decision="deny",
+                reason=f"Confirmation handler failed: {type(exc).__name__}: {exc}",
+                metadata={"automatic": True, "handler_error": type(exc).__name__},
+            )
+
+        if not isinstance(response, ConfirmationResponse):
+            return ConfirmationResponse(
+                request_id=request.id,
+                decision="deny",
+                reason="Confirmation handler returned an invalid response",
+                metadata={"automatic": True, "handler_error": "invalid_response"},
+            )
+        if response.request_id != request.id:
+            return ConfirmationResponse(
+                request_id=request.id,
+                decision="deny",
+                reason="Confirmation response did not match the active request",
+                metadata={"automatic": True, "handler_error": "request_id_mismatch"},
+            )
+        return response
 
     async def _after_tool_call(
         self,

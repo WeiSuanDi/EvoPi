@@ -10,13 +10,26 @@ class Lifecycle:
         self.state = RuntimeState()
 
     def start(self) -> None:
-        if self.state.status is LifecycleState.RUNNING:
+        if self.state.status in {
+            LifecycleState.RUNNING,
+            LifecycleState.WAITING_FOR_CONFIRMATION,
+        }:
             raise RuntimeError("Harness is already running")
         self.state.status = LifecycleState.RUNNING
         self.state.last_error = None
 
     def complete(self) -> None:
         self.state.status = LifecycleState.COMPLETED
+
+    def wait_for_confirmation(self) -> None:
+        if self.state.status is not LifecycleState.RUNNING:
+            raise RuntimeError("Harness must be running before it can wait for confirmation")
+        self.state.status = LifecycleState.WAITING_FOR_CONFIRMATION
+
+    def resume(self) -> None:
+        if self.state.status is not LifecycleState.WAITING_FOR_CONFIRMATION:
+            raise RuntimeError("Harness is not waiting for confirmation")
+        self.state.status = LifecycleState.RUNNING
 
     def fail(self, exc: BaseException) -> None:
         self.state.status = LifecycleState.FAILED

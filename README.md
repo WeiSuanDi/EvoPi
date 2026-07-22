@@ -112,6 +112,7 @@ from pathlib import Path
 
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
+from evopi.cli.confirmation import terminal_confirmation_handler
 
 
 async def main() -> None:
@@ -119,6 +120,7 @@ async def main() -> None:
         model=model_from_environment(),
         workspace=Path.cwd(),
         trace_path=Path(".evopi/trace.jsonl"),
+        confirmation_handler=terminal_confirmation_handler,
     )
     response = await harness.prompt("Review the project structure.")
     print(response.content)
@@ -134,11 +136,14 @@ For a minimal agent without the coding harness, see [`examples/basic_agent.py`](
 The included `CodingHarness` registers workspace-scoped tools for directory listing, file reads, file writes, and shell commands. Its default policy pack adds:
 
 - destructive shell-pattern blocking;
+- human confirmation before non-blocked shell commands;
 - write-target containment within the workspace;
 - tool-output truncation;
 - post-edit test guidance.
 
 Policies are ordinary typed Python components and can be registered individually or grouped into reusable policy packs. Policy decisions are emitted into the runtime trace alongside model and tool events.
+
+The `evopi` CLI installs an interactive `y/N` confirmation handler automatically. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
 
 > [!IMPORTANT]
 > Policy checks reduce accidental risk but are not an operating-system sandbox. Review and strengthen policies before running EvoPi against untrusted prompts, repositories, or commands.

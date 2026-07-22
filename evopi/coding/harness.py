@@ -9,6 +9,7 @@ from evopi.coding.prompts import CODING_SYSTEM_PROMPT
 from evopi.coding.tools import coding_tools
 from evopi.core.model import Model
 from evopi.harness.base import BaseHarness
+from evopi.harness.confirmation import ConfirmationHandler
 
 
 class CodingHarness(BaseHarness):
@@ -21,6 +22,7 @@ class CodingHarness(BaseHarness):
         max_turns: int = 20,
         max_output_chars: int = 20_000,
         system_prompt: str = CODING_SYSTEM_PROMPT,
+        confirmation_handler: ConfirmationHandler | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         super().__init__(
@@ -28,6 +30,7 @@ class CodingHarness(BaseHarness):
             system_prompt=system_prompt,
             trace_path=trace_path,
             max_turns=max_turns,
+            confirmation_handler=confirmation_handler,
         )
         for tool in coding_tools(self.workspace):
             self.register_tool(tool)

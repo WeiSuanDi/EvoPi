@@ -7,6 +7,7 @@ from typing import Literal, TypeAlias
 
 from evopi.core.tool import ToolResult
 from evopi.core.types import JsonObject, Metadata
+from evopi.policy.types import RiskLevel
 
 PolicyAction: TypeAlias = Literal[
     "allow",
@@ -22,7 +23,7 @@ PolicyAction: TypeAlias = Literal[
 class PolicyDecision:
     action: PolicyAction = "allow"
     reason: str = ""
-    risk_level: str = "low"
+    risk_level: RiskLevel = "low"
     rewritten_args: JsonObject | None = None
     replacement_result: ToolResult | None = None
     metadata: Metadata = field(default_factory=dict)

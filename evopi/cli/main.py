@@ -8,6 +8,7 @@ from pathlib import Path
 
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
+from evopi.cli.confirmation import terminal_confirmation_handler
 from evopi.core.events import CoreEvent
 
 
@@ -27,6 +28,7 @@ async def _run(args: argparse.Namespace) -> int:
         model=model,
         workspace=args.workspace,
         trace_path=args.trace,
+        confirmation_handler=terminal_confirmation_handler,
     )
 
     def display(event: CoreEvent) -> None:

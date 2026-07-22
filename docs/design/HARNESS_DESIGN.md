@@ -74,6 +74,29 @@ on_error
 
 Hook 是插槽，不是具体规则。
 
+### Human Confirmation 最小运行协议
+
+当 Policy 返回 `require_confirmation` 时，由 Harness 负责把结构化请求交给外部
+`ConfirmationHandler`，Core 不参与具体交互。
+
+第一版运行语义：
+
+```text
+require_confirmation
+  → lifecycle: waiting_for_confirmation
+  → ConfirmationHandler(request)
+  → approve: lifecycle 恢复 running，继续执行
+  → deny: lifecycle 恢复 running，安全阻断并回填工具结果
+```
+
+约束：
+
+- 没有配置 Handler 时默认拒绝。
+- Handler 异常、返回类型错误或 request ID 不匹配时默认拒绝。
+- 确认请求与响应必须进入 Trace，并与当前 `run_id` 关联。
+- 当前只支持进程内等待；跨进程恢复属于后续 Session / Checkpoint 能力。
+- CLI、Web UI 和远程审批只实现 Handler，不改变 Policy 或 Core。
+
 ### 3. Policy 调度
 
 Harness 不负责具体规则判断，但负责调用 Policy，并把 PolicyDecision 应用到运行过程。
@@ -228,4 +251,3 @@ trace replay
 supervisor review
 human confirmation
 ```
-

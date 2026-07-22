@@ -10,6 +10,7 @@ from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent
 from evopi.core.tool import ToolCall
 from evopi.core.tool import Tool
+from evopi.harness.confirmation import ConfirmationRequest, ConfirmationResponse
 from evopi.trace.reader import read_trace
 
 
@@ -21,6 +22,10 @@ class ScriptedModel:
 
     async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
         yield ModelComplete(message=next(self._messages))
+
+
+def approve(request: ConfirmationRequest) -> ConfirmationResponse:
+    return ConfirmationResponse(request_id=request.id, decision="approve")
 
 
 def test_coding_harness_writes_runs_and_traces_demo(tmp_path) -> None:
@@ -53,7 +58,12 @@ def test_coding_harness_writes_runs_and_traces_demo(tmp_path) -> None:
         ]
     )
     trace_path = tmp_path / "trace.jsonl"
-    harness = CodingHarness(model=model, workspace=tmp_path, trace_path=trace_path)
+    harness = CodingHarness(
+        model=model,
+        workspace=tmp_path,
+        trace_path=trace_path,
+        confirmation_handler=approve,
+    )
 
     answer = asyncio.run(harness.prompt("Create hello.py and run it"))
 
@@ -64,6 +74,7 @@ def test_coding_harness_writes_runs_and_traces_demo(tmp_path) -> None:
     assert results[1].content == "hello EvoPi"
     records = list(read_trace(trace_path))
     assert sum(record["type"] == "tool_call" for record in records) == 2
+    assert sum(record["type"] == "confirmation_request" for record in records) == 1
     assert records[-2]["type"] == "agent_end" or records[-1]["type"] == "agent_end"
 
 
@@ -102,7 +113,12 @@ def test_coding_policies_block_escape_and_truncate_before_model_feedback(tmp_pat
             AssistantMessage(content="handled", stop_reason="stop"),
         ]
     )
-    harness = CodingHarness(model=model, workspace=tmp_path, max_output_chars=5)
+    harness = CodingHarness(
+        model=model,
+        workspace=tmp_path,
+        max_output_chars=5,
+        confirmation_handler=approve,
+    )
     harness.register_tool(
         Tool(
             name="write_file",
