@@ -145,6 +145,28 @@ Policy 是普通的类型化 Python 组件，既可以单独注册，也可以�
 
 `evopi` CLI 会自动安装交互式 `y/N` Confirmation Handler。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
 
+### 离线 Policy 回放
+
+EvoPi 可以用历史 JSONL Trace 回放候选 `before_tool_call` Policy，整个过程不会调用模型、执行工具或请求人工确认：
+
+```python
+import asyncio
+
+from evopi.policy.builtins import ShellSafetyPolicy
+from evopi.validators import load_before_tool_replay_cases, replay_policy
+
+policy = ShellSafetyPolicy()
+cases = load_before_tool_replay_cases(
+    ".evopi/trace.jsonl",
+    policy_name=policy.name,
+)
+report = asyncio.run(replay_policy(policy, cases))
+
+print(report.unchanged_count, report.changed_count, report.passed)
+```
+
+回放会将候选决策与历史中同名 Policy 的决策进行比较。`action` 或改写参数发生变化时，结果标记为 `changed`，交给 Supervisor 或人工审查；Trace 结构损坏、候选 Policy 执行异常和空案例集会使报告不通过。对于尚未记录 Policy Evaluation 快照的旧 Trace，解析器会回退读取工具调用与 Policy 决策序列。
+
 > [!IMPORTANT]
 > Policy 检查能够降低意外操作风险，但不能替代操作系统级沙箱。在处理不可信 Prompt、仓库或命令之前，请审查并强化相应策略。
 

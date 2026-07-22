@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import Any
 
 from evopi.core.agent import Agent
 from evopi.core.agent_loop import BeforeToolCallResult
@@ -283,19 +284,27 @@ class BaseHarness:
                 data={"hook": context.hook, "decision": decision},
             )
             await self.agent.emit_event(event)
+        await self.agent.emit_event(
+            CoreEvent(
+                type="policy_evaluation",
+                data=self._policy_evaluation_data(context, evaluation),
+            )
+        )
         return evaluation
 
     async def _on_core_event(self, event: CoreEvent) -> None:
         if self.trace_writer is not None:
             self.trace_writer(event)
         if event.type == "error":
-            evaluation = await self.policies.engine.evaluate(
-                PolicyContext(
-                    hook="on_error",
-                    agent_context=AgentContext(messages=self.agent.messages, tools=self.agent.tools),
-                    error=str(event.data.get("error", "")),
-                )
+            context = PolicyContext(
+                hook="on_error",
+                agent_context=AgentContext(
+                    messages=self.agent.messages,
+                    tools=self.agent.tools,
+                ),
+                error=str(event.data.get("error", "")),
             )
+            evaluation = await self.policies.engine.evaluate(context)
             if self.trace_writer is not None:
                 for decision in evaluation.decisions:
                     self.trace_writer.write(
@@ -305,6 +314,31 @@ class BaseHarness:
                             data={"hook": "on_error", "decision": decision},
                         )
                     )
+                self.trace_writer.write(
+                    TraceRecord(
+                        type="policy_evaluation",
+                        run_id=event.run_id,
+                        data=self._policy_evaluation_data(context, evaluation),
+                    )
+                )
+
+    @staticmethod
+    def _policy_evaluation_data(
+        context: PolicyContext,
+        evaluation: PolicyEvaluation,
+    ) -> dict[str, Any]:
+        return {
+            "hook": context.hook,
+            "input": {
+                "tool_call": context.tool_call,
+                "arguments": context.arguments,
+                "tool_result": context.tool_result,
+                "error": context.error,
+                "metadata": context.metadata,
+            },
+            "final": evaluation.final,
+            "decisions": evaluation.decisions,
+        }
 
     @staticmethod
     def _raise_if_blocked(evaluation: PolicyEvaluation, subject: str) -> None:

@@ -145,6 +145,28 @@ Policies are ordinary typed Python components and can be registered individually
 
 The `evopi` CLI installs an interactive `y/N` confirmation handler automatically. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
 
+### Offline policy replay
+
+EvoPi can replay a candidate `before_tool_call` Policy against historical JSONL traces without calling a model, executing tools, or requesting human confirmation:
+
+```python
+import asyncio
+
+from evopi.policy.builtins import ShellSafetyPolicy
+from evopi.validators import load_before_tool_replay_cases, replay_policy
+
+policy = ShellSafetyPolicy()
+cases = load_before_tool_replay_cases(
+    ".evopi/trace.jsonl",
+    policy_name=policy.name,
+)
+report = asyncio.run(replay_policy(policy, cases))
+
+print(report.unchanged_count, report.changed_count, report.passed)
+```
+
+Replay compares the candidate decision with the historical decision from the same Policy name. Changes to the action or rewritten arguments are reported as `changed` for supervisor or human review, while malformed traces, candidate execution errors, and empty case sets fail the report. Traces created before Policy evaluation snapshots were introduced remain supported through the legacy tool-call and decision sequence.
+
 > [!IMPORTANT]
 > Policy checks reduce accidental risk but are not an operating-system sandbox. Review and strengthen policies before running EvoPi against untrusted prompts, repositories, or commands.
 
