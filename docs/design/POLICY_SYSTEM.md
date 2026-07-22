@@ -292,6 +292,40 @@ flowchart LR
 
 这个闭环表达的是：Agent 可以辅助产生新策略，但策略必须经过验证才能进入 runtime。
 
+## `before_tool_call` Trace Replay
+
+第一版 Trace Replay 是候选 Policy 的离线回归验证层，不是完整 Agent 回放。
+
+Harness 在每次 Policy Engine 求值后继续记录逐条 `policy_decision`，并额外记录一个
+`policy_evaluation` 快照。快照包含 Hook、原始工具调用、参数、最终决策和各 Policy
+决策，保证回放不依赖模型消息历史或运行中的工具注册表。
+
+```text
+历史 JSONL Trace
+  ↓ 提取 before_tool_call 案例
+空 AgentContext + 工具名 + 原始参数
+  ↓ 只运行候选 Policy
+候选决策与同名历史决策比较
+  ↓
+unchanged / changed / new / error
+```
+
+状态语义固定为：
+
+- 历史中没有同名 Policy：`new`。
+- `action` 或 `rewritten_args` 不同：`changed`。
+- 两者相同：`unchanged`。
+- Policy Engine 捕获到候选执行异常：`error`。
+
+`changed` 只表示行为发生变化，需要 Supervisor / Human Review，不自动使报告失败。
+Trace 解析错误、候选执行错误或没有可回放案例时，验证不通过。新 Trace 优先使用
+`policy_evaluation`；旧 Trace 回退解析相邻的 `tool_call + policy_decision`，避免已有
+执行记录失效。
+
+回放过程不得调用模型、执行工具或触发 Confirmation Handler。第一版也不重建完整
+消息历史，不支持依赖工具注册表、`after_tool_call` 结果或非空 `AgentContext` 的 Policy。
+公共入口由 `evopi.validators` 导出，暂不增加 CLI 子命令。
+
 ## Evo 边界
 
 EvoPi 的演进对象分层：

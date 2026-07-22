@@ -196,3 +196,9 @@ def test_error_hook_trace_and_failed_lifecycle(tmp_path) -> None:
         record["type"] == "policy_decision" and record["data"]["hook"] == "on_error"
         for record in records
     )
+    assert any(
+        record["type"] == "policy_evaluation"
+        and record["data"]["hook"] == "on_error"
+        and record["data"]["input"]["error"] == "RuntimeError: provider failed"
+        for record in records
+    )

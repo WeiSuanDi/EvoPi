@@ -20,6 +20,7 @@ CoreEventType: TypeAlias = Literal[
     "tool_result",
     "final_message",
     "policy_decision",
+    "policy_evaluation",
     "confirmation_request",
     "confirmation_response",
     "error",

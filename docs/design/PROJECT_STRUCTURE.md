@@ -159,6 +159,7 @@ Session 负责一个任务或对话窗口如何持续存在。
 - 记录模型输出
 - 记录工具调用和工具结果
 - 记录 policy decision
+- 记录包含输入、最终决策和逐条决策的 policy evaluation 快照
 - 支持后续分析和 replay
 
 Trace 是演进的原材料。
@@ -184,10 +185,11 @@ SubAgent 也必须受 Harness / Policy 管理。
 
 - schema check
 - dry-run
-- trace replay
+- `before_tool_call` trace replay（新 Trace 快照与旧 Trace 回退解析）
 - failure case replay
 - supervisor review 辅助
 
+当前验证层已提供 Policy schema check、隔离 dry-run 和离线工具级 Trace Replay。
 候选 Policy / Harness 改动必须经过验证后才能启用。
 
 ## evopi/coding
