@@ -100,5 +100,7 @@ def test_cli_injects_confirmation_handler_and_runs_approved_shell(
     records = list(read_trace(trace_path))
     response = next(item for item in records if item["type"] == "confirmation_response")
     assert response["data"]["response"]["decision"] == "approve"
-    tool_result = next(item for item in records if item["type"] == "tool_result")
-    assert "cli-confirmed" in tool_result["data"]["message"]["content"]
+    tool_result = next(
+        item for item in records if item["type"] == "tool_execution_end"
+    )
+    assert "cli-confirmed" in tool_result["data"]["result"]["content"]

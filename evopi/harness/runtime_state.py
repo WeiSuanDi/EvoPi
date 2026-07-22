@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from evopi.core.run import AgentEndReason
+
 
 class LifecycleState(StrEnum):
     IDLE = "idle"
@@ -18,6 +20,7 @@ class LifecycleState(StrEnum):
 @dataclass(slots=True)
 class RuntimeState:
     status: LifecycleState = LifecycleState.IDLE
+    end_reason: AgentEndReason | None = None
     last_error: str | None = None
 
 

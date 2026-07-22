@@ -5,11 +5,13 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from typing import Awaitable, Callable, TypeAlias
+from uuid import uuid4
 
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener, notify
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
+from evopi.core.run import AgentLoopResult
 from evopi.core.stream import ModelComplete, TextDelta, ToolCallDelta
 from evopi.core.tool import ToolCall, ToolResult
 from evopi.core.types import JsonObject
@@ -52,6 +54,9 @@ AfterModelCall: TypeAlias = Callable[
 AfterTurn: TypeAlias = Callable[
     [AgentContext, AssistantMessage, list[ToolResultMessage]], Awaitable[None] | None
 ]
+ShouldStopAfterTurn: TypeAlias = Callable[
+    [AgentContext, AssistantMessage, list[ToolResultMessage]], Awaitable[bool] | bool
+]
 
 
 class AgentLoop:
@@ -71,8 +76,37 @@ class AgentLoop:
         prepare_context: PrepareContext | None = None,
         after_model_call: AfterModelCall | None = None,
         after_turn: AfterTurn | None = None,
+        should_stop_after_turn: ShouldStopAfterTurn | None = None,
         run_id: str | None = None,
     ) -> AssistantMessage:
+        result = await self.run_with_result(
+            model=model,
+            context=context,
+            emit=emit,
+            before_tool_call=before_tool_call,
+            after_tool_call=after_tool_call,
+            prepare_context=prepare_context,
+            after_model_call=after_model_call,
+            after_turn=after_turn,
+            should_stop_after_turn=should_stop_after_turn,
+            run_id=run_id,
+        )
+        return result.message
+
+    async def run_with_result(
+        self,
+        *,
+        model: Model,
+        context: AgentContext,
+        emit: EventListener | None = None,
+        before_tool_call: BeforeToolCall | None = None,
+        after_tool_call: AfterToolCall | None = None,
+        prepare_context: PrepareContext | None = None,
+        after_model_call: AfterModelCall | None = None,
+        after_turn: AfterTurn | None = None,
+        should_stop_after_turn: ShouldStopAfterTurn | None = None,
+        run_id: str | None = None,
+    ) -> AgentLoopResult:
         for turn in range(1, self.max_turns + 1):
             await notify(emit, CoreEvent(type="turn_start", run_id=run_id, data={"turn": turn}))
             await notify(
@@ -92,29 +126,39 @@ class AgentLoop:
                 if inspect.isawaitable(replacement):
                     replacement = await replacement
                 if replacement is not None:
+                    replacement.id = assistant.id
                     assistant = replacement
             context.append(assistant)
             await notify(
                 emit,
-                CoreEvent(type="assistant_message", run_id=run_id, data={"message": assistant}),
+                CoreEvent(type="message_end", run_id=run_id, data={"message": assistant}),
             )
 
             if not assistant.tool_calls:
                 await notify(
                     emit,
-                    CoreEvent(type="turn_end", run_id=run_id, data={"turn": turn}),
+                    CoreEvent(
+                        type="turn_end",
+                        run_id=run_id,
+                        data={
+                            "turn": turn,
+                            "message": assistant,
+                            "tool_results": [],
+                        },
+                    ),
                 )
-                if after_turn is not None:
-                    value = after_turn(context, assistant, [])
-                    if inspect.isawaitable(value):
-                        await value
-                await notify(
-                    emit,
-                    CoreEvent(type="final_message", run_id=run_id, data={"message": assistant}),
+                should_stop = await self._finish_turn(
+                    context=context,
+                    assistant=assistant,
+                    results=[],
+                    after_turn=after_turn,
+                    should_stop_after_turn=should_stop_after_turn,
                 )
-                return assistant
+                return AgentLoopResult(
+                    message=assistant,
+                    end_reason="terminated" if should_stop else "completed",
+                )
 
-            terminate = False
             tool_messages: list[ToolResultMessage] = []
             for tool_call in assistant.tool_calls:
                 result = await self._execute_tool_call(
@@ -134,30 +178,76 @@ class AgentLoop:
                     terminate=result.terminate,
                     metadata=result.metadata,
                 )
+                await notify(
+                    emit,
+                    CoreEvent(
+                        type="message_start",
+                        run_id=run_id,
+                        data={
+                            "message_id": message.id,
+                            "role": message.role,
+                        },
+                    ),
+                )
                 context.append(message)
                 tool_messages.append(message)
                 await notify(
                     emit,
-                    CoreEvent(type="tool_result", run_id=run_id, data={"message": message}),
+                    CoreEvent(type="message_end", run_id=run_id, data={"message": message}),
                 )
-                terminate = terminate or result.terminate
+
+            terminate = bool(tool_messages) and all(
+                message.terminate for message in tool_messages
+            )
 
             await notify(
                 emit,
-                CoreEvent(type="turn_end", run_id=run_id, data={"turn": turn}),
+                CoreEvent(
+                    type="turn_end",
+                    run_id=run_id,
+                    data={
+                        "turn": turn,
+                        "message": assistant,
+                        "tool_results": tool_messages,
+                    },
+                ),
             )
-            if after_turn is not None:
-                value = after_turn(context, assistant, tool_messages)
-                if inspect.isawaitable(value):
-                    await value
-            if terminate:
-                await notify(
-                    emit,
-                    CoreEvent(type="final_message", run_id=run_id, data={"message": assistant}),
+            should_stop = await self._finish_turn(
+                context=context,
+                assistant=assistant,
+                results=tool_messages,
+                after_turn=after_turn,
+                should_stop_after_turn=should_stop_after_turn,
+            )
+            if terminate or should_stop:
+                return AgentLoopResult(
+                    message=assistant,
+                    end_reason="terminated",
                 )
-                return assistant
 
         raise TurnLimitError(f"Agent loop exceeded {self.max_turns} turns")
+
+    @staticmethod
+    async def _finish_turn(
+        *,
+        context: AgentContext,
+        assistant: AssistantMessage,
+        results: list[ToolResultMessage],
+        after_turn: AfterTurn | None,
+        should_stop_after_turn: ShouldStopAfterTurn | None,
+    ) -> bool:
+        if after_turn is not None:
+            value = after_turn(context, assistant, results)
+            if inspect.isawaitable(value):
+                await value
+        if should_stop_after_turn is None:
+            return False
+        should_stop = should_stop_after_turn(context, assistant, results)
+        if inspect.isawaitable(should_stop):
+            should_stop = await should_stop
+        if not isinstance(should_stop, bool):
+            raise TypeError("should_stop_after_turn must return bool")
+        return should_stop
 
     async def _consume_model(
         self,
@@ -168,6 +258,7 @@ class AgentLoop:
         prepare_context: PrepareContext | None,
     ) -> AssistantMessage:
         complete: AssistantMessage | None = None
+        message_id = uuid4().hex
         model_context = context.snapshot()
         if prepare_context is not None:
             replacement = prepare_context(model_context)
@@ -175,23 +266,38 @@ class AgentLoop:
                 replacement = await replacement
             if replacement is not None:
                 model_context = replacement
+        await notify(
+            emit,
+            CoreEvent(
+                type="message_start",
+                run_id=run_id,
+                data={"message_id": message_id, "role": "assistant"},
+            ),
+        )
         async for event in model.stream(model_context):
             if isinstance(event, TextDelta):
                 await notify(
                     emit,
                     CoreEvent(
-                        type="model_delta",
+                        type="message_update",
                         run_id=run_id,
-                        data={"kind": "text", "delta": event.delta},
+                        data={
+                            "message_id": message_id,
+                            "role": "assistant",
+                            "kind": "text",
+                            "delta": event.delta,
+                        },
                     ),
                 )
             elif isinstance(event, ToolCallDelta):
                 await notify(
                     emit,
                     CoreEvent(
-                        type="model_delta",
+                        type="message_update",
                         run_id=run_id,
                         data={
+                            "message_id": message_id,
+                            "role": "assistant",
                             "kind": "tool_call",
                             "index": event.index,
                             "delta": event.arguments_delta,
@@ -209,6 +315,7 @@ class AgentLoop:
 
         if complete is None:
             raise ModelProtocolError("Model stream ended without a completion")
+        complete.id = message_id
         return complete
 
     async def _execute_tool_call(
@@ -224,7 +331,15 @@ class AgentLoop:
     ) -> ToolResult:
         await notify(
             emit,
-            CoreEvent(type="tool_call", run_id=run_id, data={"tool_call": tool_call}),
+            CoreEvent(
+                type="tool_execution_start",
+                run_id=run_id,
+                data={
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "args": tool_call.arguments,
+                },
+            ),
         )
         arguments = dict(tool_call.arguments)
         if before_tool_call is not None:
@@ -233,11 +348,18 @@ class AgentLoop:
                 decision = await decision
             if decision is not None:
                 if decision.block:
-                    return ToolResult(
+                    result = ToolResult(
                         content=decision.reason or "Tool execution was blocked",
                         is_error=True,
                         metadata={"blocked": True},
                     )
+                    await self._emit_tool_execution_end(
+                        emit=emit,
+                        run_id=run_id,
+                        tool_call=tool_call,
+                        result=result,
+                    )
+                    return result
                 if decision.arguments is not None:
                     arguments = decision.arguments
 
@@ -253,7 +375,35 @@ class AgentLoop:
                 replacement = await replacement
             if replacement is not None:
                 result = replacement
+        await self._emit_tool_execution_end(
+            emit=emit,
+            run_id=run_id,
+            tool_call=tool_call,
+            result=result,
+        )
         return result
+
+    @staticmethod
+    async def _emit_tool_execution_end(
+        *,
+        emit: EventListener | None,
+        run_id: str | None,
+        tool_call: ToolCall,
+        result: ToolResult,
+    ) -> None:
+        await notify(
+            emit,
+            CoreEvent(
+                type="tool_execution_end",
+                run_id=run_id,
+                data={
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "result": result,
+                    "is_error": result.is_error,
+                },
+            ),
+        )
 
 
 __all__ = [
@@ -266,5 +416,6 @@ __all__ = [
     "BeforeToolCallResult",
     "ModelProtocolError",
     "PrepareContext",
+    "ShouldStopAfterTurn",
     "TurnLimitError",
 ]

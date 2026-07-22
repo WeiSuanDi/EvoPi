@@ -38,13 +38,14 @@ EvoPi/
 - 管理认证和 credential
 - 将厂商协议转成 EvoPi 内部 Model 接口
 
-第一版可以先做得很薄，甚至先用 FakeModel。
+当前已实现 OpenAI-compatible Chat Completions 与 Anthropic Messages 流式适配器；
+测试中使用脚本化 Model 作为替身，真实模型调用仍是产品主路径。
 
 ## evopi/core
 
 最小 Agent Runtime。
 
-固定八项能力：
+固定九项能力：
 
 ```text
 基础类型协议
@@ -158,8 +159,10 @@ Session 负责一个任务或对话窗口如何持续存在。
 - 记录用户输入
 - 记录模型输出
 - 记录工具调用和工具结果
+- 使用 Pi 风格的 message / turn / tool execution 生命周期事件
 - 记录 policy decision
 - 记录包含输入、最终决策和逐条决策的 policy evaluation 快照
+- 为新记录标记 schema v2，并保留 v1 读取兼容
 - 支持后续分析和 replay
 
 Trace 是演进的原材料。

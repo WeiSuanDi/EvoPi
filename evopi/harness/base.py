@@ -61,7 +61,7 @@ class BaseHarness:
             after_tool_call=self._after_tool_call,
             prepare_context=self._prepare_context,
             after_model_call=self._after_model_call,
-            after_turn=self._after_turn,
+            should_stop_after_turn=self._should_stop_after_turn,
         )
         self.agent.subscribe(self._on_core_event)
 
@@ -95,9 +95,19 @@ class BaseHarness:
         try:
             answer = await self.agent.prompt(content)
         except Exception as exc:
-            self.lifecycle.fail(exc)
+            end_reason = (
+                self.agent.last_run.end_reason
+                if self.agent.last_run is not None
+                else "error"
+            )
+            self.lifecycle.fail(exc, end_reason=end_reason)
             raise
-        self.lifecycle.complete()
+        end_reason = (
+            self.agent.last_run.end_reason
+            if self.agent.last_run is not None
+            else "completed"
+        )
+        self.lifecycle.complete(end_reason=end_reason)
         return answer
 
     def reset(self) -> None:
@@ -260,14 +270,14 @@ class BaseHarness:
             final_result.terminate = True
         return final_result
 
-    async def _after_turn(
+    async def _should_stop_after_turn(
         self,
         context: AgentContext,
         assistant: AssistantMessage,
         results: list[ToolResultMessage],
-    ) -> None:
+    ) -> bool:
         edited = [message.metadata.get("path") for message in results if message.tool_name == "write_file"]
-        await self._evaluate(
+        evaluation = await self._evaluate(
             PolicyContext(
                 hook="after_turn",
                 agent_context=context,
@@ -275,6 +285,7 @@ class BaseHarness:
                 metadata={"edited_files": [path for path in edited if path]},
             )
         )
+        return evaluation.final.action == "terminate"
 
     async def _evaluate(self, context: PolicyContext) -> PolicyEvaluation:
         evaluation = await self.policies.engine.evaluate(context)

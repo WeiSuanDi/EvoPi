@@ -32,6 +32,7 @@ class JsonlTraceWriter:
     def write(self, record: TraceRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         value = {
+            "schema_version": record.schema_version,
             "type": record.type,
             "run_id": record.run_id,
             "created_at": record.created_at.isoformat(),

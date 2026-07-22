@@ -10,7 +10,6 @@ import pytest
 
 from evopi.coding import CodingHarness
 from evopi.core.context import AgentContext
-from evopi.core.events import CoreEvent
 from evopi.core.messages import AssistantMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent
 from evopi.core.tool import Tool, ToolCall, ToolResult
@@ -19,6 +18,7 @@ from evopi.policy.builtins import ShellSafetyPolicy
 from evopi.policy.decisions import PolicyAction, PolicyDecision
 from evopi.policy.types import HookName, PolicyContext, RiskLevel
 from evopi.trace.reader import read_trace
+from evopi.trace.events import TraceRecord
 from evopi.trace.writer import JsonlTraceWriter
 from evopi.validators import (
     TraceReplayError,
@@ -137,6 +137,7 @@ def test_real_coding_trace_replays_same_policy_without_runtime_side_effects(
     ]
 
     assert len(evaluations) == 2
+    assert all(record["schema_version"] == 2 for record in records)
     assert evaluations[0]["data"]["input"]["tool_call"]["name"] == "shell_command"
     assert evaluations[0]["data"]["input"]["arguments"] == {
         "command": "python -m pytest"
@@ -223,9 +224,17 @@ def test_legacy_tool_call_and_policy_decision_trace_is_supported(tmp_path: Path)
         name="shell_command",
         arguments={"command": "python -m pytest"},
     )
-    writer(CoreEvent(type="tool_call", run_id="legacy-run", data={"tool_call": call}))
-    writer(
-        CoreEvent(
+    writer.write(
+        TraceRecord(
+            schema_version=1,
+            type="tool_call",
+            run_id="legacy-run",
+            data={"tool_call": call},
+        )
+    )
+    writer.write(
+        TraceRecord(
+            schema_version=1,
             type="policy_decision",
             run_id="legacy-run",
             data={
@@ -238,8 +247,9 @@ def test_legacy_tool_call_and_policy_decision_trace_is_supported(tmp_path: Path)
             },
         )
     )
-    writer(
-        CoreEvent(
+    writer.write(
+        TraceRecord(
+            schema_version=1,
             type="tool_result",
             run_id="legacy-run",
             data={"tool_call": call, "tool_result": ToolResult(content="ok")},
@@ -254,6 +264,78 @@ def test_legacy_tool_call_and_policy_decision_trace_is_supported(tmp_path: Path)
     assert cases[0].recorded_decision is not None
     assert report.unchanged_count == 1
     assert report.passed is True
+
+
+def test_v2_tool_execution_fallback_trace_is_supported(tmp_path: Path) -> None:
+    trace_path = tmp_path / "v2-fallback.jsonl"
+    writer = JsonlTraceWriter(trace_path)
+    writer.write(
+        TraceRecord(
+            type="tool_execution_start",
+            run_id="v2-run",
+            data={
+                "tool_call_id": "v2-call",
+                "tool_name": "shell_command",
+                "args": {"command": "python -m pytest"},
+            },
+        )
+    )
+    writer.write(
+        TraceRecord(
+            type="policy_decision",
+            run_id="v2-run",
+            data={
+                "hook": "before_tool_call",
+                "decision": PolicyDecision(
+                    action="allow",
+                    reason="v2 baseline",
+                    policy_name="shell_safety",
+                ),
+            },
+        )
+    )
+    writer.write(
+        TraceRecord(
+            type="tool_execution_end",
+            run_id="v2-run",
+            data={
+                "tool_call_id": "v2-call",
+                "tool_name": "shell_command",
+                "result": ToolResult(content="ok"),
+                "is_error": False,
+            },
+        )
+    )
+
+    cases = load_before_tool_replay_cases(trace_path, policy_name="shell_safety")
+    report = asyncio.run(replay_policy(ShellSafetyPolicy(), cases))
+
+    assert len(cases) == 1
+    assert cases[0].tool_call.id == "v2-call"
+    assert report.unchanged_count == 1
+    assert report.passed is True
+
+
+def test_unsupported_trace_schema_version_reports_source_line(tmp_path: Path) -> None:
+    trace_path = tmp_path / "future.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "type": "agent_start",
+                "run_id": "run",
+                "data": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TraceReplayError) as captured:
+        load_before_tool_replay_cases(trace_path, policy_name="shell_safety")
+
+    assert captured.value.line_number == 1
+    assert "unsupported Trace schema version" in captured.value.reason
 
 
 @pytest.mark.parametrize(
