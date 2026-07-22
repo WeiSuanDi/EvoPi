@@ -1,0 +1,41 @@
+[project]
+name = "evopi"
+version = "0.1.0"
+description = "An evolution-ready Python agent runtime with pluggable harness and policy governance."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.13.0",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+evopi = "evopi.cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evopi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["references", ".tmp"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+exclude = "^(references|\\.tmp)/"

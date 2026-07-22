@@ -1,0 +1,64 @@
+# Private project notes and local references
+/PROJECT_STATE.md
+/THREAD_HANDOFF.md
+/docs/interview/
+/docs/roadmap/
+/references/
+/.agents/
+/.codex/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.python-version
+
+# EvoPi runtime data
+/.evopi/
+/.tmp/
+/logs/
+*.log
+
+# Python bytecode and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+__pypackages__/
+
+# Packaging
+build/
+dist/
+site/
+.eggs/
+*.egg
+*.egg-info/
+wheels/
+pip-wheel-metadata/
+
+# Tests, coverage, and static analysis
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.pyright/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
