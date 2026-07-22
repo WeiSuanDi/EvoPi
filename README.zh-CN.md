@@ -139,6 +139,15 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。主动取消将在下一阶段接通。
 
+可以直接运行以下命令验证批次契约：
+
+```powershell
+python -m pytest tests/core/test_agent_loop.py::test_tool_batch_terminates_only_when_every_final_result_agrees -vv
+python -m pytest tests/core/test_agent_loop.py::test_mixed_tool_batch_continues_to_summary -vv
+```
+
+第一个案例证明所有兄弟工具都会执行，随后全 `terminate` 批次才停止运行；第二个案例证明只要有一个结果不终止，循环就会继续调用模型生成总结。
+
 ## 运行时治理
 
 内置 `CodingHarness` 会注册限定在工作区内的目录查看、文件读取、文件写入和 Shell 命令工具。默认 Policy Pack 提供：

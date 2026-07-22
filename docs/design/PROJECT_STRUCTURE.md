@@ -38,13 +38,14 @@ EvoPi/
 - 管理认证和 credential
 - 将厂商协议转成 EvoPi 内部 Model 接口
 
-第一版可以先做得很薄，甚至先用 FakeModel。
+当前已实现 OpenAI-compatible Chat Completions 与 Anthropic Messages 流式适配器；
+测试中使用脚本化 Model 作为替身，真实模型调用仍是产品主路径。
 
 ## evopi/core
 
 最小 Agent Runtime。
 
-固定八项能力：
+固定九项能力：
 
 ```text
 基础类型协议

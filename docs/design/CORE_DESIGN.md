@@ -37,7 +37,7 @@ Core 不应该承担具体场景治理。
 9. 流式输出支持
 ```
 
-这八项对应的原则是：
+这九项对应的原则是：
 
 ```text
 Core 只负责让 Agent 能稳定跑起来。
@@ -66,7 +66,10 @@ evopi/core/tool.py
   Tool / ToolCall / ToolResult；定义工具如何被模型请求、执行和回填。
 
 evopi/core/events.py
-  Core 级事件；表达 message、tool_call、tool_result、error 等运行过程。
+  Core 级事件；表达 agent、turn、message、tool execution 和 error 等运行过程。
+
+evopi/core/run.py
+  AgentLoopResult / AgentRunState / AgentEndReason；表达一次运行的结构化结果。
 
 evopi/core/agent_loop.py
   最小 Agent Loop；负责 model_call → tool_call → tool_result → next_turn。
@@ -326,7 +329,8 @@ Message 只描述事实，不直接做治理判断。
 terminate = True
 ```
 
-只表示工具结果要求当前 loop 停止。
+只表示该工具结果同意在当前批次完成后跳过下一次模型调用。只有非空批次中的每个
+最终工具结果都同意，Core 才会提前结束运行。
 
 至于为什么停止、是否允许停止、是否通知用户，是 Harness / Policy 的事情。
 

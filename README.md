@@ -139,6 +139,15 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`. Active cancellation is reserved for the next lifecycle phase.
 
+To verify the batch contract directly, run:
+
+```powershell
+python -m pytest tests/core/test_agent_loop.py::test_tool_batch_terminates_only_when_every_final_result_agrees -vv
+python -m pytest tests/core/test_agent_loop.py::test_mixed_tool_batch_continues_to_summary -vv
+```
+
+The first case proves that every sibling tool executes before an all-terminating batch stops the run. The second proves that one non-terminating result causes the loop to continue to the model summary.
+
 ## Runtime governance
 
 The included `CodingHarness` registers workspace-scoped tools for directory listing, file reads, file writes, and shell commands. Its default policy pack adds:
