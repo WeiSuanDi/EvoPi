@@ -299,7 +299,9 @@ flowchart LR
     Pattern --> Draft["生成 Policy 草稿"]
     Draft --> Schema["Schema 校验"]
     Schema --> DryRun["Dry-run / 单元测试"]
-    DryRun --> Human["人工确认"]
+    DryRun --> Replay["Trace Replay"]
+    Replay --> Supervisor["Supervisor Report"]
+    Supervisor --> Human["人工确认 / Activation Gate"]
     Human --> Registry["注册启用"]
 ```
 
@@ -337,7 +339,40 @@ v2 Trace 回退解析 `tool_execution_start + policy_decision`，避免已有执
 
 回放过程不得调用模型、执行工具或触发 Confirmation Handler。第一版也不重建完整
 消息历史，不支持依赖工具注册表、`after_tool_call` 结果或非空 `AgentContext` 的 Policy。
-公共入口由 `evopi.validators` 导出，暂不增加 CLI 子命令。
+公共回放入口由 `evopi.validators` 导出；Supervisor CLI 可以加载案例并编排这些既有
+Validator，但回放器本身仍保持独立。
+
+## Supervisor 离线审查报告
+
+Supervisor Report v1 面向单个 Policy 候选，将 Schema、Dry Run 和 Trace Replay 的
+既有结果聚合为统一技术结论：
+
+```text
+passed / review_required / failed
+```
+
+`build_policy_review_report()` 是同步、确定性、无副作用的纯聚合入口。它不运行
+Validator、不执行候选 Policy、不调用模型或工具，也不注册、启用或替换 Policy。CLI
+`evopi policy review MODULE:ATTRIBUTE` 负责在外层依次运行 Schema、可选 Dry Run 和
+可选 Replay，再将结果交给聚合器。
+
+证据规则固定为：
+
+- Schema 必需；任何已提供检查失败、Replay 执行错误、空 Replay、Policy 名称不匹配
+  或不适用于当前 Hook 的 Replay 输入都会产生 `failed`。
+- 缺失 Dry Run 会产生 `review_required`。
+- `before_tool_call` Policy 缺失 Replay 会产生 `review_required`；其他 Hook 将 Replay
+  检查标记为 `not_applicable`。
+- Validator warning 与 Replay `changed/new` 会产生可定位 Finding，并使报告进入
+  `review_required`；`unchanged` 不产生待审 Finding。
+- 状态优先级始终是 `failed > review_required > passed`。
+
+Finding 只保存案例 ID、工具名、Trace 行号、历史/候选 action 和参数是否发生改写，
+不复制原始工具参数或潜在敏感内容。`risk_level` 进入候选快照，但不会单独触发人工
+审查；生成式候选仍由 Schema warning 进入审查。
+
+Supervisor 的 `passed` 仅表示当前技术证据没有待处理项，不等于人工批准或已经启用。
+Human Approval、ApprovalRecord 和 Activation Gate 属于后续独立边界。
 
 ## Evo 边界
 

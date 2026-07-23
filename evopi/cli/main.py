@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -12,6 +13,7 @@ from prompt_toolkit import PromptSession
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
+from evopi.cli.policy_review import policy_review_main
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
 
@@ -82,8 +84,15 @@ async def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args[:2] == ["policy", "review"]:
+        return policy_review_main(raw_args[2:])
+    args = (
+        build_parser().parse_args()
+        if argv is None
+        else build_parser().parse_args(raw_args)
+    )
     try:
         return asyncio.run(_run(args))
     except (ValueError, RuntimeError) as exc:

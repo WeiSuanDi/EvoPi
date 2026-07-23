@@ -10,15 +10,33 @@ from evopi.validators.replay import (
     replay_policy,
 )
 from evopi.validators.schema_validator import PolicySchemaValidator
+from evopi.validators.supervisor import (
+    PolicyCandidateSnapshot,
+    SupervisorCheckResult,
+    SupervisorCheckStatus,
+    SupervisorFinding,
+    SupervisorFindingSeverity,
+    SupervisorReport,
+    SupervisorStatus,
+    build_policy_review_report,
+)
 
 __all__ = [
     "PolicySchemaValidator",
+    "PolicyCandidateSnapshot",
     "ReplayCase",
     "ReplayCaseResult",
     "ReplayReport",
     "ReplayStatus",
+    "SupervisorCheckResult",
+    "SupervisorCheckStatus",
+    "SupervisorFinding",
+    "SupervisorFindingSeverity",
+    "SupervisorReport",
+    "SupervisorStatus",
     "TraceReplayError",
     "ValidationResult",
+    "build_policy_review_report",
     "dry_run_policy",
     "load_before_tool_replay_cases",
     "replay_policy",

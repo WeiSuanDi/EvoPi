@@ -205,6 +205,20 @@ print(report.unchanged_count, report.changed_count, report.passed)
 
 Replay compares the candidate decision with the historical decision from the same Policy name. Changes to the action or rewritten arguments are reported as `changed` for supervisor or human review, while malformed traces, candidate execution errors, and empty case sets fail the report. New Trace records use lifecycle schema v2; unversioned v1 records and traces created before Policy evaluation snapshots remain replayable without rewriting the historical files.
 
+### Supervisor policy review
+
+EvoPi can combine schema validation, isolated dry-run evidence, and Trace Replay into a deterministic technical review report:
+
+```bash
+evopi policy review my_project.policies:candidate \
+  --dry-run-cases my_project.review_cases:shell_cases \
+  --trace .evopi/trace.jsonl
+```
+
+Use `--json` for a stable JSON-ready report. The command exits with `0` for `passed`, `2` for `review_required`, and `1` for `failed` or a loading error. A missing dry run, a missing applicable replay, validator warnings, or changed/new replay cases require review; invalid or contradictory evidence fails the report.
+
+The Supervisor report is an offline evidence artifact. It does not call a model, execute tools, register the candidate, or authorize activation. Human approval and the Activation Gate remain separate controls.
+
 > [!IMPORTANT]
 > Policy checks reduce accidental risk but are not an operating-system sandbox. Review and strengthen policies before running EvoPi against untrusted prompts, repositories, or commands.
 

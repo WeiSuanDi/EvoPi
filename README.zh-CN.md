@@ -205,6 +205,20 @@ print(report.unchanged_count, report.changed_count, report.passed)
 
 回放会将候选决策与历史中同名 Policy 的决策进行比较。`action` 或改写参数发生变化时，结果标记为 `changed`，交给 Supervisor 或人工审查；Trace 结构损坏、候选 Policy 执行异常和空案例集会使报告不通过。新 Trace 使用生命周期 schema v2；无版本的 v1 记录和尚未包含 Policy Evaluation 快照的旧 Trace 都能直接回放，无需改写历史文件。
 
+### Supervisor Policy 审查
+
+EvoPi 可以将 Schema 校验、隔离 Dry Run 与 Trace Replay 聚合成确定性的技术审查报告：
+
+```bash
+evopi policy review my_project.policies:candidate \
+  --dry-run-cases my_project.review_cases:shell_cases \
+  --trace .evopi/trace.jsonl
+```
+
+添加 `--json` 可输出稳定的 JSON-ready 报告。命令退出码为：`0` 表示 `passed`，`2` 表示 `review_required`，`1` 表示 `failed` 或加载错误。缺失 Dry Run、缺失适用的 Replay、Validator warning 或 `changed/new` 回放案例会要求审查；无效或相互矛盾的证据会使报告失败。
+
+Supervisor Report 是离线技术证据工件。它不会调用模型、执行工具、注册候选 Policy 或授权启用；Human Approval 与 Activation Gate 仍是独立控制层。
+
 > [!IMPORTANT]
 > Policy 检查能够降低意外操作风险，但不能替代操作系统级沙箱。在处理不可信 Prompt、仓库或命令之前，请审查并强化相应策略。
 

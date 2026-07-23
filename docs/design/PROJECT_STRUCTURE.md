@@ -191,10 +191,14 @@ SubAgent 也必须受 Harness / Policy 管理。
 - dry-run
 - `before_tool_call` trace replay（新 Trace 快照与旧 Trace 回退解析）
 - failure case replay
-- supervisor review 辅助
+- 单 Policy Supervisor 技术审查报告
 
 当前验证层已提供 Policy schema check、隔离 dry-run 和离线工具级 Trace Replay。
-候选 Policy / Harness 改动必须经过验证后才能启用。
+`build_policy_review_report()` 将既有验证证据纯聚合为
+`passed / review_required / failed`，并通过 `evopi policy review MODULE:ATTRIBUTE`
+提供文本或 JSON 输出。Supervisor 不执行 Validator、不调用模型、不修改 Registry
+或候选状态；报告也不是 ApprovalRecord。候选 Policy 必须在独立的 Human /
+Activation Gate 授权后才能启用。
 
 ## evopi/coding
 
