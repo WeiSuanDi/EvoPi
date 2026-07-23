@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, TypeAlias
 
+from evopi.core.cancellation import AbortSignal, call_with_optional_signal
+
 CoreEventType: TypeAlias = Literal[
     "agent_start",
     "agent_end",
+    "abort_requested",
     "turn_start",
     "turn_end",
     "model_start",
@@ -34,13 +37,18 @@ class CoreEvent:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-EventListener: TypeAlias = Callable[[CoreEvent], Awaitable[None] | None]
+EventListener: TypeAlias = Callable[..., Awaitable[None] | None]
 
 
-async def notify(listener: EventListener | None, event: CoreEvent) -> None:
+async def notify(
+    listener: EventListener | None,
+    event: CoreEvent,
+    *,
+    signal: AbortSignal | None = None,
+) -> None:
     if listener is None:
         return
-    result = listener(event)
+    result = call_with_optional_signal(listener, event, signal=signal)
     if inspect.isawaitable(result):
         await result
 

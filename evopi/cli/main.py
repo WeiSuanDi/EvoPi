@@ -6,9 +6,11 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from prompt_toolkit import PromptSession
+
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
-from evopi.cli.confirmation import terminal_confirmation_handler
+from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.core.events import CoreEvent
 
 
@@ -22,13 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    prompt = args.prompt or input("EvoPi> ").strip()
+    prompt = args.prompt
+    if prompt is None:
+        prompt = (await PromptSession[str]().prompt_async("EvoPi> ")).strip()
     model = model_from_environment(args.provider)
     harness = CodingHarness(
         model=model,
         workspace=args.workspace,
         trace_path=args.trace,
-        confirmation_handler=terminal_confirmation_handler,
+        confirmation_handler=async_terminal_confirmation_handler,
     )
 
     def display(event: CoreEvent) -> None:
@@ -49,6 +53,9 @@ def main() -> int:
     except (ValueError, RuntimeError) as exc:
         print(f"EvoPi error: {exc}")
         return 1
+    except KeyboardInterrupt:
+        print("\nEvoPi aborted.")
+        return 130
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ class PolicyContext:
     tool_result: ToolResult | None = None
     arguments: JsonObject | None = None
     error: str | None = None
+    aborted: bool = False
     metadata: Metadata = field(default_factory=dict)
 
 

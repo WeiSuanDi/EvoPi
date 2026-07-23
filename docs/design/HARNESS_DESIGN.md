@@ -50,6 +50,7 @@ Harness 要知道 Agent 当前处在什么运行状态。
 idle
 running
 waiting_for_confirmation
+aborting
 failed
 completed
 aborted
@@ -58,8 +59,12 @@ aborted
 Core 只负责跑 loop；Harness 负责把一次运行放进生命周期里。
 
 Lifecycle v2 中，Harness 保存 Core 的结构化 `end_reason`：正常回答和主动早停映射为
-`completed` 状态，异常和 turn limit 映射为 `failed`，主动取消将在下一阶段映射为
-`aborted`。
+`completed` 状态，异常和 turn limit 映射为 `failed`，主动取消先进入 `aborting`，
+完成清理后映射为 `aborted`。
+
+`BaseHarness.abort()` 委托给当前 Agent，并公开同一个只读 `signal`、`is_running` 和
+`wait_for_idle()`。Abort 不属于可由 Policy 否决的普通治理决定；Policy 通过
+`PolicyContext.aborted` 观察清理阶段，并继续记录 Trace。
 
 `after_turn` Policy 通过独立的 Core `ShouldStopAfterTurn` 回调应用：Policy 仍在
 `after_turn` Hook 上返回 `terminate` 并把原因写入 Trace，Harness 只把最终动作转换为
@@ -95,6 +100,7 @@ require_confirmation
   → ConfirmationHandler(request)
   → approve: lifecycle 恢复 running，继续执行
   → deny: lifecycle 恢复 running，安全阻断并回填工具结果
+  → cancelled: lifecycle 进入 aborting，完成清理后变为 aborted
 ```
 
 约束：
@@ -102,6 +108,7 @@ require_confirmation
 - 没有配置 Handler 时默认拒绝。
 - Handler 异常、返回类型错误或 request ID 不匹配时默认拒绝。
 - 确认请求与响应必须进入 Trace，并与当前 `run_id` 关联。
+- 等待确认期间的 Abort 会取消异步 Handler，并生成可追踪的 `cancelled` Response。
 - 当前只支持进程内等待；跨进程恢复属于后续 Session / Checkpoint 能力。
 - CLI、Web UI 和远程审批只实现 Handler，不改变 Policy 或 Core。
 

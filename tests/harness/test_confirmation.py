@@ -252,3 +252,72 @@ def test_waiting_for_confirmation_is_still_an_active_run() -> None:
         lifecycle.start()
 
     assert lifecycle.state.status is LifecycleState.WAITING_FOR_CONFIRMATION
+
+
+def test_abort_while_waiting_for_confirmation_returns_cancelled_response(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        executed: list[str] = []
+        trace_path = tmp_path / "aborted-confirmation.jsonl"
+
+        async def wait_for_decision(
+            request: ConfirmationRequest,
+            *,
+            signal=None,
+        ) -> ConfirmationResponse:
+            entered.set()
+            await asyncio.Event().wait()
+            return ConfirmationResponse(request_id=request.id, decision="approve")
+
+        harness = _build_harness(
+            handler=wait_for_decision,
+            executed=executed,
+            trace_path=trace_path,
+        )
+        task = asyncio.create_task(harness.prompt("echo"))
+        await entered.wait()
+        assert harness.state.status is LifecycleState.WAITING_FOR_CONFIRMATION
+
+        harness.abort()
+        answer = await task
+
+        assert answer.stop_reason == "tool_use"
+        assert executed == []
+        assert harness.state.status is LifecycleState.ABORTED
+        assert harness.state.end_reason == "aborted"
+        records = list(read_trace(trace_path))
+        response = next(
+            record for record in records if record["type"] == "confirmation_response"
+        )
+        assert response["data"]["response"]["decision"] == "cancelled"
+        assert response["data"]["response"]["metadata"]["aborted"] is True
+        event_types = [record["type"] for record in records]
+        assert event_types.index("abort_requested") < event_types.index(
+            "confirmation_response"
+        )
+        assert records[-1]["type"] == "agent_end"
+        assert records[-1]["data"]["reason"] == "aborted"
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_confirmation_requests_run_abort() -> None:
+    executed: list[str] = []
+
+    def cancel(request: ConfirmationRequest) -> ConfirmationResponse:
+        return ConfirmationResponse(
+            request_id=request.id,
+            decision="cancelled",
+            reason="Cancelled by terminal user",
+        )
+
+    harness = _build_harness(handler=cancel, executed=executed)
+
+    asyncio.run(harness.prompt("echo"))
+
+    assert executed == []
+    assert harness.state.status is LifecycleState.ABORTED
+    assert harness.agent.last_run is not None
+    assert harness.agent.last_run.end_reason == "aborted"

@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from evopi.core.cancellation import AbortSignal
 from evopi.ai.api.base import iter_sse_data, raise_for_model_status
 from evopi.ai.auth.resolve import resolve_api_key
 from evopi.core.context import AgentContext
@@ -53,7 +54,12 @@ class OpenAICompatibleModel:
     def name(self) -> str:
         return self.model
 
-    async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
+    async def stream(
+        self,
+        context: AgentContext,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [_convert_message(message) for message in context.messages],
@@ -80,6 +86,8 @@ class OpenAICompatibleModel:
             ) as response:
                 await raise_for_model_status(response)
                 async for chunk in iter_sse_data(response):
+                    if signal is not None and signal.aborted:
+                        return
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue

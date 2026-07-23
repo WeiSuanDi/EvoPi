@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from evopi.core.cancellation import AbortSignal
 from evopi.ai.api.base import ModelRequestError, iter_sse_data, raise_for_model_status
 from evopi.ai.auth.resolve import resolve_api_key
 from evopi.core.context import AgentContext
@@ -52,7 +53,12 @@ class AnthropicMessagesModel:
     def name(self) -> str:
         return self.model
 
-    async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
+    async def stream(
+        self,
+        context: AgentContext,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
         system = "\n\n".join(message.content for message in context.system_messages)
         payload: dict[str, Any] = {
             "model": self.model,
@@ -93,6 +99,8 @@ class AnthropicMessagesModel:
             ) as response:
                 await raise_for_model_status(response)
                 async for event in iter_sse_data(response):
+                    if signal is not None and signal.aborted:
+                        return
                     event_type = event.get("type")
                     if event_type == "error":
                         error = event.get("error") or {}

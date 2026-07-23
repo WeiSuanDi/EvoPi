@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
+from evopi.core.cancellation import AbortSignal
 from evopi.core.context import AgentContext
 from evopi.core.stream import ModelStreamEvent
 
@@ -14,7 +15,12 @@ class Model(Protocol):
     @property
     def name(self) -> str: ...
 
-    def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]: ...
+    def stream(
+        self,
+        context: AgentContext,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]: ...
 
 
 __all__ = ["Model"]

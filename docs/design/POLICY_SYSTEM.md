@@ -39,6 +39,11 @@ before_tool_call 是 Hook。
 shell_safety 是 Policy。
 ```
 
+所有 Policy Hook 都可通过 `PolicyContext.aborted` 观察当前运行是否已进入清理阶段。
+Abort 是 Core/Harness 的运行级控制事实，不参与普通 Policy 冲突合并：Policy 可以记录、
+脱敏或验证中止结果，但不能重新允许已经中止的模型调用或工具执行，也不能把中止结果
+改写为成功的 `terminate=True`。
+
 ## 三类核心 Policy
 
 ### BeforeToolPolicy
