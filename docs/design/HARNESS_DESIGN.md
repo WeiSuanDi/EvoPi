@@ -169,6 +169,15 @@ skill
 
 Harness 要把 Core 的运行过程接到 Session / Trace。
 
+Session 由 Harness 持有，裸 Agent 保持 Session-neutral。`BaseHarness` 默认使用内存
+Session；调用方可注入持久 `SessionManager`。Harness 在 `agent_start`、
+正式 `message_end` 和 `agent_end` 上追加 Run 边界与消息，并在 Run 结束后创建
+Checkpoint。失败 Model Attempt 的 `committed=False` 消息只进入 Trace。
+
+恢复时 Harness 先注入当前 SystemMessage，再装载 Session 中的 User、Assistant 与
+ToolResult 消息；模型、工具、Policy 和 Context Provider 始终使用当前配置。运行时
+指纹或工作区变化产生 warning，但不会自动切回历史可执行对象。
+
 Lifecycle v2 至少记录：
 
 ```text
@@ -180,6 +189,7 @@ agent_start / agent_end
 policy decision
 policy evaluation
 confirmation request / response
+session_start / session_checkpoint / session_error
 error
 ```
 
@@ -213,7 +223,7 @@ add_context_provider
 ```text
 复杂记忆系统
 复杂 skill 检索
-session tree
+session branch / fork / compact
 subagent tree
 自动 compact
 自动 evolution

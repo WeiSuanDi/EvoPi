@@ -12,6 +12,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **可插拔 Harness** — 为具体领域组合 Prompt、工具、上下文、生命周期行为和 Policy。
 - **Policy 运行时治理** — 可在 Hook 上允许、阻止、改写、验证或终止操作。
 - **可靠的 Provider 边界** — 内置 Anthropic Messages 与 OpenAI-compatible 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
+- **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
 - **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
 
@@ -24,6 +25,7 @@ flowchart LR
     C --> M["模型适配器"]
     C --> T["工具注册表"]
     H --> P["Policy Engine"]
+    H --> S["Session / Checkpoint"]
     H --> X["Trace"]
     P -. "治理 Hook" .-> C
 ```
@@ -34,6 +36,7 @@ flowchart LR
 - **Harness** 组装运行时行为并提供治理 Hook。
 - **Policy** 在 Hook 上作出结构化决策。
 - **Tools** 提供能力，但不自行决定何时适合使用。
+- **Session** 跨 Run 与进程保存已经提交的对话状态。
 - **Trace** 保存执行记录，为调试、评估和受控演进提供依据。
 
 ## 环境要求
@@ -111,6 +114,22 @@ evopi --no-retry '执行任务，但不要自动重试模型。'
 
 在 PowerShell 中，当 Prompt 含空格或引号时，建议使用单引号包裹整个 Prompt。
 
+### Session
+
+CLI 默认自动继续当前工作区最近更新的 Session。需要时可以显式选择：
+
+```powershell
+evopi --new-session '开始一项独立任务。'
+evopi --session SESSION_ID '继续这个指定任务。'
+evopi --no-session '本次不写入磁盘 Session。'
+evopi session list
+evopi session list --all --json
+```
+
+可用 `--session-root PATH` 或 `EVOPI_SESSION_DIR` 覆盖默认的
+`~/.evopi/sessions/`。Session 信息与恢复 warning 写入 stderr，模型文本继续写入
+stdout。
+
 ## Python API
 
 ```python
@@ -120,23 +139,34 @@ from pathlib import Path
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
+from evopi.session import SessionManager
 
 
 async def main() -> None:
+    workspace = Path.cwd()
+    session = SessionManager.continue_recent(workspace)
     harness = CodingHarness(
         model=model_from_environment(),
-        workspace=Path.cwd(),
+        workspace=workspace,
         trace_path=Path(".evopi/trace.jsonl"),
         confirmation_handler=async_terminal_confirmation_handler,
+        session_manager=session,
     )
-    response = await harness.prompt("检查项目结构。")
-    print(response.content)
+    try:
+        response = await harness.prompt("检查项目结构。")
+        print(response.content)
+    finally:
+        harness.close()
 
 
 asyncio.run(main())
 ```
 
 不使用编码 Harness 的最小 Agent 示例位于 [`examples/basic_agent.py`](examples/basic_agent.py)，可直接运行的 CLI 入口示例位于 [`examples/coding_agent.py`](examples/coding_agent.py)。
+
+库中的 Harness 在未传入 `SessionManager` 时使用内存 Session，因此导入 EvoPi 不会
+隐式创建全局文件。持久 Session Log 会以本地明文保存 Prompt、模型回复和工具输出，
+应像保护 Trace 目录一样保护 Session 根目录。
 
 ## 生命周期与终止
 

@@ -27,6 +27,9 @@ CoreEventType: TypeAlias = Literal[
     "policy_evaluation",
     "confirmation_request",
     "confirmation_response",
+    "session_start",
+    "session_checkpoint",
+    "session_error",
     "error",
 ]
 

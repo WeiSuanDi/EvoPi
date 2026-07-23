@@ -143,12 +143,16 @@ Skill 是任务经验包，不是底层工具。
 
 职责：
 
-- session 状态
-- session tree
-- context compact
-- checkpoint
+- 严格的 Session Header / Entry / Message Codec
+- 追加式 JSONL Session Log 和 Tree-ready 父子关系
+- 跨平台独占锁与工作区分桶
+- Run-end Checkpoint 原子写入、校验和日志回退
+- 中断 Run 闭合与未知 ToolResult 恢复
+- 运行时指纹比较和结构化恢复 warning
 
-Session 负责一个任务或对话窗口如何持续存在。
+Session 负责一个任务或对话窗口如何跨 Run、跨 CLI 进程持续存在。v1 只维护单一活动
+路径，不实现 branch/fork/compact。完整协议见
+[`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
 
 ## evopi/trace
 
@@ -219,7 +223,9 @@ Coding 是 EvoPi 的第一个验证场景，不是项目本体。
 
 负责加载模型与工作区配置、运行 CodingHarness、流式展示模型输出，并通过异步终端
 Confirmation Handler 收集 Shell 工具的 `y/N` 人工授权。第一次 `Ctrl+C` 请求优雅
-Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 决策。
+Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 决策。普通 Prompt
+默认继续当前工作区最近 Session，并支持 `--new-session / --session / --no-session /
+--session-root`；`evopi session list` 提供只读列表。
 
 ## docs
 
@@ -231,6 +237,7 @@ Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 
 - Core 设计
 - Harness 设计
 - Policy 设计
+- Session / Checkpoint 设计
 - 项目结构
 
 ## examples

@@ -11,6 +11,9 @@ class PolicyManager:
     def register(self, policy: Policy, *, replace: bool = False) -> None:
         self.registry.register(policy, replace=replace)
 
+    def all(self) -> list[Policy]:
+        return self.registry.all()
+
     def load_pack(self, pack: PolicyPack) -> None:
         self.registry.load_pack(pack)
 

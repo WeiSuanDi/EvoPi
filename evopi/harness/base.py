@@ -13,7 +13,11 @@ from evopi.core.agent_loop import BeforeToolCallResult
 from evopi.core.cancellation import AbortSignal, call_with_optional_signal
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
-from evopi.core.messages import AssistantMessage, ToolResultMessage
+from evopi.core.messages import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
 from evopi.core.model import Model
 from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool, ToolCall, ToolResult
@@ -25,11 +29,16 @@ from evopi.harness.confirmation import (
 )
 from evopi.harness.lifecycle import Lifecycle
 from evopi.harness.policy_manager import PolicyManager
-from evopi.harness.session_manager import SessionManager
 from evopi.harness.tool_manager import ToolManager
 from evopi.policy.decisions import PolicyEvaluation
 from evopi.policy.registry import PolicyPack
 from evopi.policy.types import Policy, PolicyContext
+from evopi.session import (
+    RuntimeFingerprint,
+    SessionError,
+    SessionManager,
+    build_runtime_fingerprint,
+)
 from evopi.trace.events import TraceRecord
 from evopi.trace.writer import JsonlTraceWriter
 
@@ -48,6 +57,7 @@ class BaseHarness:
         max_turns: int = 20,
         retry_config: ModelRetryConfig | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
@@ -55,9 +65,14 @@ class BaseHarness:
         self.policies = PolicyManager()
         self.context = ContextManager()
         self.lifecycle = Lifecycle()
-        self.session = SessionManager()
+        self.session = session_manager or SessionManager.in_memory()
+        self.trace_path = Path(trace_path).resolve() if trace_path is not None else None
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
         self.confirmation_handler = confirmation_handler
+        self._runtime_fingerprint: RuntimeFingerprint | None = None
+        self._session_started_emitted = False
+        self._session_failure: SessionError | None = None
+        self._pending_session_events: list[CoreEvent] = []
         self.agent = Agent(
             model=model,
             system_prompt=system_prompt,
@@ -69,6 +84,7 @@ class BaseHarness:
             after_model_call=self._after_model_call,
             should_stop_after_turn=self._should_stop_after_turn,
         )
+        self.agent.messages.extend(self.session.messages)
         self.agent.subscribe(self._on_core_event)
 
     @property
@@ -111,15 +127,19 @@ class BaseHarness:
         return self.agent.subscribe(listener)
 
     async def prompt(self, content: str) -> AssistantMessage:
-        self.lifecycle.start()
         self.agent.tools = self.tools.all()
+        self._runtime_fingerprint = self._build_runtime_fingerprint()
+        self.session.compare_runtime(self._runtime_fingerprint)
+        self.lifecycle.start()
         try:
             answer = await self.agent.prompt(content)
         except asyncio.CancelledError:
+            await self._emit_pending_session_events()
             error = self.agent.last_run.error if self.agent.last_run is not None else None
             self.lifecycle.abort(error)
             raise
         except Exception as exc:
+            await self._emit_pending_session_events()
             end_reason = (
                 self.agent.last_run.end_reason
                 if self.agent.last_run is not None
@@ -127,6 +147,7 @@ class BaseHarness:
             )
             self.lifecycle.fail(exc, end_reason=end_reason)
             raise
+        await self._emit_pending_session_events()
         end_reason = (
             self.agent.last_run.end_reason
             if self.agent.last_run is not None
@@ -140,9 +161,21 @@ class BaseHarness:
         return answer
 
     def reset(self) -> None:
+        if self.is_running:
+            raise RuntimeError("Cannot reset a running Harness")
+        replacement = self.session.new_session()
         self.agent.reset()
-        self.session.reset()
+        self.session = replacement
         self.lifecycle.reset()
+        self._runtime_fingerprint = None
+        self._session_started_emitted = False
+        self._session_failure = None
+        self._pending_session_events.clear()
+
+    def close(self) -> None:
+        if self.is_running:
+            raise RuntimeError("Cannot close a running Harness")
+        self.session.close()
 
     async def _prepare_context(
         self,
@@ -414,8 +447,33 @@ class BaseHarness:
         return evaluation
 
     async def _on_core_event(self, event: CoreEvent) -> None:
-        if self.trace_writer is not None:
-            self.trace_writer(event)
+        if event.type == "agent_start" and not self._session_started_emitted:
+            self._session_started_emitted = True
+            await self.agent.emit_event(
+                CoreEvent(
+                    type="session_start",
+                    run_id=event.run_id,
+                    data={
+                        "session_id": self.session.session_id,
+                        "reason": self.session.recovery_info.reason,
+                        "persistent": self.session.is_persistent,
+                        "workspace": self.session.workspace,
+                        "attached_workspace": self.session.attached_workspace,
+                        "checkpoint_id": self.session.recovery_info.checkpoint_id,
+                        "warnings": list(self.session.recovery_info.warnings),
+                    },
+                )
+            )
+        if event.type == "agent_end" and self._session_failure is None:
+            await self._persist_session_event_checked(event)
+            await self._emit_pending_session_events()
+            if self.trace_writer is not None:
+                self.trace_writer(event)
+        else:
+            if self.trace_writer is not None:
+                self.trace_writer(event)
+            if self._session_failure is None:
+                await self._persist_session_event_checked(event)
         if event.type == "abort_requested":
             self.lifecycle.request_abort()
         if event.type == "agent_end" and event.data.get("reason") == "aborted":
@@ -452,6 +510,131 @@ class BaseHarness:
                         data=self._policy_evaluation_data(context, evaluation),
                     )
                 )
+
+    async def _persist_session_event_checked(self, event: CoreEvent) -> None:
+        try:
+            self._persist_session_event(event)
+        except SessionError as exc:
+            self._session_failure = exc
+            await self.agent.emit_event(
+                CoreEvent(
+                    type="session_error",
+                    run_id=event.run_id,
+                    data={
+                        "operation": event.type,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "recoverable": False,
+                    },
+                )
+            )
+            raise
+
+    def _persist_session_event(self, event: CoreEvent) -> None:
+        if event.type == "agent_start":
+            if event.run_id is None or self._runtime_fingerprint is None:
+                raise RuntimeError(
+                    "Session run_start requires a Run ID and runtime fingerprint"
+                )
+            self.session.append_run_start(
+                run_id=event.run_id,
+                runtime_fingerprint=self._runtime_fingerprint,
+                trace_path=self.trace_path,
+            )
+            return
+        if event.type == "message_end":
+            if event.data.get("committed") is False:
+                return
+            message = event.data.get("message")
+            if not isinstance(
+                message,
+                (UserMessage, AssistantMessage, ToolResultMessage),
+            ):
+                return
+            if event.run_id is None:
+                raise RuntimeError("Session message requires a Run ID")
+            self.session.append_message(run_id=event.run_id, message=message)
+            return
+        if event.type != "agent_end" or self._runtime_fingerprint is None:
+            return
+        if event.run_id is None:
+            raise RuntimeError("Session run_end requires a Run ID")
+        reason = event.data.get("reason")
+        if reason not in {
+            "completed",
+            "terminated",
+            "aborted",
+            "error",
+            "turn_limit",
+        }:
+            raise RuntimeError(f"Unsupported Agent end reason: {reason!r}")
+        error_info = event.data.get("error_info")
+        run_end = self.session.append_run_end(
+            run_id=event.run_id,
+            reason=reason,
+            error=(
+                str(event.data["error"])
+                if event.data.get("error") is not None
+                else None
+            ),
+            error_info=(
+                error_info if isinstance(error_info, ModelErrorInfo) else None
+            ),
+        )
+        checkpoint = self.session.create_checkpoint(
+            run_end=run_end,
+            runtime_fingerprint=self._runtime_fingerprint,
+        )
+        if checkpoint is None:
+            self._pending_session_events.append(
+                CoreEvent(
+                    type="session_error",
+                    run_id=event.run_id,
+                    data={
+                        "operation": "checkpoint",
+                        "error": self.session.recovery_info.warnings[-1],
+                        "recoverable": True,
+                    },
+                )
+            )
+        else:
+            self._pending_session_events.append(
+                CoreEvent(
+                    type="session_checkpoint",
+                    run_id=event.run_id,
+                    data={
+                        "session_id": self.session.session_id,
+                        "checkpoint_id": checkpoint.checkpoint_id,
+                        "active_entry_id": checkpoint.active_entry_id,
+                    },
+                )
+            )
+
+    async def _emit_pending_session_events(self) -> None:
+        events = self._pending_session_events
+        self._pending_session_events = []
+        for event in events:
+            await self.agent.emit_event(event)
+
+    def _build_runtime_fingerprint(self) -> RuntimeFingerprint:
+        policies = [
+            {
+                "name": policy.name,
+                "version": policy.version,
+                "hooks": list(policy.hooks),
+                "priority": policy.priority,
+                "enabled": policy.enabled,
+                "source": policy.source,
+                "risk_level": policy.risk_level,
+            }
+            for policy in self.policies.all()
+        ]
+        return build_runtime_fingerprint(
+            harness=f"{type(self).__module__}.{type(self).__qualname__}",
+            model=self.model.name,
+            system_prompt=self.system_prompt,
+            tools=[tool.definition() for tool in self.tools.all()],
+            policies=policies,
+        )
 
     @staticmethod
     def _policy_evaluation_data(

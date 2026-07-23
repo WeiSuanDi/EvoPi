@@ -11,6 +11,7 @@ from evopi.core.model import Model
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
+from evopi.session import SessionManager
 
 
 class CodingHarness(BaseHarness):
@@ -25,6 +26,7 @@ class CodingHarness(BaseHarness):
         max_output_chars: int = 20_000,
         system_prompt: str = CODING_SYSTEM_PROMPT,
         confirmation_handler: ConfirmationHandler | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         super().__init__(
@@ -34,6 +36,9 @@ class CodingHarness(BaseHarness):
             max_turns=max_turns,
             retry_config=retry_config,
             confirmation_handler=confirmation_handler,
+            session_manager=(
+                session_manager or SessionManager.in_memory(self.workspace)
+            ),
         )
         for tool in coding_tools(self.workspace):
             self.register_tool(tool)

@@ -35,6 +35,9 @@ class PolicyRegistry:
     def set_enabled(self, name: str, enabled: bool) -> None:
         self.get(name).enabled = enabled
 
+    def all(self) -> list[Policy]:
+        return sorted(self._policies.values(), key=lambda policy: policy.name)
+
     def load_pack(self, pack: "PolicyPack") -> None:
         for policy in pack.policies:
             self.register(policy, replace=True)

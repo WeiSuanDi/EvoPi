@@ -131,7 +131,16 @@ Memory 和 Skills 属于软性经验沉淀。
 
 ### Session / Trace
 
-Session 负责任务生命周期。
+Session 是跨 Run、跨进程存在的任务容器，以追加式 JSONL Entry Log 保存已经提交的
+对话事实，并在每个 Run 结束后生成不可变 Checkpoint 恢复投影。层级固定为：
+
+```text
+Session → Run → Turn → Model Attempt
+```
+
+Session 的 Entry 使用 `entry_id / parent_id`，v1 保持单一活动路径，但协议为后续
+branch/fork 预留 Tree 结构。裸 Core 不依赖存储；Harness 负责把正式消息和 Run 边界
+接入 Session。失败 attempt 和运行治理细节不进入 Session，仍由 Trace 保存。
 
 Trace 记录执行过程：
 
@@ -146,6 +155,10 @@ policy decision
 ```
 
 Trace 是后续演进的原材料。
+
+Session 与 Trace 互补：Session 回答“下一次从什么正式上下文继续”，Trace 回答“此前
+具体发生了什么以及为何这样治理”。详细协议见
+[`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
 
 ### Validators
 
@@ -267,4 +280,3 @@ Trace 驱动经验沉淀
 Supervisor Agent 隔离验证
 Human Confirmation 最终上车
 ```
-

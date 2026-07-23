@@ -12,6 +12,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Pluggable harnesses** — compose prompts, tools, context, lifecycle behavior, and policies for a specific domain.
 - **Policy-governed actions** — allow, block, rewrite, validate, or terminate work at runtime hooks.
 - **Reliable provider boundary** — built-in Anthropic Messages and OpenAI-compatible adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
+- **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
@@ -24,6 +25,7 @@ flowchart LR
     C --> M["Model Adapter"]
     C --> T["Tool Registry"]
     H --> P["Policy Engine"]
+    H --> S["Session / Checkpoint"]
     H --> X["Trace"]
     P -. "governs hooks" .-> C
 ```
@@ -34,6 +36,7 @@ The layers have deliberately separate responsibilities:
 - **Harness** assembles runtime behavior and exposes governance hooks.
 - **Policy** makes structured decisions at those hooks.
 - **Tools** provide capabilities without deciding when their use is appropriate.
+- **Session** preserves committed conversation state across Runs and processes.
 - **Trace** preserves the execution record used for debugging, evaluation, and controlled evolution.
 
 ## Requirements
@@ -111,6 +114,23 @@ evopi --no-retry 'Run this task without automatic model retries.'
 
 On PowerShell, single quotes are recommended when a prompt contains spaces or quotation marks.
 
+### Sessions
+
+The CLI automatically continues the most recently updated Session for the current workspace.
+Use explicit selection when needed:
+
+```powershell
+evopi --new-session 'Start a separate task.'
+evopi --session SESSION_ID 'Continue this specific task.'
+evopi --no-session 'Run without disk persistence.'
+evopi session list
+evopi session list --all --json
+```
+
+Use `--session-root PATH` or `EVOPI_SESSION_DIR` to override the default
+`~/.evopi/sessions/` location. Session notices and recovery warnings are written to stderr;
+model text remains on stdout.
+
 ## Python API
 
 ```python
@@ -120,23 +140,34 @@ from pathlib import Path
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
+from evopi.session import SessionManager
 
 
 async def main() -> None:
+    workspace = Path.cwd()
+    session = SessionManager.continue_recent(workspace)
     harness = CodingHarness(
         model=model_from_environment(),
-        workspace=Path.cwd(),
+        workspace=workspace,
         trace_path=Path(".evopi/trace.jsonl"),
         confirmation_handler=async_terminal_confirmation_handler,
+        session_manager=session,
     )
-    response = await harness.prompt("Review the project structure.")
-    print(response.content)
+    try:
+        response = await harness.prompt("Review the project structure.")
+        print(response.content)
+    finally:
+        harness.close()
 
 
 asyncio.run(main())
 ```
 
 For a minimal agent without the coding harness, see [`examples/basic_agent.py`](examples/basic_agent.py). The ready-to-run CLI entry point is demonstrated in [`examples/coding_agent.py`](examples/coding_agent.py).
+
+Library Harnesses use an in-memory Session unless a `SessionManager` is supplied, so importing
+EvoPi never creates implicit global files. Persistent Session logs contain prompts, model
+responses, and tool outputs in local plaintext; protect the Session root like a Trace directory.
 
 ## Lifecycle and termination
 
