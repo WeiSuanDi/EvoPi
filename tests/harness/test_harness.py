@@ -88,6 +88,24 @@ class TerminateAfterToolPolicy:
         return PolicyDecision(action="terminate", reason="Tool result is final")
 
 
+@dataclass
+class RecordAbortPolicy:
+    values: list[bool]
+    name: str = "record_abort"
+    version: str = "1"
+    description: str = "Record the aborted state"
+    hooks: tuple = ("after_turn",)
+    priority: int = 1
+    enabled: bool = True
+    source: str = "test"
+    risk_level: str = "low"
+    metadata: dict = field(default_factory=dict)
+
+    def run(self, context: PolicyContext) -> PolicyDecision:
+        self.values.append(context.aborted)
+        return PolicyDecision(action="allow")
+
+
 class FailingModel:
     name = "failing"
 
@@ -180,6 +198,39 @@ def test_context_provider_changes_snapshot_not_transcript() -> None:
         isinstance(message, SystemMessage) and message.content == "temporary context"
         for message in harness.messages
     )
+
+
+def test_abort_signal_reaches_context_provider_and_policy() -> None:
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        provider_observed: list[bool] = []
+        policy_observed: list[bool] = []
+        model = ScriptedModel([AssistantMessage(content="unreachable", stop_reason="stop")])
+        harness = BaseHarness(model=model)
+
+        async def provider(context: AgentContext, *, signal=None) -> None:
+            entered.set()
+            await release.wait()
+            provider_observed.append(bool(signal and signal.aborted))
+
+        harness.add_context_provider(provider)
+        harness.register_policy(RecordAbortPolicy(values=policy_observed))
+        task = asyncio.create_task(harness.prompt("stop while preparing context"))
+        await entered.wait()
+
+        harness.abort()
+        assert harness.state.status is LifecycleState.ABORTING
+        release.set()
+        answer = await task
+
+        assert answer.stop_reason == "aborted"
+        assert provider_observed == [True]
+        assert policy_observed == [True]
+        assert model.contexts == []
+        assert harness.state.status is LifecycleState.ABORTED
+
+    asyncio.run(scenario())
 
 
 def test_all_non_error_harness_hooks_are_dispatched() -> None:

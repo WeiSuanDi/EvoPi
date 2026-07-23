@@ -68,6 +68,9 @@ evopi/core/tool.py
 evopi/core/events.py
   Core 级事件；表达 agent、turn、message、tool execution 和 error 等运行过程。
 
+evopi/core/cancellation.py
+  AbortSignal 与内部 AbortController；表达一次运行的只读协作式取消状态。
+
 evopi/core/run.py
   AgentLoopResult / AgentRunState / AgentEndReason；表达一次运行的结构化结果。
 
@@ -125,10 +128,27 @@ Turn 级：ShouldStopAfterTurn 在 after_turn 观察完成后请求优雅停止
 Run / Provider 级：Agent Abort 与 Provider aborted/error stop reason 独立处理
 ```
 
-当前只实现前三层和结构化结束原因。`AgentEndReason` 固定为
-`completed / terminated / aborted / error / turn_limit`，其中主动产生 `aborted`
-留给下一阶段。`Agent.prompt()` 继续返回 AssistantMessage，结束状态由只读
-`Agent.last_run` 和 `agent_end` 暴露。
+四层控制现已全部接通。`AgentEndReason` 固定为
+`completed / terminated / aborted / error / turn_limit`。`Agent.prompt()` 继续返回
+AssistantMessage，结束状态由只读 `Agent.last_run` 和 `agent_end` 暴露。
+
+每次运行创建独立、只读的 `AbortSignal`，通过仅限关键字的可选 `signal` 参数传播给
+Model、Tool、Hook、Context Provider、Confirmation Handler 和 Event Listener。旧式回调
+签名继续兼容。`Agent.abort()` 是同步、线程安全、幂等的当前运行请求；空闲调用无效。
+`is_running`、`signal` 和 `wait_for_idle()` 为 Harness、CLI 与未来 TUI 提供组合入口。
+
+Abort 的提交语义是“提交前中止优先，已提交事实不回滚”。已进入的 Hook 与 Listener
+继续完成；Provider 流和异步 Tool 可被主动取消；普通同步 Tool 不能被安全抢占，会在
+返回后标记 `completed_after_abort`。当前 Tool 批次仍为每个 ToolCall 产生完整的
+`tool_execution_end` 与 ToolResultMessage，未开始的兄弟工具标记 `skipped`，且不进入
+`before_tool_call`，但仍进入 `after_tool_call`。Policy 可以观察中止，不能把中止结果改回
+成功或 `terminate=True`。
+
+模型流中止时保留已完成文本，并用 `stop_reason=aborted` 提交 AssistantMessage；未完成
+ToolCall 从正式消息中移除，原始增量保存在 `partial_tool_calls` 元数据及事件/Trace 中。
+工具、Hook 或确认阶段发生的 Abort 不改写已经提交的 Provider stop reason，运行级原因
+仍为 `aborted`。外部取消等待 `prompt()` 的 Task 时，Core 完成清理后重新抛出
+`asyncio.CancelledError`。
 
 工具调用仍按 AssistantMessage 中的顺序执行。单个结果的 `terminate=True` 不跳过
 兄弟工具；阻断、拒绝和错误默认不早停，以便模型读取错误 ToolResult 后给出总结。

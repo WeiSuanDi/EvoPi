@@ -112,7 +112,7 @@ from pathlib import Path
 
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
-from evopi.cli.confirmation import terminal_confirmation_handler
+from evopi.cli.confirmation import async_terminal_confirmation_handler
 
 
 async def main() -> None:
@@ -120,7 +120,7 @@ async def main() -> None:
         model=model_from_environment(),
         workspace=Path.cwd(),
         trace_path=Path(".evopi/trace.jsonl"),
-        confirmation_handler=terminal_confirmation_handler,
+        confirmation_handler=async_terminal_confirmation_handler,
     )
     response = await harness.prompt("检查项目结构。")
     print(response.content)
@@ -137,7 +137,11 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `ToolResult.terminate` 是工具批次级的早停提示。EvoPi 会完成当前 AssistantMessage 请求的所有工具；只有非空批次中的每个最终结果都设置 `terminate=True`，才跳过下一次模型调用。Policy 阻断、确认拒绝、工具缺失或执行失败通常会返回错误结果，并允许模型在下一轮作出解释。
 
-`Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。主动取消将在下一阶段接通。
+`Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。
+
+运行中的任务可以通过 `Agent.abort()` 或 `BaseHarness.abort()` 协作式中止。该调用是同步、线程安全、幂等的，空闲时调用不会产生影响。模型流与异步工具会被取消，运行中的 Shell 进程树会被终止；当前批次中每个已请求的兄弟工具仍会获得可关联的错误结果。已经产生的模型文本会保留，未完成的工具调用不会写入正式消息，而是保存在诊断元数据中。应用可以通过 `signal`、`is_running` 和 `wait_for_idle()` 接入自己的生命周期。
+
+如果外部直接取消正在等待 `prompt()` 的 Task，EvoPi 会先完成同样的清理，再重新抛出 `asyncio.CancelledError`。CLI 第一次 `Ctrl+C` 会触发优雅清理并以状态码 130 退出；第二次中断保留宿主运行时的强制中断行为。
 
 可以直接运行以下命令验证批次契约：
 
@@ -160,7 +164,7 @@ python -m pytest tests/core/test_agent_loop.py::test_mixed_tool_batch_continues_
 
 Policy 是普通的类型化 Python 组件，既可以单独注册，也可以组合成可复用的 Policy Pack。Policy 决策会与模型和工具事件一起写入运行时 Trace。
 
-`evopi` CLI 会自动安装交互式 `y/N` Confirmation Handler。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
+`evopi` CLI 会自动安装异步交互式 `y/N` Confirmation Handler。在确认界面按下 `Ctrl+C` 会产生明确的 `cancelled` 决策并中止当前运行。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
 
 ### 离线 Policy 回放
 

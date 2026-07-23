@@ -112,7 +112,7 @@ from pathlib import Path
 
 from evopi.ai import model_from_environment
 from evopi.coding import CodingHarness
-from evopi.cli.confirmation import terminal_confirmation_handler
+from evopi.cli.confirmation import async_terminal_confirmation_handler
 
 
 async def main() -> None:
@@ -120,7 +120,7 @@ async def main() -> None:
         model=model_from_environment(),
         workspace=Path.cwd(),
         trace_path=Path(".evopi/trace.jsonl"),
-        confirmation_handler=terminal_confirmation_handler,
+        confirmation_handler=async_terminal_confirmation_handler,
     )
     response = await harness.prompt("Review the project structure.")
     print(response.content)
@@ -137,7 +137,11 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `ToolResult.terminate` is a batch-level early-termination hint. EvoPi finishes every tool call requested by the current assistant message and skips the next model call only when every final result in the non-empty batch sets `terminate=True`. A blocked, denied, missing, or failed tool normally returns an error result and allows the model to explain it on the next turn.
 
-`Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`. Active cancellation is reserved for the next lifecycle phase.
+`Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
+
+Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
+
+Cancelling the task that is awaiting `prompt()` performs the same cleanup and then re-raises `asyncio.CancelledError`. The CLI maps its first `Ctrl+C` to graceful cleanup and exits with status 130; a second interrupt retains the host runtime's force-interrupt behavior.
 
 To verify the batch contract directly, run:
 
@@ -160,7 +164,7 @@ The included `CodingHarness` registers workspace-scoped tools for directory list
 
 Policies are ordinary typed Python components and can be registered individually or grouped into reusable policy packs. Policy decisions are emitted into the runtime trace alongside model and tool events.
 
-The `evopi` CLI installs an interactive `y/N` confirmation handler automatically. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
+The `evopi` CLI installs an asynchronous interactive `y/N` confirmation handler automatically. Pressing `Ctrl+C` at a confirmation returns an explicit `cancelled` decision and aborts the run. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
 
 ### Offline policy replay
 

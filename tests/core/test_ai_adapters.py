@@ -7,6 +7,7 @@ import httpx
 
 from evopi.ai.api.anthropic_messages import AnthropicMessagesModel
 from evopi.ai.api.openai_chat_completions import OpenAICompatibleModel
+from evopi.core.agent import Agent
 from evopi.core.context import AgentContext
 from evopi.core.messages import SystemMessage, UserMessage
 from evopi.core.stream import ModelComplete, TextDelta
@@ -100,3 +101,50 @@ def test_anthropic_stream_builds_tool_call() -> None:
     assert final.tool_calls[0].arguments == {"path": "README.md"}
     assert captured["system"] == "Be helpful"
     assert captured["tools"][0]["input_schema"]["type"] == "object"
+
+
+def test_abort_closes_openai_response_without_closing_injected_client() -> None:
+    class BlockingBody(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.blocking = asyncio.Event()
+            self.closed = False
+
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            self.blocking.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    body = BlockingBody()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        model = OpenAICompatibleModel(
+            model="test-model",
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            client=client,
+        )
+        agent = Agent(model=model)
+        task = asyncio.create_task(agent.prompt("start"))
+        await body.blocking.wait()
+
+        agent.abort()
+        answer = await task
+
+        assert answer.content == "partial"
+        assert answer.stop_reason == "aborted"
+        assert body.closed is True
+        assert client.is_closed is False
+        await client.aclose()
+
+    asyncio.run(scenario())

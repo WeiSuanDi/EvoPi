@@ -12,6 +12,7 @@ class LifecycleState(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
     WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
+    ABORTING = "aborting"
     FAILED = "failed"
     COMPLETED = "completed"
     ABORTED = "aborted"

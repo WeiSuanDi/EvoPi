@@ -14,6 +14,7 @@ class Lifecycle:
         if self.state.status in {
             LifecycleState.RUNNING,
             LifecycleState.WAITING_FOR_CONFIRMATION,
+            LifecycleState.ABORTING,
         }:
             raise RuntimeError("Harness is already running")
         self.state.status = LifecycleState.RUNNING
@@ -30,9 +31,23 @@ class Lifecycle:
         self.state.status = LifecycleState.WAITING_FOR_CONFIRMATION
 
     def resume(self) -> None:
+        if self.state.status is LifecycleState.ABORTING:
+            return
         if self.state.status is not LifecycleState.WAITING_FOR_CONFIRMATION:
             raise RuntimeError("Harness is not waiting for confirmation")
         self.state.status = LifecycleState.RUNNING
+
+    def request_abort(self) -> None:
+        if self.state.status in {
+            LifecycleState.RUNNING,
+            LifecycleState.WAITING_FOR_CONFIRMATION,
+        }:
+            self.state.status = LifecycleState.ABORTING
+
+    def abort(self, error: str | None = None) -> None:
+        self.state.status = LifecycleState.ABORTED
+        self.state.end_reason = "aborted"
+        self.state.last_error = error
 
     def fail(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Awaitable, Callable, TypeAlias
 
+from evopi.core.cancellation import AbortSignal, call_with_optional_signal
 from evopi.core.context import AgentContext
 
 ContextProvider: TypeAlias = Callable[
@@ -19,10 +20,15 @@ class ContextManager:
     def add(self, provider: ContextProvider) -> None:
         self._providers.append(provider)
 
-    async def prepare(self, context: AgentContext) -> AgentContext:
+    async def prepare(
+        self,
+        context: AgentContext,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AgentContext:
         current = context
         for provider in tuple(self._providers):
-            replacement = provider(current)
+            replacement = call_with_optional_signal(provider, current, signal=signal)
             if inspect.isawaitable(replacement):
                 replacement = await replacement
             if replacement is not None:

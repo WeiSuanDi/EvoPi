@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from evopi.core.agent import Agent
 from evopi.core.agent_loop import BeforeToolCallResult
+from evopi.core.cancellation import AbortSignal, call_with_optional_signal
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import AssistantMessage, ToolResultMessage
@@ -73,6 +76,21 @@ class BaseHarness:
     def messages(self):
         return self.agent.messages
 
+    @property
+    def signal(self) -> AbortSignal | None:
+        return self.agent.signal
+
+    @property
+    def is_running(self) -> bool:
+        return self.agent.is_running
+
+    def abort(self) -> None:
+        self.lifecycle.request_abort()
+        self.agent.abort()
+
+    async def wait_for_idle(self) -> None:
+        await self.agent.wait_for_idle()
+
     def register_tool(self, tool: Tool, *, replace: bool = False) -> None:
         self.tools.register(tool, replace=replace)
         self.agent.tools = self.tools.all()
@@ -94,6 +112,10 @@ class BaseHarness:
         self.agent.tools = self.tools.all()
         try:
             answer = await self.agent.prompt(content)
+        except asyncio.CancelledError:
+            error = self.agent.last_run.error if self.agent.last_run is not None else None
+            self.lifecycle.abort(error)
+            raise
         except Exception as exc:
             end_reason = (
                 self.agent.last_run.end_reason
@@ -107,7 +129,11 @@ class BaseHarness:
             if self.agent.last_run is not None
             else "completed"
         )
-        self.lifecycle.complete(end_reason=end_reason)
+        if end_reason == "aborted":
+            error = self.agent.last_run.error if self.agent.last_run is not None else None
+            self.lifecycle.abort(error)
+        else:
+            self.lifecycle.complete(end_reason=end_reason)
         return answer
 
     def reset(self) -> None:
@@ -115,25 +141,41 @@ class BaseHarness:
         self.session.reset()
         self.lifecycle.reset()
 
-    async def _prepare_context(self, context: AgentContext) -> AgentContext:
-        prepared = await self.context.prepare(context)
+    async def _prepare_context(
+        self,
+        context: AgentContext,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AgentContext:
+        prepared = await self.context.prepare(context, signal=signal)
         evaluation = await self._evaluate(
-            PolicyContext(hook="before_model_call", agent_context=prepared)
+            PolicyContext(
+                hook="before_model_call",
+                agent_context=prepared,
+                aborted=bool(signal and signal.aborted),
+            )
         )
-        self._raise_if_blocked(evaluation, "Model call")
+        if not (signal and signal.aborted):
+            self._raise_if_blocked(evaluation, "Model call")
         return prepared
 
     async def _after_model_call(
-        self, context: AgentContext, assistant: AssistantMessage
+        self,
+        context: AgentContext,
+        assistant: AssistantMessage,
+        *,
+        signal: AbortSignal | None = None,
     ) -> AssistantMessage:
         evaluation = await self._evaluate(
             PolicyContext(
                 hook="after_model_call",
                 agent_context=context,
                 assistant_message=assistant,
+                aborted=bool(signal and signal.aborted),
             )
         )
-        self._raise_if_blocked(evaluation, "Model response")
+        if not (signal and signal.aborted):
+            self._raise_if_blocked(evaluation, "Model response")
         return assistant
 
     async def _before_tool_call(
@@ -141,6 +183,8 @@ class BaseHarness:
         context: AgentContext,
         assistant: AssistantMessage,
         call: ToolCall,
+        *,
+        signal: AbortSignal | None = None,
     ) -> BeforeToolCallResult:
         evaluation = await self._evaluate(
             PolicyContext(
@@ -149,6 +193,7 @@ class BaseHarness:
                 assistant_message=assistant,
                 tool_call=call,
                 arguments=dict(call.arguments),
+                aborted=bool(signal and signal.aborted),
             )
         )
         final = evaluation.final
@@ -173,7 +218,7 @@ class BaseHarness:
                 ),
                 metadata={"session_id": self.session.session_id},
             )
-            response = await self._request_confirmation(request)
+            response = await self._request_confirmation(request, signal=signal)
             blocked = not response.approved
             reason = response.reason or (
                 "Human confirmation approved"
@@ -187,14 +232,29 @@ class BaseHarness:
         )
 
     async def _request_confirmation(
-        self, request: ConfirmationRequest
+        self,
+        request: ConfirmationRequest,
+        *,
+        signal: AbortSignal | None,
     ) -> ConfirmationResponse:
         self.lifecycle.wait_for_confirmation()
         try:
             await self.agent.emit_event(
                 CoreEvent(type="confirmation_request", data={"request": request})
             )
-            response = await self._resolve_confirmation(request)
+            response = await self._resolve_confirmation(request, signal=signal)
+            if response.decision == "cancelled" and not (signal and signal.aborted):
+                self.abort()
+                signal = self.agent.signal
+            if signal is not None and signal.aborted:
+                self.lifecycle.request_abort()
+                await signal._wait_until_notified()
+                response = ConfirmationResponse(
+                    request_id=request.id,
+                    decision="cancelled",
+                    reason=response.reason or "Run aborted while waiting for confirmation",
+                    metadata={**response.metadata, "automatic": True, "aborted": True},
+                )
         finally:
             self.lifecycle.resume()
 
@@ -204,7 +264,10 @@ class BaseHarness:
         return response
 
     async def _resolve_confirmation(
-        self, request: ConfirmationRequest
+        self,
+        request: ConfirmationRequest,
+        *,
+        signal: AbortSignal | None,
     ) -> ConfirmationResponse:
         if self.confirmation_handler is None:
             return ConfirmationResponse(
@@ -215,10 +278,48 @@ class BaseHarness:
             )
 
         try:
-            response = self.confirmation_handler(request)
+            response = call_with_optional_signal(
+                self.confirmation_handler,
+                request,
+                signal=signal,
+            )
             if inspect.isawaitable(response):
-                response = await response
+                handler_task = asyncio.ensure_future(response)
+                if signal is None:
+                    response = await handler_task
+                else:
+                    abort_task = asyncio.create_task(signal.wait())
+                    done, _ = await asyncio.wait(
+                        {handler_task, abort_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if abort_task in done:
+                        if not handler_task.done():
+                            handler_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await handler_task
+                        return ConfirmationResponse(
+                            request_id=request.id,
+                            decision="cancelled",
+                            reason="Run aborted while waiting for confirmation",
+                            metadata={"automatic": True, "aborted": True},
+                        )
+                    abort_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await abort_task
+                    response = await handler_task
         except Exception as exc:
+            if signal is not None and signal.aborted:
+                return ConfirmationResponse(
+                    request_id=request.id,
+                    decision="cancelled",
+                    reason=f"Confirmation handler stopped during abort: {type(exc).__name__}: {exc}",
+                    metadata={
+                        "automatic": True,
+                        "aborted": True,
+                        "handler_error": type(exc).__name__,
+                    },
+                )
             return ConfirmationResponse(
                 request_id=request.id,
                 decision="deny",
@@ -248,6 +349,8 @@ class BaseHarness:
         assistant: AssistantMessage,
         call: ToolCall,
         result: ToolResult,
+        *,
+        signal: AbortSignal | None = None,
     ) -> ToolResult:
         evaluation = await self._evaluate(
             PolicyContext(
@@ -257,6 +360,7 @@ class BaseHarness:
                 tool_call=call,
                 tool_result=result,
                 arguments=dict(call.arguments),
+                aborted=bool(signal and signal.aborted),
             )
         )
         final_result = evaluation.tool_result or result
@@ -275,6 +379,8 @@ class BaseHarness:
         context: AgentContext,
         assistant: AssistantMessage,
         results: list[ToolResultMessage],
+        *,
+        signal: AbortSignal | None = None,
     ) -> bool:
         edited = [message.metadata.get("path") for message in results if message.tool_name == "write_file"]
         evaluation = await self._evaluate(
@@ -282,6 +388,7 @@ class BaseHarness:
                 hook="after_turn",
                 agent_context=context,
                 assistant_message=assistant,
+                aborted=bool(signal and signal.aborted),
                 metadata={"edited_files": [path for path in edited if path]},
             )
         )
@@ -306,6 +413,10 @@ class BaseHarness:
     async def _on_core_event(self, event: CoreEvent) -> None:
         if self.trace_writer is not None:
             self.trace_writer(event)
+        if event.type == "abort_requested":
+            self.lifecycle.request_abort()
+        if event.type == "agent_end" and event.data.get("reason") == "aborted":
+            self.lifecycle.abort(event.data.get("error"))
         if event.type == "error":
             context = PolicyContext(
                 hook="on_error",
@@ -314,6 +425,7 @@ class BaseHarness:
                     tools=self.agent.tools,
                 ),
                 error=str(event.data.get("error", "")),
+                aborted=bool(self.agent.signal and self.agent.signal.aborted),
             )
             evaluation = await self.policies.engine.evaluate(context)
             if self.trace_writer is not None:
@@ -345,6 +457,7 @@ class BaseHarness:
                 "arguments": context.arguments,
                 "tool_result": context.tool_result,
                 "error": context.error,
+                "aborted": context.aborted,
                 "metadata": context.metadata,
             },
             "final": evaluation.final,

@@ -11,7 +11,7 @@ from evopi.core.tool import ToolCall
 from evopi.core.types import JsonObject, Metadata
 from evopi.policy.types import HookName, RiskLevel
 
-ConfirmationDecision: TypeAlias = Literal["approve", "deny"]
+ConfirmationDecision: TypeAlias = Literal["approve", "deny", "cancelled"]
 
 
 def _new_confirmation_id() -> str:
@@ -52,7 +52,7 @@ class ConfirmationResponse:
 
 
 ConfirmationHandler: TypeAlias = Callable[
-    [ConfirmationRequest],
+    ...,
     Awaitable[ConfirmationResponse] | ConfirmationResponse,
 ]
 

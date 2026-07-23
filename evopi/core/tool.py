@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TypeAlias
 
 from evopi.core.types import JsonObject, Metadata
+from evopi.core.cancellation import AbortSignal
 
 class ToolValidationError(ValueError):
     """Raised when model-supplied arguments do not match a tool schema."""
@@ -52,17 +55,68 @@ class Tool:
             },
         }
 
-    async def execute(self, arguments: JsonObject) -> ToolResult:
+    async def execute(
+        self,
+        arguments: JsonObject,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> ToolResult:
         try:
             _validate_arguments(self.name, self.parameters, arguments)
+            if signal is not None and signal.aborted:
+                return _aborted_result("Operation aborted before tool execution")
             value = self.handler(**arguments)
             if inspect.isawaitable(value):
-                value = await value
-            return _normalize_result(value)
+                task = asyncio.ensure_future(value)
+                if signal is None:
+                    value = await task
+                else:
+                    abort_task = asyncio.create_task(signal.wait())
+                    done, _ = await asyncio.wait(
+                        {task, abort_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if abort_task in done:
+                        if task.done():
+                            value = await task
+                            return _completed_after_abort(_normalize_result(value))
+                        task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await task
+                        return _aborted_result("Operation aborted during tool execution")
+                    abort_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await abort_task
+                    value = await task
+            result = _normalize_result(value)
+            if signal is not None and signal.aborted:
+                return _completed_after_abort(result)
+            return result
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:  # Tool failures belong in the model transcript.
             return ToolResult(content=f"{type(exc).__name__}: {exc}", is_error=True)
+
+
+def _aborted_result(content: str) -> ToolResult:
+    return ToolResult(
+        content=content,
+        is_error=True,
+        metadata={"aborted": True},
+    )
+
+
+def _completed_after_abort(result: ToolResult) -> ToolResult:
+    return ToolResult(
+        content=result.content,
+        is_error=True,
+        terminate=False,
+        metadata={
+            **result.metadata,
+            "aborted": True,
+            "completed_after_abort": True,
+        },
+    )
 
 
 def _normalize_result(value: ToolHandlerResult) -> ToolResult:

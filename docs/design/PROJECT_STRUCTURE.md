@@ -160,6 +160,7 @@ Session 负责一个任务或对话窗口如何持续存在。
 - 记录模型输出
 - 记录工具调用和工具结果
 - 使用 Pi 风格的 message / turn / tool execution 生命周期事件
+- 记录 `abort_requested`、中止后的完整 ToolResult 和最终 `agent_end(reason=aborted)`
 - 记录 policy decision
 - 记录包含输入、最终决策和逐条决策的 policy evaluation 快照
 - 为新记录标记 schema v2，并保留 v1 读取兼容
@@ -212,8 +213,9 @@ Coding 是 EvoPi 的第一个验证场景，不是项目本体。
 
 命令行入口。
 
-负责加载模型与工作区配置、运行 CodingHarness、流式展示模型输出，并通过终端
-Confirmation Handler 收集 Shell 工具的 `y/N` 人工授权。
+负责加载模型与工作区配置、运行 CodingHarness、流式展示模型输出，并通过异步终端
+Confirmation Handler 收集 Shell 工具的 `y/N` 人工授权。第一次 `Ctrl+C` 请求优雅
+Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 决策。
 
 ## docs
 
