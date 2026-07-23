@@ -6,7 +6,7 @@ from evopi.ai.api.anthropic_messages import AnthropicMessagesModel
 from evopi.ai.api.openai_chat_completions import OpenAICompatibleModel
 
 
-def model_from_environment(provider: str | None = None):
+def model_from_environment(provider: str | None = None, *, timeout: float = 120.0):
     load_dotenv()
     selected = (provider or os.getenv("EVOPI_PROVIDER") or "anthropic").lower()
     if selected == "anthropic":
@@ -16,6 +16,7 @@ def model_from_environment(provider: str | None = None):
         return AnthropicMessagesModel(
             model=model,
             base_url=os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            timeout=timeout,
         )
     if selected in {"openai", "openai-compatible"}:
         model = os.getenv("OPENAI_MODEL") or os.getenv("EVOPI_MODEL")
@@ -24,6 +25,7 @@ def model_from_environment(provider: str | None = None):
         return OpenAICompatibleModel(
             model=model,
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            timeout=timeout,
         )
     raise ValueError(f"Unknown provider: {selected}")
 

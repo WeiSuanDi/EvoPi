@@ -15,6 +15,7 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
+from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool, ToolCall, ToolResult
 from evopi.harness.context_manager import ContextManager, ContextProvider
 from evopi.harness.confirmation import (
@@ -45,6 +46,7 @@ class BaseHarness:
         system_prompt: str = "",
         trace_path: str | Path | None = None,
         max_turns: int = 20,
+        retry_config: ModelRetryConfig | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
     ) -> None:
         self.model = model
@@ -60,6 +62,7 @@ class BaseHarness:
             model=model,
             system_prompt=system_prompt,
             max_turns=max_turns,
+            retry_config=retry_config or ModelRetryConfig(enabled=True),
             before_tool_call=self._before_tool_call,
             after_tool_call=self._after_tool_call,
             prepare_context=self._prepare_context,
@@ -425,6 +428,11 @@ class BaseHarness:
                     tools=self.agent.tools,
                 ),
                 error=str(event.data.get("error", "")),
+                error_info=(
+                    event.data.get("error_info")
+                    if isinstance(event.data.get("error_info"), ModelErrorInfo)
+                    else None
+                ),
                 aborted=bool(self.agent.signal and self.agent.signal.aborted),
             )
             evaluation = await self.policies.engine.evaluate(context)
@@ -457,6 +465,7 @@ class BaseHarness:
                 "arguments": context.arguments,
                 "tool_result": context.tool_result,
                 "error": context.error,
+                "error_info": context.error_info,
                 "aborted": context.aborted,
                 "metadata": context.metadata,
             },

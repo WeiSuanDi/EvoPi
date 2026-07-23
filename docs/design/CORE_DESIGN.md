@@ -153,6 +153,38 @@ ToolCall 从正式消息中移除，原始增量保存在 `partial_tool_calls` �
 工具调用仍按 AssistantMessage 中的顺序执行。单个结果的 `terminate=True` 不跳过
 兄弟工具；阻断、拒绝和错误默认不早停，以便模型读取错误 ToolResult 后给出总结。
 
+## Provider Reliability v1
+
+Provider 可靠性分为两层，避免厂商特例进入 Agent Loop：
+
+```text
+Adapter：把 HTTP、SSE、transport 和 timeout 异常归一为 ModelErrorInfo
+Core：根据结构化 retryable、预算和 Retry-After 重试完整模型调用
+```
+
+`ModelErrorKind` 固定覆盖 `authentication / permission / invalid_request / not_found /
+context_overflow / quota_exhausted / rate_limited / overloaded / timeout / connection /
+server / protocol / unknown`。`ModelErrorInfo` 同时携带安全截断消息、Provider、HTTP 状态、
+Provider code、`retry_after`、request ID 和元数据；通过 `ModelError.info`、
+`AgentRunState.error_info`、`error` / `agent_end` 事件和 Trace 暴露。字符串 `error` 保留兼容。
+
+`ModelRetryConfig` 采用“额外重试次数”语义。裸 `Agent` 默认关闭；Harness 默认开启并使用
+三次额外重试、2/4/8 秒指数退避、60 秒最大等待且无随机抖动。只有
+`rate_limited / overloaded / timeout / connection / server` 默认可重试。合法且更长的
+`Retry-After` 优先；超过最大等待时立即结束，不进入静默长等待。
+
+所有 attempt 共享同一 Run 和 Turn，`model_start.attempt` 从 1 开始。每次 attempt 都重新
+生成 Context 快照并执行 Context Provider 与 `before_model_call`；成功后才执行
+`after_model_call` 并提交 AssistantMessage。失败 attempt 仍产生完整的
+`message_start/update/end`，以 `stop_reason=error` 保存部分文本和原始 ToolCall 增量，只进入
+Event / Trace，不写入 AgentContext。`model_retry_start` 与 `model_retry_end` 记录预算、延迟、
+结构化错误和最终结果。最终失败才进入公共 `error` / `agent_end(reason=error)` 路径。
+
+Abort 的优先级高于重试：活动请求、部分输出后的流和退避等待均可被现有 AbortSignal
+打断；外部取消 `prompt()` Task 时，Core 完成重试任务清理后继续抛出
+`asyncio.CancelledError`。Adapter 的 `timeout` 是连接与流式 I/O 空闲超时，不是单次调用或
+整个 Run 的墙钟总时限。
+
 ## 模型调用边界
 
 EvoPi 第一版不只做 FakeModel。

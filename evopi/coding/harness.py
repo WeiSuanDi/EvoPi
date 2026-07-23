@@ -8,6 +8,7 @@ from evopi.coding.policies import coding_policy_pack
 from evopi.coding.prompts import CODING_SYSTEM_PROMPT
 from evopi.coding.tools import coding_tools
 from evopi.core.model import Model
+from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
 
@@ -20,6 +21,7 @@ class CodingHarness(BaseHarness):
         workspace: str | Path,
         trace_path: str | Path | None = None,
         max_turns: int = 20,
+        retry_config: ModelRetryConfig | None = None,
         max_output_chars: int = 20_000,
         system_prompt: str = CODING_SYSTEM_PROMPT,
         confirmation_handler: ConfirmationHandler | None = None,
@@ -30,6 +32,7 @@ class CodingHarness(BaseHarness):
             system_prompt=system_prompt,
             trace_path=trace_path,
             max_turns=max_turns,
+            retry_config=retry_config,
             confirmation_handler=confirmation_handler,
         )
         for tool in coding_tools(self.workspace):

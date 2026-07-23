@@ -14,6 +14,11 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener, notify
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
+from evopi.core.model_errors import (
+    ModelErrorInfo,
+    ModelRetryConfig,
+    error_info_from_exception,
+)
 from evopi.core.run import AgentLoopResult
 from evopi.core.stream import (
     AssistantMessageBuilder,
@@ -45,6 +50,21 @@ class BeforeToolCallResult:
     arguments: JsonObject | None = None
 
 
+@dataclass(slots=True, kw_only=True)
+class _ModelCallOutcome:
+    message: AssistantMessage
+    attempts: int
+    retry_started: bool = False
+    cancelled: bool = False
+
+
+class _ModelAttemptFailure(Exception):
+    def __init__(self, error: Exception, message: AssistantMessage) -> None:
+        self.error = error
+        self.message = message
+        super().__init__(str(error))
+
+
 BeforeToolCall: TypeAlias = Callable[
     ...,
     Awaitable[BeforeToolCallResult | None] | BeforeToolCallResult | None,
@@ -68,10 +88,16 @@ _MODEL_ABORTED = object()
 
 
 class AgentLoop:
-    def __init__(self, *, max_turns: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        max_turns: int = 20,
+        retry_config: ModelRetryConfig | None = None,
+    ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
         self.max_turns = max_turns
+        self.retry_config = retry_config or ModelRetryConfig()
 
     async def run(
         self,
@@ -124,24 +150,16 @@ class AgentLoop:
                 CoreEvent(type="turn_start", run_id=run_id, data={"turn": turn}),
                 signal=signal,
             )
-            await notify(
-                emit,
-                CoreEvent(
-                    type="model_start",
-                    run_id=run_id,
-                    data={"turn": turn, "model": model.name},
-                ),
-                signal=signal,
-            )
-
-            assistant = await self._consume_model(
-                model,
-                context,
-                emit,
-                run_id,
+            model_outcome = await self._call_model_with_retry(
+                model=model,
+                context=context,
+                emit=emit,
+                run_id=run_id,
+                turn=turn,
                 prepare_context=prepare_context,
                 signal=signal,
             )
+            assistant = model_outcome.message
             model_was_aborted = assistant.stop_reason == "aborted"
             if after_model_call is not None:
                 replacement = call_with_optional_signal(
@@ -169,6 +187,22 @@ class AgentLoop:
                 CoreEvent(type="message_end", run_id=run_id, data={"message": assistant}),
                 signal=signal,
             )
+            if model_outcome.retry_started:
+                await notify(
+                    emit,
+                    CoreEvent(
+                        type="model_retry_end",
+                        run_id=run_id,
+                        data={
+                            "success": not model_outcome.cancelled,
+                            "cancelled": model_outcome.cancelled,
+                            "attempts": model_outcome.attempts,
+                            "retries": model_outcome.attempts - 1,
+                            "max_retries": self.retry_config.max_retries,
+                        },
+                    ),
+                    signal=signal,
+                )
 
             if not assistant.tool_calls:
                 await notify(
@@ -305,12 +339,173 @@ class AgentLoop:
             raise TypeError("should_stop_after_turn must return bool")
         return should_stop
 
+    async def _call_model_with_retry(
+        self,
+        *,
+        model: Model,
+        context: AgentContext,
+        emit: EventListener | None,
+        run_id: str | None,
+        turn: int,
+        prepare_context: PrepareContext | None,
+        signal: AbortSignal | None,
+    ) -> _ModelCallOutcome:
+        attempt = 1
+        retry_started = False
+        while True:
+            await notify(
+                emit,
+                CoreEvent(
+                    type="model_start",
+                    run_id=run_id,
+                    data={"turn": turn, "model": model.name, "attempt": attempt},
+                ),
+                signal=signal,
+            )
+            try:
+                message = await self._consume_model(
+                    model,
+                    context,
+                    emit,
+                    run_id,
+                    attempt=attempt,
+                    prepare_context=prepare_context,
+                    signal=signal,
+                )
+            except _ModelAttemptFailure as failure:
+                error_info = error_info_from_exception(failure.error)
+                retry_number = attempt
+                delay = self._retry_delay(error_info, retry_number)
+                if delay is None or retry_number > self.retry_config.max_retries:
+                    if retry_started:
+                        await notify(
+                            emit,
+                            CoreEvent(
+                                type="model_retry_end",
+                                run_id=run_id,
+                                data={
+                                    "success": False,
+                                    "cancelled": False,
+                                    "attempts": attempt,
+                                    "retries": attempt - 1,
+                                    "max_retries": self.retry_config.max_retries,
+                                    "error_info": error_info,
+                                },
+                            ),
+                            signal=signal,
+                        )
+                    raise failure.error from failure
+
+                retry_started = True
+                await notify(
+                    emit,
+                    CoreEvent(
+                        type="model_retry_start",
+                        run_id=run_id,
+                        data={
+                            "retry": retry_number,
+                            "next_attempt": attempt + 1,
+                            "max_retries": self.retry_config.max_retries,
+                            "delay": delay,
+                            "error_info": error_info,
+                        },
+                    ),
+                    signal=signal,
+                )
+                if not await self._wait_for_retry(delay, signal):
+                    aborted = AssistantMessage(
+                        content=failure.message.content,
+                        stop_reason="aborted",
+                        metadata={
+                            **failure.message.metadata,
+                            "aborted": True,
+                            "retry_wait": True,
+                        },
+                    )
+                    await notify(
+                        emit,
+                        CoreEvent(
+                            type="message_start",
+                            run_id=run_id,
+                            data={
+                                "message_id": aborted.id,
+                                "role": aborted.role,
+                                "attempt": attempt,
+                            },
+                        ),
+                        signal=signal,
+                    )
+                    return _ModelCallOutcome(
+                        message=aborted,
+                        attempts=attempt,
+                        retry_started=True,
+                        cancelled=True,
+                    )
+                attempt += 1
+                continue
+            return _ModelCallOutcome(
+                message=message,
+                attempts=attempt,
+                retry_started=retry_started,
+                cancelled=message.stop_reason == "aborted",
+            )
+
+    def _retry_delay(
+        self,
+        error_info: ModelErrorInfo | None,
+        retry_number: int,
+    ) -> float | None:
+        if (
+            not self.retry_config.enabled
+            or error_info is None
+            or not error_info.retryable
+            or retry_number > self.retry_config.max_retries
+        ):
+            return None
+        if (
+            error_info.retry_after is not None
+            and error_info.retry_after > self.retry_config.max_delay
+        ):
+            return None
+        local_delay = min(
+            self.retry_config.base_delay * (2 ** (retry_number - 1)),
+            self.retry_config.max_delay,
+        )
+        return max(local_delay, error_info.retry_after or 0.0)
+
+    @staticmethod
+    async def _wait_for_retry(delay: float, signal: AbortSignal | None) -> bool:
+        if signal is None:
+            await asyncio.sleep(delay)
+            return True
+        if signal.aborted:
+            await signal._wait_until_notified()
+            return False
+        sleep_task = asyncio.create_task(asyncio.sleep(delay))
+        abort_task = asyncio.create_task(signal.wait())
+        done, _ = await asyncio.wait(
+            {sleep_task, abort_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if abort_task in done:
+            sleep_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sleep_task
+            await signal._wait_until_notified()
+            return False
+        abort_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await abort_task
+        await sleep_task
+        return True
+
     async def _consume_model(
         self,
         model: Model,
         context: AgentContext,
         emit: EventListener | None,
         run_id: str | None,
+        attempt: int,
         prepare_context: PrepareContext | None,
         signal: AbortSignal | None,
     ) -> AssistantMessage:
@@ -324,29 +519,34 @@ class AgentLoop:
             CoreEvent(
                 type="message_start",
                 run_id=run_id,
-                data={"message_id": message_id, "role": "assistant"},
+                data={
+                    "message_id": message_id,
+                    "role": "assistant",
+                    "attempt": attempt,
+                },
             ),
             signal=signal,
         )
-        if prepare_context is not None:
-            replacement = call_with_optional_signal(
-                prepare_context,
-                model_context,
-                signal=signal,
-            )
-            if inspect.isawaitable(replacement):
-                replacement = await replacement
-            if replacement is not None:
-                model_context = replacement
-
-        if signal is not None and signal.aborted:
-            await signal._wait_until_notified()
-            return self._build_aborted_message(builder, partial_calls, message_id)
-
-        stream = call_with_optional_signal(model.stream, model_context, signal=signal)
-        iterator = stream.__aiter__()
+        iterator: Any | None = None
         aborted = False
         try:
+            if prepare_context is not None:
+                replacement = call_with_optional_signal(
+                    prepare_context,
+                    model_context,
+                    signal=signal,
+                )
+                if inspect.isawaitable(replacement):
+                    replacement = await replacement
+                if replacement is not None:
+                    model_context = replacement
+
+            if signal is not None and signal.aborted:
+                await signal._wait_until_notified()
+                return self._build_aborted_message(builder, partial_calls, message_id)
+
+            stream = call_with_optional_signal(model.stream, model_context, signal=signal)
+            iterator = stream.__aiter__()
             while True:
                 try:
                     event = await self._next_model_event(iterator, signal)
@@ -411,8 +611,28 @@ class AgentLoop:
                     complete = model_event.message
                 else:  # pragma: no cover - protects third-party Model implementations.
                     raise ModelProtocolError(f"Unknown model stream event: {model_event!r}")
+        except Exception as error:
+            if iterator is not None:
+                await self._close_model_iterator(iterator)
+            failed = self._build_failed_message(
+                builder,
+                partial_calls,
+                message_id,
+                error,
+                attempt,
+            )
+            await notify(
+                emit,
+                CoreEvent(
+                    type="message_end",
+                    run_id=run_id,
+                    data={"message": failed, "attempt": attempt, "committed": False},
+                ),
+                signal=signal,
+            )
+            raise _ModelAttemptFailure(error, failed) from error
         finally:
-            if aborted:
+            if aborted and iterator is not None:
                 await self._close_model_iterator(iterator)
 
         if aborted or (signal is not None and signal.aborted and complete is None):
@@ -423,6 +643,31 @@ class AgentLoop:
             raise ModelProtocolError("Model stream ended without a completion")
         complete.id = message_id
         return complete
+
+    @staticmethod
+    def _build_failed_message(
+        builder: AssistantMessageBuilder,
+        partial_calls: dict[int, dict[str, Any]],
+        message_id: str,
+        error: Exception,
+        attempt: int,
+    ) -> AssistantMessage:
+        error_info = error_info_from_exception(error)
+        message = builder.build(
+            stop_reason="error",
+            metadata={
+                "committed": False,
+                "attempt": attempt,
+                "error": f"{type(error).__name__}: {error}",
+                "error_info": error_info,
+                "partial_tool_calls": [
+                    partial_calls[index] for index in sorted(partial_calls)
+                ],
+            },
+        )
+        message.id = message_id
+        message.tool_calls = []
+        return message
 
     @staticmethod
     async def _next_model_event(

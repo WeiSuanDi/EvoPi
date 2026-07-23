@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias
 
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage
+from evopi.core.model_errors import ModelErrorInfo
 from evopi.core.tool import ToolCall, ToolResult
 from evopi.core.types import JsonObject, Metadata
 
@@ -30,6 +31,7 @@ class PolicyContext:
     tool_result: ToolResult | None = None
     arguments: JsonObject | None = None
     error: str | None = None
+    error_info: ModelErrorInfo | None = None
     aborted: bool = False
     metadata: Metadata = field(default_factory=dict)
 

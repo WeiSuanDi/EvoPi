@@ -11,7 +11,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **稳定的 Agent Core** — 提供类型化消息、流式事件、工具调用、工具结果和有界多轮执行。
 - **可插拔 Harness** — 为具体领域组合 Prompt、工具、上下文、生命周期行为和 Policy。
 - **Policy 运行时治理** — 可在 Hook 上允许、阻止、改写、验证或终止操作。
-- **模型提供方解耦** — 内置 Anthropic Messages 与 OpenAI-compatible Chat Completions 流式适配器。
+- **可靠的 Provider 边界** — 内置 Anthropic Messages 与 OpenAI-compatible 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
 - **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
 
@@ -102,6 +102,13 @@ evopi '检查这个项目并总结它的架构。'
 evopi --provider anthropic --workspace C:\path\to\project '运行测试并解释所有失败。'
 ```
 
+基于 Harness 的 CLI 默认会对瞬态模型错误额外重试最多三次，也可以显式调整：
+
+```powershell
+evopi --max-retries 5 --model-timeout 90 '检查这个仓库。'
+evopi --no-retry '执行任务，但不要自动重试模型。'
+```
+
 在 PowerShell 中，当 Prompt 含空格或引号时，建议使用单引号包裹整个 Prompt。
 
 ## Python API
@@ -142,6 +149,16 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 运行中的任务可以通过 `Agent.abort()` 或 `BaseHarness.abort()` 协作式中止。该调用是同步、线程安全、幂等的，空闲时调用不会产生影响。模型流与异步工具会被取消，运行中的 Shell 进程树会被终止；当前批次中每个已请求的兄弟工具仍会获得可关联的错误结果。已经产生的模型文本会保留，未完成的工具调用不会写入正式消息，而是保存在诊断元数据中。应用可以通过 `signal`、`is_running` 和 `wait_for_idle()` 接入自己的生命周期。
 
 如果外部直接取消正在等待 `prompt()` 的 Task，EvoPi 会先完成同样的清理，再重新抛出 `asyncio.CancelledError`。CLI 第一次 `Ctrl+C` 会触发优雅清理并以状态码 130 退出；第二次中断保留宿主运行时的强制中断行为。
+
+## Provider 可靠性
+
+模型 Adapter 会把 Provider HTTP 响应、流内错误、超时、连接失败、提前 EOF 和协议错误统一转换为 `ModelErrorInfo`。标准分类覆盖认证、权限、无效请求、资源不存在、上下文溢出、配额耗尽、限流、过载、超时、连接、服务端、协议和未知错误。结构化信息可通过 `ModelError.info`、`Agent.last_run.error_info`、生命周期事件、Policy 错误上下文和 JSONL Trace 获取。
+
+裸 `Agent` 只有显式传入 `ModelRetryConfig` 才会自动重试；`BaseHarness` 与 `CodingHarness` 默认启用确定性重试：初次调用之外最多三次，退避为 2/4/8 秒。只有 `rate_limited`、`overloaded`、`timeout`、`connection` 和 `server` 会重试。合法且更长的 `Retry-After` 优先；若超过 60 秒等待上限则立即失败。
+
+所有 attempt 都属于同一个 Run 和 Turn。Context Provider 与 `before_model_call` Policy 每次都会重新运行，`after_model_call` 只处理成功响应。失败 attempt 会以 `stop_reason=error` 完整保存在 Event 与 Trace 中，包括部分文本和 ToolCall 诊断信息，但不会写入模型上下文。`model_retry_start` / `model_retry_end` 暴露重试等待和最终结果；Abort 可以打断正在进行的模型流或退避等待。
+
+`--model-timeout` 表示单次请求的连接及流式 I/O 空闲超时，不是整个 Run 的墙钟总时限；只要数据持续到达，健康的长流可以继续运行。
 
 可以直接运行以下命令验证批次契约：
 

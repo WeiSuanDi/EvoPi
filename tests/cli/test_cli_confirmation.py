@@ -5,10 +5,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from importlib import import_module
 
+import pytest
+
+from evopi.ai.api.base import ModelRequestError
 from evopi.cli.confirmation import (
     async_terminal_confirmation_handler,
     terminal_confirmation_handler,
 )
+from evopi.core.agent_loop import AgentLoop
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent
@@ -42,6 +46,23 @@ class ShellModel:
 
     async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
         yield ModelComplete(message=next(self._messages))
+
+
+class RetryModel:
+    name = "retry-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            raise ModelRequestError(
+                "temporary outage",
+                kind="server",
+                provider="test",
+            )
+        yield ModelComplete(message=AssistantMessage(content="done", stop_reason="stop"))
 
 
 def test_terminal_handler_renders_request_and_approves_yes() -> None:
@@ -168,3 +189,50 @@ def test_main_returns_130_for_keyboard_interrupt(monkeypatch, capsys) -> None:
 
     assert cli_main.main() == 130
     assert "EvoPi aborted." in capsys.readouterr().out
+
+
+def test_cli_retry_flags_validate_values() -> None:
+    parser = cli_main.build_parser()
+    args = parser.parse_args(
+        ["task", "--no-retry", "--max-retries", "5", "--model-timeout", "30"]
+    )
+    assert args.no_retry is True
+    assert args.max_retries == 5
+    assert args.model_timeout == 30
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["task", "--max-retries", "-1"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["task", "--model-timeout", "0"])
+
+
+def test_cli_retries_by_default_and_reports_to_stderr(tmp_path, monkeypatch, capsys) -> None:
+    model = RetryModel()
+    captured_timeout: list[float] = []
+
+    def factory(provider, *, timeout):
+        captured_timeout.append(timeout)
+        return model
+
+    async def no_wait(delay, signal):
+        return True
+
+    monkeypatch.setattr(cli_main, "model_from_environment", factory)
+    monkeypatch.setattr(AgentLoop, "_wait_for_retry", staticmethod(no_wait))
+    args = argparse.Namespace(
+        prompt="retry",
+        provider=None,
+        workspace=tmp_path,
+        trace=tmp_path / "retry.jsonl",
+        no_retry=False,
+        max_retries=3,
+        model_timeout=9.0,
+    )
+
+    assert asyncio.run(cli_main._run(args)) == 0
+
+    output = capsys.readouterr()
+    assert model.calls == 2
+    assert captured_timeout == [9.0]
+    assert "retrying model" in output.err
+    assert "server" in output.err
