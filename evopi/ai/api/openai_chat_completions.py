@@ -8,9 +8,17 @@ from typing import Any
 
 import httpx
 
-from evopi.core.cancellation import AbortSignal
-from evopi.ai.api.base import iter_sse_data, raise_for_model_status
+from evopi.ai.api.base import (
+    ModelRequestError,
+    iter_sse_data,
+    model_error_from_payload,
+    normalize_model_exception,
+    parse_retry_after,
+    raise_for_model_status,
+)
 from evopi.ai.auth.resolve import resolve_api_key
+from evopi.core.cancellation import AbortSignal
+from evopi.core.model_errors import ModelError
 from evopi.core.context import AgentContext
 from evopi.core.messages import (
     AssistantMessage,
@@ -77,48 +85,84 @@ class OpenAICompatibleModel:
         owns_client = self._client is None
         builder = AssistantMessageBuilder()
         finish_reason = "stop"
+        completed = False
         try:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            ) as response:
-                await raise_for_model_status(response)
-                async for chunk in iter_sse_data(response):
-                    if signal is not None and signal.aborted:
-                        return
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-                    text = delta.get("content")
-                    if text:
-                        builder.add_text(text)
-                        yield TextDelta(delta=text)
+            try:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                ) as response:
+                    await raise_for_model_status(
+                        response,
+                        provider="openai-compatible",
+                    )
+                    async for chunk in iter_sse_data(
+                        response,
+                        provider="openai-compatible",
+                    ):
+                        if signal is not None and signal.aborted:
+                            return
+                        if "error" in chunk:
+                            error = chunk.get("error")
+                            payload_error = error if isinstance(error, dict) else chunk
+                            raise model_error_from_payload(
+                                payload_error,
+                                provider="openai-compatible",
+                                retry_after=parse_retry_after(
+                                    response.headers.get("retry-after")
+                                ),
+                                request_id=response.headers.get("x-request-id"),
+                            )
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        text = delta.get("content")
+                        if text:
+                            builder.add_text(text)
+                            yield TextDelta(delta=text)
 
-                    for part in delta.get("tool_calls") or []:
-                        index = int(part.get("index", 0))
-                        function = part.get("function") or {}
-                        args_delta = function.get("arguments") or ""
-                        builder.add_tool_call_delta(
-                            index=index,
-                            arguments_delta=args_delta,
-                            tool_call_id=part.get("id"),
-                            tool_name=function.get("name"),
-                        )
-                        yield ToolCallDelta(
-                            index=index,
-                            arguments_delta=args_delta,
-                            tool_call_id=part.get("id"),
-                            tool_name=function.get("name"),
-                        )
-                    if choice.get("finish_reason"):
-                        finish_reason = choice["finish_reason"]
+                        for part in delta.get("tool_calls") or []:
+                            index = int(part.get("index", 0))
+                            function = part.get("function") or {}
+                            args_delta = function.get("arguments") or ""
+                            builder.add_tool_call_delta(
+                                index=index,
+                                arguments_delta=args_delta,
+                                tool_call_id=part.get("id"),
+                                tool_name=function.get("name"),
+                            )
+                            yield ToolCallDelta(
+                                index=index,
+                                arguments_delta=args_delta,
+                                tool_call_id=part.get("id"),
+                                tool_name=function.get("name"),
+                            )
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                            completed = True
+            except ModelError:
+                raise
+            except Exception as exc:
+                raise normalize_model_exception(
+                    exc,
+                    provider="openai-compatible",
+                ) from exc
         finally:
             if owns_client:
                 await client.aclose()
+
+        if not completed:
+            raise ModelRequestError(
+                "OpenAI-compatible stream ended without a finish reason",
+                kind="connection",
+                provider="openai-compatible",
+                code="premature_stream_eof",
+            )
 
         stop_map: dict[str, StopReason] = {
             "tool_calls": "tool_use",

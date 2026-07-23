@@ -4,12 +4,14 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from evopi.ai.api.anthropic_messages import AnthropicMessagesModel
 from evopi.ai.api.openai_chat_completions import OpenAICompatibleModel
 from evopi.core.agent import Agent
 from evopi.core.context import AgentContext
 from evopi.core.messages import SystemMessage, UserMessage
+from evopi.core.model_errors import ModelError
 from evopi.core.stream import ModelComplete, TextDelta
 from evopi.core.tool import Tool
 
@@ -145,6 +147,133 @@ def test_abort_closes_openai_response_without_closing_injected_client() -> None:
         assert answer.stop_reason == "aborted"
         assert body.closed is True
         assert client.is_closed is False
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai-compatible"])
+@pytest.mark.parametrize(
+    ("status", "body", "kind"),
+    [
+        (401, {"error": {"message": "bad key"}}, "authentication"),
+        (403, {"error": {"message": "denied"}}, "permission"),
+        (429, {"error": {"message": "slow down"}}, "rate_limited"),
+        (529, {"error": {"message": "overloaded"}}, "overloaded"),
+        (503, {"error": {"message": "unavailable"}}, "server"),
+    ],
+)
+def test_adapters_share_http_error_classification(
+    provider: str,
+    status: int,
+    body: dict,
+    kind: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.extensions["timeout"]["read"] == 7.0
+        return httpx.Response(status, json=body, headers={"retry-after": "1"})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        if provider == "anthropic":
+            model = AnthropicMessagesModel(
+                model="test",
+                api_key="key",
+                base_url="https://example.test",
+                timeout=7,
+                client=client,
+            )
+        else:
+            model = OpenAICompatibleModel(
+                model="test",
+                api_key="key",
+                base_url="https://example.test/v1",
+                timeout=7,
+                client=client,
+            )
+        with pytest.raises(ModelError) as caught:
+            _ = [event async for event in model.stream(AgentContext())]
+        assert caught.value.info.kind == kind
+        assert caught.value.info.retry_after == 1
+        assert client.is_closed is False
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai-compatible"])
+def test_adapters_classify_premature_stream_eof_as_connection(provider: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if provider == "anthropic":
+            body = 'data: {"type":"message_start","message":{}}\n\n'
+        else:
+            body = 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+        return httpx.Response(200, text=body)
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        if provider == "anthropic":
+            model = AnthropicMessagesModel(model="test", api_key="key", client=client)
+        else:
+            model = OpenAICompatibleModel(model="test", api_key="key", client=client)
+        with pytest.raises(ModelError) as caught:
+            _ = [event async for event in model.stream(AgentContext())]
+        assert caught.value.info.kind == "connection"
+        assert caught.value.info.retryable is True
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_invalid_sse_json_is_a_non_retryable_protocol_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="data: {not-json}\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        model = OpenAICompatibleModel(model="test", api_key="key", client=client)
+        with pytest.raises(ModelError) as caught:
+            _ = [event async for event in model.stream(AgentContext())]
+        assert caught.value.info.kind == "protocol"
+        assert caught.value.info.retryable is False
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("provider", "body", "kind"),
+    [
+        (
+            "anthropic",
+            'data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n',
+            "overloaded",
+        ),
+        (
+            "openai-compatible",
+            'data: {"error":{"code":"rate_limit_error","message":"slow down"}}\n\n',
+            "rate_limited",
+        ),
+    ],
+)
+def test_adapters_classify_errors_emitted_inside_stream(
+    provider: str,
+    body: str,
+    kind: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"retry-after": "4"})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        if provider == "anthropic":
+            model = AnthropicMessagesModel(model="test", api_key="key", client=client)
+        else:
+            model = OpenAICompatibleModel(model="test", api_key="key", client=client)
+        with pytest.raises(ModelError) as caught:
+            _ = [event async for event in model.stream(AgentContext())]
+        assert caught.value.info.kind == kind
+        assert caught.value.info.retry_after == 4
         await client.aclose()
 
     asyncio.run(scenario())

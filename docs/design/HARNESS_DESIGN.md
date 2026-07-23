@@ -70,6 +70,15 @@ Lifecycle v2 中，Harness 保存 Core 的结构化 `end_reason`：正常回答�
 `after_turn` Hook 上返回 `terminate` 并把原因写入 Trace，Harness 只把最终动作转换为
 布尔停止决定。它与工具结果的 `terminate` 批次提示互不替代。
 
+Provider Reliability v1 中，Harness 负责选择 Core 重试配置，但不重新实现重试循环。
+`BaseHarness` 与 `CodingHarness` 默认传入启用状态的 `ModelRetryConfig`，裸 `Agent` 则默认
+关闭，便于库调用方明确决定行为。每次重试仍重新进入 Harness 的 Context Provider 和
+`before_model_call` Hook，因此重试不会绕过治理；Policy 阻断直接终止当前重试链。
+
+Harness 将最终 `error` 事件中的 `ModelErrorInfo` 放入 `PolicyContext.error_info`，并保持
+字符串 `error` 兼容。`on_error` 只在重试耗尽或错误不可重试时执行一次，不观察每个瞬态
+attempt；每次尝试的细节由 `model_start`、`model_retry_*`、消息事件和 Trace 提供。
+
 ### 2. Hook 点治理
 
 Harness 要提供 Policy 可以插入的治理节点。

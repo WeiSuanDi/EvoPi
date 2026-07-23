@@ -44,6 +44,12 @@ Abort 是 Core/Harness 的运行级控制事实，不参与普通 Policy 冲突�
 脱敏或验证中止结果，但不能重新允许已经中止的模型调用或工具执行，也不能把中止结果
 改写为成功的 `terminate=True`。
 
+`PolicyContext.error_info` 为 `on_error` 提供 Provider-neutral 的结构化模型错误，原有
+字符串 `error` 继续保留。Provider Reliability v1 不增加 Policy 重试 Hook，也不允许
+Policy 直接改变 Core 已确定的重试预算或错误可重试性：Adapter 负责分类，Core 负责机械
+重试，Harness 负责配置。每个 attempt 都重新运行 `before_model_call`，所以 Policy 仍可在
+重试前根据最新上下文阻断调用；最终失败时 `on_error` 只执行一次。
+
 ## 三类核心 Policy
 
 ### BeforeToolPolicy
@@ -80,6 +86,8 @@ Abort 是 Core/Harness 的运行级控制事实，不参与普通 Policy 冲突�
 - fail
 - need_retry
 - validation_report
+
+这里的 `need_retry` 表达领域验证结论，不等同于 Provider 瞬态错误的自动重试。
 
 ## 内置工具确认 Policy
 

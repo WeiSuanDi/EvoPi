@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 from evopi.core.messages import AssistantMessage
+from evopi.core.model_errors import ModelErrorInfo
 
 AgentEndReason: TypeAlias = Literal[
     "completed",
@@ -27,6 +28,7 @@ class AgentRunState:
     run_id: str
     end_reason: AgentEndReason
     error: str | None = None
+    error_info: ModelErrorInfo | None = None
 
 
 __all__ = ["AgentEndReason", "AgentLoopResult", "AgentRunState"]

@@ -11,7 +11,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Stable agent core** — typed messages, streaming events, tool calls, tool results, and bounded multi-turn execution.
 - **Pluggable harnesses** — compose prompts, tools, context, lifecycle behavior, and policies for a specific domain.
 - **Policy-governed actions** — allow, block, rewrite, validate, or terminate work at runtime hooks.
-- **Provider-independent models** — built-in streaming adapters for Anthropic Messages and OpenAI-compatible Chat Completions APIs.
+- **Reliable provider boundary** — built-in Anthropic Messages and OpenAI-compatible adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
@@ -102,6 +102,13 @@ Choose a provider or workspace explicitly:
 evopi --provider anthropic --workspace C:\path\to\project 'Run the tests and explain any failures.'
 ```
 
+Harness-backed CLI runs retry transient model failures up to three additional times by default. Control this behavior explicitly when needed:
+
+```powershell
+evopi --max-retries 5 --model-timeout 90 'Review this repository.'
+evopi --no-retry 'Run this task without automatic model retries.'
+```
+
 On PowerShell, single quotes are recommended when a prompt contains spaces or quotation marks.
 
 ## Python API
@@ -142,6 +149,16 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
 
 Cancelling the task that is awaiting `prompt()` performs the same cleanup and then re-raises `asyncio.CancelledError`. The CLI maps its first `Ctrl+C` to graceful cleanup and exits with status 130; a second interrupt retains the host runtime's force-interrupt behavior.
+
+## Provider reliability
+
+Model adapters translate provider HTTP responses, stream errors, timeouts, connection failures, premature EOF, and protocol failures into `ModelErrorInfo`. The normalized kinds distinguish authentication, permission, invalid requests, missing resources, context overflow, exhausted quota, rate limits, overload, timeout, connection, server, protocol, and unknown failures. Structured details are available on `ModelError.info`, `Agent.last_run.error_info`, lifecycle events, Policy error contexts, and JSONL Trace records.
+
+Bare `Agent` instances do not retry unless given a `ModelRetryConfig`. `BaseHarness` and `CodingHarness` enable deterministic retries by default: up to three additional full model attempts with 2/4/8-second backoff. Only transient `rate_limited`, `overloaded`, `timeout`, `connection`, and `server` errors retry. A longer valid `Retry-After` takes precedence; values above the 60-second wait ceiling fail immediately.
+
+Every retry remains in the same Run and Turn. Context providers and `before_model_call` Policies run again for each attempt, while `after_model_call` runs only for a successful response. A failed attempt is retained in events and Trace with `stop_reason=error`, including partial text or tool-call diagnostics, but is never committed to model context. `model_retry_start` and `model_retry_end` make retry timing and outcome observable. Abort interrupts both the active stream and backoff wait.
+
+`--model-timeout` is the connection and streaming I/O idle timeout for an individual request; it is not a wall-clock limit for the whole Run. A healthy long stream may continue as long as data keeps arriving.
 
 To verify the batch contract directly, run:
 

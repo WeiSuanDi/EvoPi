@@ -13,6 +13,12 @@ from evopi.core.messages import (
     UserMessage,
 )
 from evopi.core.model import Model
+from evopi.core.model_errors import (
+    ModelError,
+    ModelErrorInfo,
+    ModelErrorKind,
+    ModelRetryConfig,
+)
 from evopi.core.run import AgentEndReason, AgentLoopResult, AgentRunState
 from evopi.core.tool import Tool, ToolCall, ToolResult
 
@@ -28,6 +34,10 @@ __all__ = [
     "CoreEvent",
     "Message",
     "Model",
+    "ModelError",
+    "ModelErrorInfo",
+    "ModelErrorKind",
+    "ModelRetryConfig",
     "ShouldStopAfterTurn",
     "SystemMessage",
     "Tool",

@@ -28,6 +28,7 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import AssistantMessage, Message, SystemMessage, UserMessage
 from evopi.core.model import Model
+from evopi.core.model_errors import ModelRetryConfig, error_info_from_exception
 from evopi.core.run import AgentEndReason, AgentLoopResult, AgentRunState
 from evopi.core.tool import Tool
 
@@ -49,6 +50,7 @@ class Agent:
         system_prompt: str = "",
         tools: list[Tool] | None = None,
         max_turns: int = 20,
+        retry_config: ModelRetryConfig | None = None,
         before_tool_call: BeforeToolCall | None = None,
         after_tool_call: AfterToolCall | None = None,
         prepare_context: PrepareContext | None = None,
@@ -62,7 +64,7 @@ class Agent:
         self.messages: list[Message] = []
         if system_prompt:
             self.messages.append(SystemMessage(content=system_prompt))
-        self._loop = AgentLoop(max_turns=max_turns)
+        self._loop = AgentLoop(max_turns=max_turns, retry_config=retry_config)
         self._listeners: list[EventListener] = []
         self._before_tool_call = before_tool_call
         self._after_tool_call = after_tool_call
@@ -225,6 +227,11 @@ class Agent:
                     run_id=run_id,
                     end_reason=reason,
                     error=error,
+                    error_info=(
+                        error_info_from_exception(failure)
+                        if failure is not None
+                        else None
+                    ),
                 )
                 await self._emit(
                     CoreEvent(
@@ -234,6 +241,11 @@ class Agent:
                             "reason": reason,
                             "messages": list(self.messages[run_start:]),
                             "error": error,
+                            "error_info": (
+                                error_info_from_exception(failure)
+                                if failure is not None
+                                else None
+                            ),
                         },
                     )
                 )
@@ -326,8 +338,20 @@ class Agent:
             "turn_limit" if isinstance(failure, TurnLimitError) else "error"
         )
         error = f"{type(failure).__name__}: {failure}"
-        self._last_run = AgentRunState(run_id=run_id, end_reason=reason, error=error)
-        await self._emit(CoreEvent(type="error", run_id=run_id, data={"error": error}))
+        error_info = error_info_from_exception(failure)
+        self._last_run = AgentRunState(
+            run_id=run_id,
+            end_reason=reason,
+            error=error,
+            error_info=error_info,
+        )
+        await self._emit(
+            CoreEvent(
+                type="error",
+                run_id=run_id,
+                data={"error": error, "error_info": error_info},
+            )
+        )
         await self._emit(
             CoreEvent(
                 type="agent_end",
@@ -336,13 +360,23 @@ class Agent:
                     "reason": reason,
                     "messages": list(self.messages[run_start:]),
                     "error": error,
+                    "error_info": error_info,
                 },
             )
         )
 
     async def _emit_cleanup_error(self, run_id: str, failure: Exception) -> None:
         error = f"{type(failure).__name__}: {failure}"
-        await self._emit(CoreEvent(type="error", run_id=run_id, data={"error": error}))
+        await self._emit(
+            CoreEvent(
+                type="error",
+                run_id=run_id,
+                data={
+                    "error": error,
+                    "error_info": error_info_from_exception(failure),
+                },
+            )
+        )
 
     def _last_assistant_message(self, run_start: int) -> AssistantMessage:
         for message in reversed(self.messages[run_start:]):

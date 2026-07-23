@@ -16,6 +16,8 @@ CoreEventType: TypeAlias = Literal[
     "turn_start",
     "turn_end",
     "model_start",
+    "model_retry_start",
+    "model_retry_end",
     "message_start",
     "message_update",
     "message_end",

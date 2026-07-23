@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -12,6 +13,21 @@ from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.core.events import CoreEvent
+from evopi.core.model_errors import ModelRetryConfig
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=["anthropic", "openai-compatible"])
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))
+    parser.add_argument("--no-retry", action="store_true")
+    parser.add_argument("--max-retries", type=_non_negative_int, default=3)
+    parser.add_argument("--model-timeout", type=_positive_float, default=120.0)
     return parser
 
 
@@ -27,17 +46,34 @@ async def _run(args: argparse.Namespace) -> int:
     prompt = args.prompt
     if prompt is None:
         prompt = (await PromptSession[str]().prompt_async("EvoPi> ")).strip()
-    model = model_from_environment(args.provider)
+    if hasattr(args, "model_timeout"):
+        model = model_from_environment(args.provider, timeout=args.model_timeout)
+    else:  # Compatibility for callers constructing a pre-v1 Namespace.
+        model = model_from_environment(args.provider)
     harness = CodingHarness(
         model=model,
         workspace=args.workspace,
         trace_path=args.trace,
+        retry_config=ModelRetryConfig(
+            enabled=not getattr(args, "no_retry", False),
+            max_retries=getattr(args, "max_retries", 3),
+        ),
         confirmation_handler=async_terminal_confirmation_handler,
     )
 
     def display(event: CoreEvent) -> None:
         if event.type == "message_update" and event.data.get("kind") == "text":
             print(event.data.get("delta", ""), end="", flush=True)
+        elif event.type == "model_retry_start":
+            info = event.data.get("error_info")
+            kind = getattr(info, "kind", "unknown")
+            print(
+                f"\nEvoPi retrying model after {kind} error "
+                f"(attempt {event.data.get('next_attempt')}, "
+                f"delay {event.data.get('delay')}s)...",
+                file=sys.stderr,
+                flush=True,
+            )
 
     harness.subscribe(display)
     answer = await harness.prompt(prompt)
