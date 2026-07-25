@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+from typing import Any, BinaryIO, List, Literal
 from uuid import UUID
 
 from evopi.core.messages import AssistantMessage, ToolResultMessage, UserMessage
@@ -29,7 +29,9 @@ from evopi.session.errors import (
     SessionSerializationError,
 )
 from evopi.session.tree import (
+    BranchEntry,
     CheckpointEntry,
+    CompactEntry,
     MessageEntry,
     RunEndEntry,
     RunStartEntry,
@@ -183,6 +185,8 @@ class SessionManager:
         self._closed = False
         self._broken = False
         self._recovery = _RecoveryState(reason="in_memory")
+        self._active_leaf_id: str | None = None
+        self._leaf_ids: set[str] = set()
 
     @classmethod
     def in_memory(
@@ -255,6 +259,7 @@ class SessionManager:
             manager.header = header
             manager._entries = entries
             manager._entry_index = {entry.entry_id: entry for entry in entries}
+            manager._rebuild_leaf_state()
             manager._recovery.repaired_trailing_line = repaired
             if repaired:
                 manager._recovery.warnings.append(
@@ -315,7 +320,23 @@ class SessionManager:
 
     @property
     def leaf_id(self) -> str | None:
-        return self._entries[-1].entry_id if self._entries else None
+        return self._active_leaf_id
+
+    def switch_leaf(self, leaf_id: str) -> None:
+        """Switch the active position to any entry in the tree.
+
+        The entry does not need to be a leaf — appending to an inner node
+        implicitly creates a new branch.
+        """
+        self._ensure_available()
+        normalized = _normalize_uuid(leaf_id, "leaf_id")
+        if normalized not in self._entry_index:
+            raise SessionError(f"Entry '{leaf_id}' does not exist")
+        self._active_leaf_id = normalized
+
+    def leaves(self) -> tuple[str, ...]:
+        """Return all leaf entry IDs (branch tips)."""
+        return tuple(self._leaf_ids)
 
     @property
     def entries(self) -> tuple[SessionEntry, ...]:
@@ -516,6 +537,121 @@ class SessionManager:
         self._recovery.checkpoint_id = checkpoint_id
         return checkpoint
 
+    def branch(self, *, from_entry_id: str, branch_name: str = "") -> BranchEntry:
+        """Create a new branch from an existing entry.
+
+        The branch shares all ancestors with the original path.  Subsequent
+        appends will follow the new branch; use ``switch_leaf()`` to move
+        between branches.
+        """
+        self._ensure_available()
+        normalized = _normalize_uuid(from_entry_id, "from_entry_id")
+        anchor = self._entry_index.get(normalized)
+        if anchor is None:
+            raise SessionError(f"Entry '{from_entry_id}' does not exist")
+        # Determine the run_id for the branch marker
+        run_id = getattr(anchor, "run_id", "")
+        entry = BranchEntry(
+            entry_id=new_id(),
+            parent_id=normalized,
+            run_id=run_id,
+            branch_name=branch_name,
+        )
+        self._append_entry(entry)
+        return entry
+
+    def fork(
+        self, *, from_entry_id: str | None = None
+    ) -> "SessionManager":
+        """Create a fresh persistent Session with messages up to *from_entry_id*.
+
+        If *from_entry_id* is ``None`` the fork starts from the active leaf.
+        The original Session is unaffected.
+        """
+        self._ensure_available()
+        if not self.is_persistent:
+            raise SessionError("Fork requires a persistent Session")
+        if from_entry_id is None:
+            anchor_id = self._active_leaf_id
+        else:
+            anchor_id = _normalize_uuid(from_entry_id, "from_entry_id")
+        if anchor_id is None or anchor_id not in self._entry_index:
+            raise SessionError(f"Entry '{from_entry_id}' does not exist")
+
+        # Collect messages up to (and including) anchor_id
+        fork_messages: list[UserMessage | AssistantMessage | ToolResultMessage] = []
+        current: str | None = anchor_id
+        while current is not None:
+            entry = self._entry_index.get(current)
+            if entry is None:
+                break
+            if isinstance(entry, MessageEntry):
+                fork_messages.append(entry.message)
+            current = entry.parent_id
+        fork_messages.reverse()
+
+        new_session = SessionManager.create(
+            self.attached_workspace, root=self.root
+        )
+        # Seed the new session with forked messages via a throwaway run
+        run_id = new_id()
+        fingerprint = self.last_runtime_fingerprint
+        if fingerprint is None:
+            raise SessionError("Cannot fork a Session with no runtime fingerprint")
+        new_session.append_run_start(
+            run_id=run_id,
+            runtime_fingerprint=fingerprint,
+        )
+        for msg in fork_messages:
+            new_session.append_message(run_id=run_id, message=msg)
+        new_session.append_run_end(
+            run_id=run_id, reason="completed", recovered=True
+        )
+        return new_session
+
+    def compact(
+        self,
+        *,
+        up_to_entry_id: str,
+        summary: str,
+        compacted_ids: List[str] | None = None,
+    ) -> CompactEntry:
+        """Insert a compaction marker that bypasses messages up to *up_to_entry_id*.
+
+        The active leaf moves to the new ``CompactEntry``.  The original
+        detailed messages remain on a separate branch and can be revisited
+        via ``switch_leaf()``.
+        """
+        self._ensure_available()
+        anchor = _normalize_uuid(up_to_entry_id, "up_to_entry_id")
+        if anchor not in self._entry_index:
+            raise SessionError(f"Entry '{up_to_entry_id}' does not exist")
+
+        if compacted_ids is None:
+            # Collect message IDs between anchor and active leaf
+            cids: list[str] = []
+            current = self._active_leaf_id
+            while current is not None and current != anchor:
+                entry = self._entry_index.get(current)
+                if entry is None:
+                    break
+                if isinstance(entry, MessageEntry):
+                    cids.append(current)
+                current = entry.parent_id
+            cids.reverse()
+        else:
+            cids = [_normalize_uuid(eid, "compacted_id") for eid in compacted_ids]
+
+        entry = CompactEntry(
+            entry_id=new_id(),
+            parent_id=anchor,
+            run_id=getattr(self._entry_index[anchor], "run_id", ""),
+            summary=summary,
+            compacted_entry_ids=tuple(cids),
+        )
+        self._append_entry(entry)
+        return entry
+
     def get_entry(self, entry_id: str) -> SessionEntry:
         try:
             return self._entry_index[_normalize_uuid(entry_id, "entry_id")]
@@ -553,6 +689,22 @@ class SessionManager:
         path.reverse()
         return tuple(path)
 
+    def _rebuild_leaf_state(self) -> None:
+        """Compute which entries are leaves from the loaded tree."""
+        children: set[str] = set()
+        for entry in self._entries:
+            if entry.parent_id is not None:
+                children.add(entry.parent_id)
+        self._leaf_ids = {
+            entry.entry_id for entry in self._entries
+            if entry.entry_id not in children
+        }
+        # Default active leaf to the last entry (backward compat).
+        if self._entries:
+            self._active_leaf_id = self._entries[-1].entry_id
+        else:
+            self._active_leaf_id = None
+
     def reset(self) -> None:
         """Reset an in-memory Session; persistent callers must attach a new manager."""
 
@@ -571,6 +723,8 @@ class SessionManager:
         self._last_checkpoint = None
         self._recovery = _RecoveryState(reason="in_memory")
         self._broken = False
+        self._active_leaf_id = None
+        self._leaf_ids.clear()
 
     def close(self) -> None:
         if self._closed:
@@ -607,7 +761,7 @@ class SessionManager:
             raise SessionPersistenceError(
                 f"Duplicate Session entry ID: {entry.entry_id}"
             )
-        if entry.parent_id != self.leaf_id:
+        if entry.parent_id != self._active_leaf_id:
             raise SessionPersistenceError(
                 "New Session entries must extend the current active leaf"
             )
@@ -627,6 +781,11 @@ class SessionManager:
             ) from exc
         self._entries.append(entry)
         self._entry_index[entry.entry_id] = entry
+        # Maintain leaf set: parent is no longer a leaf, new entry is.
+        if entry.parent_id is not None:
+            self._leaf_ids.discard(entry.parent_id)
+        self._leaf_ids.add(entry.entry_id)
+        self._active_leaf_id = entry.entry_id
         if isinstance(entry, MessageEntry):
             self._messages.append(entry.message)
 
@@ -717,6 +876,19 @@ class SessionManager:
         for replay_entry in path[replay_start:]:
             if isinstance(replay_entry, MessageEntry):
                 messages.append(replay_entry.message)
+            elif isinstance(replay_entry, CompactEntry):
+                messages.append(
+                    UserMessage(
+                        content=(
+                            "<summary>\n"
+                            f"{replay_entry.summary}\n"
+                            "</summary>\n\n"
+                            "The above is a summary of the earlier conversation. "
+                            "Continue helping based on this context."
+                        ),
+                        metadata={"compaction_summary": True},
+                    )
+                )
         self._messages = messages
 
     def _recover_interrupted_run(self) -> None:

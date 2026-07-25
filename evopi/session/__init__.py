@@ -16,7 +16,9 @@ from evopi.session.session import (
     workspace_bucket,
 )
 from evopi.session.tree import (
+    BranchEntry,
     CheckpointEntry,
+    CompactEntry,
     MessageEntry,
     RunEndEntry,
     RunStartEntry,
@@ -29,7 +31,9 @@ from evopi.session.tree import (
 )
 
 __all__ = [
+    "BranchEntry",
     "CheckpointEntry",
+    "CompactEntry",
     "MessageEntry",
     "RunEndEntry",
     "RunStartEntry",

@@ -13,6 +13,7 @@ from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
 from evopi.policy.approval import ApprovalMode
 from evopi.session import SessionManager
+from evopi.session.compact import CompactionSettings
 
 
 class CodingHarness(BaseHarness):
@@ -30,6 +31,9 @@ class CodingHarness(BaseHarness):
         session_manager: SessionManager | None = None,
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
+        deadline: float | None = None,
+        tool_timeout: float | None = None,
+        compaction_settings: CompactionSettings | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         super().__init__(
@@ -44,6 +48,9 @@ class CodingHarness(BaseHarness):
             ),
             approvals_path=approvals_path,
             approval_mode=approval_mode,
+            deadline=deadline,
+            tool_timeout=tool_timeout,
+            compaction_settings=compaction_settings,
         )
         for tool in coding_tools(self.workspace):
             self.register_tool(tool)

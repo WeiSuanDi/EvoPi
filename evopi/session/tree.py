@@ -29,6 +29,7 @@ SessionRunEndReason: TypeAlias = Literal[
     "aborted",
     "error",
     "turn_limit",
+    "deadline_exceeded",
     "interrupted",
 ]
 SessionEntryType: TypeAlias = Literal[
@@ -36,6 +37,8 @@ SessionEntryType: TypeAlias = Literal[
     "message",
     "run_end",
     "checkpoint",
+    "branch",
+    "compact",
 ]
 
 
@@ -129,8 +132,32 @@ class CheckpointEntry:
     type: Literal["checkpoint"] = field(default="checkpoint", init=False)
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BranchEntry:
+    entry_id: str
+    parent_id: str | None
+    run_id: str
+    branch_name: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = SESSION_SCHEMA_VERSION
+    type: Literal["branch"] = field(default="branch", init=False)
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class CompactEntry:
+    entry_id: str
+    parent_id: str | None
+    run_id: str
+    summary: str
+    compacted_entry_ids: tuple[str, ...] = ()
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = SESSION_SCHEMA_VERSION
+    type: Literal["compact"] = field(default="compact", init=False)
+
+
 SessionEntry: TypeAlias = (
     RunStartEntry | MessageEntry | RunEndEntry | CheckpointEntry
+    | BranchEntry | CompactEntry
 )
 
 
@@ -184,7 +211,7 @@ def entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
                 "recovered": entry.recovered,
             }
         )
-    else:
+    elif isinstance(entry, CheckpointEntry):
         base.update(
             {
                 "checkpoint_id": entry.checkpoint_id,
@@ -193,6 +220,11 @@ def entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
                 "active_entry_id": entry.active_entry_id,
             }
         )
+    elif isinstance(entry, BranchEntry):
+        base["branch_name"] = entry.branch_name
+    elif isinstance(entry, CompactEntry):
+        base["summary"] = entry.summary
+        base["compacted_entry_ids"] = list(entry.compacted_entry_ids)
     return base
 
 
@@ -236,6 +268,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             "aborted",
             "error",
             "turn_limit",
+            "deadline_exceeded",
             "interrupted",
         }:
             raise SessionFormatError("invalid Session Run end reason")
@@ -275,6 +308,33 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             active_entry_id=_require_id(
                 value.get("active_entry_id"), "active_entry_id"
             ),
+        )
+    if entry_type == "branch":
+        branch_name = value.get("branch_name", "")
+        if not isinstance(branch_name, str):
+            raise SessionFormatError("branch_name must be a string")
+        return BranchEntry(
+            entry_id=entry_id,
+            parent_id=parent_id,
+            created_at=created_at,
+            run_id=run_id,
+            branch_name=branch_name,
+        )
+    if entry_type == "compact":
+        summary = _require_string(value.get("summary"), "compact.summary")
+        raw_ids = value.get("compacted_entry_ids", [])
+        if not isinstance(raw_ids, list):
+            raise SessionFormatError("compacted_entry_ids must be an array")
+        compacted: list[str] = []
+        for raw_id in raw_ids:
+            compacted.append(_require_id(raw_id, "compacted_entry_id"))
+        return CompactEntry(
+            entry_id=entry_id,
+            parent_id=parent_id,
+            created_at=created_at,
+            run_id=run_id,
+            summary=summary,
+            compacted_entry_ids=tuple(compacted),
         )
     raise SessionFormatError(f"unsupported Session entry type: {entry_type!r}")
 
@@ -558,7 +618,9 @@ def _optional_number(value: Any, field_name: str) -> float | None:
 
 
 __all__ = [
+    "BranchEntry",
     "CheckpointEntry",
+    "CompactEntry",
     "MessageEntry",
     "RunEndEntry",
     "RunStartEntry",

@@ -15,6 +15,11 @@ class Model(Protocol):
     @property
     def name(self) -> str: ...
 
+    @property
+    def context_window(self) -> int:
+        """Maximum context tokens the model accepts.  0 = unknown."""
+        return 0
+
     def stream(
         self,
         context: AgentContext,

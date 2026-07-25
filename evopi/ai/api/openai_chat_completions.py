@@ -48,6 +48,7 @@ class OpenAICompatibleModel:
         timeout: float = 120.0,
         headers: dict[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
+        context_window: int = 0,
     ) -> None:
         self.model = model
         self.api_key = resolve_api_key(api_key, "OPENAI_API_KEY")
@@ -57,10 +58,15 @@ class OpenAICompatibleModel:
         self.timeout = timeout
         self.headers = dict(headers or {})
         self._client = client
+        self._context_window = context_window
 
     @property
     def name(self) -> str:
         return self.model
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
 
     async def stream(
         self,

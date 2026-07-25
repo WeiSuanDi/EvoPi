@@ -47,6 +47,7 @@ class AnthropicMessagesModel:
         timeout: float = 120.0,
         headers: dict[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
+        context_window: int = 0,
     ) -> None:
         self.model = model
         self.api_key = resolve_api_key(api_key, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
@@ -55,11 +56,16 @@ class AnthropicMessagesModel:
         self.temperature = temperature
         self.timeout = timeout
         self.headers = dict(headers or {})
+        self._context_window = context_window
         self._client = client
 
     @property
     def name(self) -> str:
         return self.model
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
 
     async def stream(
         self,

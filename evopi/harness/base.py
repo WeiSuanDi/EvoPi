@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import (
     AssistantMessage,
+    Message,
     ToolResultMessage,
     UserMessage,
 )
@@ -40,8 +42,20 @@ from evopi.session import (
     SessionManager,
     build_runtime_fingerprint,
 )
+from evopi.session.compact import (
+    DEFAULT_COMPACTION_SETTINGS,
+    CompactionError,
+    CompactionSettings,
+    assemble_context,
+    compact_session,
+    estimate_context_tokens,
+    should_compact,
+)
+from evopi.session.tree import CompactEntry
 from evopi.trace.events import TraceRecord
 from evopi.trace.writer import JsonlTraceWriter
+
+_logger = logging.getLogger(__name__)
 
 
 class PolicyBlockedError(RuntimeError):
@@ -63,10 +77,12 @@ class BaseHarness:
         session_manager: SessionManager | None = None,
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
+        compaction_settings: CompactionSettings | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
         self.tool_timeout = tool_timeout
+        self.compaction_settings = compaction_settings or DEFAULT_COMPACTION_SETTINGS
         self.tools = ToolManager()
         self.policies = PolicyManager(
             ApprovalStore(approvals_path, mode=approval_mode)
@@ -168,6 +184,10 @@ class BaseHarness:
             self.lifecycle.abort(error)
         else:
             self.lifecycle.complete(end_reason=end_reason)
+
+        # Auto-compaction check
+        if end_reason not in ("aborted", "error", "turn_limit"):
+            await self._maybe_compact()
         return answer
 
     def reset(self) -> None:
@@ -193,6 +213,29 @@ class BaseHarness:
         *,
         signal: AbortSignal | None = None,
     ) -> AgentContext:
+        # Apply compaction: find any CompactEntry in the session tree and
+        # replace compacted history with the summary.
+        for entry in reversed(list(self.session.get_active_path())):
+            if isinstance(entry, CompactEntry):
+                compacted_ids = set(entry.compacted_entry_ids)
+                summary = entry.summary
+                # Find the first message after the compaction point
+                first_kept = 0
+                for i, msg in enumerate(context.messages):
+                    if getattr(msg, "id", None) in compacted_ids:
+                        first_kept = max(first_kept, i + 1)
+                if first_kept > 0:
+                    assembled = assemble_context(
+                        list(context.messages),
+                        compact_summary=summary,
+                        first_kept_index=first_kept,
+                    )
+                    context = AgentContext(
+                        messages=list(assembled),
+                        tools=context.tools,
+                    )
+                break  # only process the latest compaction
+
         prepared = await self.context.prepare(context, signal=signal)
         evaluation = await self._evaluate(
             PolicyContext(
@@ -646,6 +689,76 @@ class BaseHarness:
             tools=[tool.definition() for tool in self.tools.all()],
             policies=policies,
         )
+
+    async def _maybe_compact(self) -> None:
+        """Check whether the context exceeds the compaction threshold and,
+        if so, generate a summary and insert a ``CompactEntry`` into the
+        session tree.
+        """
+        settings = self.compaction_settings
+        if not settings.enabled:
+            return
+        context_window = getattr(self.model, "context_window", 0)
+        if context_window <= 0:
+            return  # model doesn't report its window — skip
+
+        messages: list[Message] = list(self.session.messages)  # type: ignore[assignment]
+        if len(messages) < 4:
+            return  # nothing worth compacting
+
+        tools_defs = [t.definition() for t in self.tools.all()]
+        context_tokens = estimate_context_tokens(
+            messages, system_prompt=self.system_prompt, tools=tools_defs
+        )
+        if not should_compact(context_tokens, context_window, settings):
+            return
+
+        _logger.info(
+            "Compaction triggered: %d tokens > %d window - %d reserve",
+            context_tokens,
+            context_window,
+            settings.reserve_tokens,
+        )
+
+        # Find previous compaction summary for incremental updates
+        previous_summary: str | None = None
+        for entry in reversed(list(self.session.get_active_path())):
+            if isinstance(entry, CompactEntry):
+                previous_summary = entry.summary
+                break
+
+        try:
+            summary, cut = await compact_session(
+                messages,
+                self.model,
+                settings,
+                previous_summary=previous_summary,
+            )
+        except CompactionError:
+            _logger.warning("Compaction summary generation failed; skipping")
+            return
+
+        # Insert a CompactEntry into the session.
+        if self.session.is_persistent and self.session.leaf_id is not None:
+            try:
+                self.session.compact(
+                    up_to_entry_id=self.session.leaf_id,
+                    summary=summary,
+                )
+                _logger.info("Compaction entry written, tokens before=%d", context_tokens)
+            except Exception:
+                _logger.warning("Failed to persist compaction entry", exc_info=True)
+
+        # Apply compaction to the Agent's in-memory context so future turns
+        # use the compacted view.
+        assembled = assemble_context(
+            messages,
+            compact_summary=summary,
+            first_kept_index=cut.first_kept_index,
+        )
+        # Keep system message(s) and replace the rest
+        system_msgs = [m for m in self.agent.messages if m.role == "system"]
+        self.agent.messages = system_msgs + list(assembled)
 
     @staticmethod
     def _policy_evaluation_data(

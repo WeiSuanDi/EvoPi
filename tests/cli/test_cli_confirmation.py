@@ -153,7 +153,7 @@ def test_cli_injects_confirmation_handler_and_runs_approved_shell(
         workspace=tmp_path,
         trace=trace_path,
     )
-    monkeypatch.setattr(cli_main, "model_from_environment", lambda provider, *, timeout: ShellModel())
+    monkeypatch.setattr(cli_main, "model_from_environment", lambda provider=None, *, timeout=120.0, model=None, context_window=0: ShellModel())
 
     async def approve(request: ConfirmationRequest, *, signal=None):
         return terminal_confirmation_handler(
@@ -210,7 +210,7 @@ def test_cli_retries_by_default_and_reports_to_stderr(tmp_path, monkeypatch, cap
     model = RetryModel()
     captured_timeout: list[float] = []
 
-    def factory(provider, *, timeout):
+    def factory(provider=None, *, timeout=120.0, **kwargs):
         captured_timeout.append(timeout)
         return model
 

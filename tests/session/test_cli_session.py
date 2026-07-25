@@ -86,7 +86,7 @@ def test_cli_auto_continues_latest_session_across_invocations(
     monkeypatch.setattr(
         cli_main,
         "model_from_environment",
-        lambda provider, *, timeout: next(models),
+        lambda provider=None, *, timeout=120.0, model=None, context_window=0: next(models),
     )
 
     assert (
