@@ -56,11 +56,14 @@ class BaseHarness:
         trace_path: str | Path | None = None,
         max_turns: int = 20,
         retry_config: ModelRetryConfig | None = None,
+        tool_timeout: float | None = None,
+        deadline: float | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
         session_manager: SessionManager | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
+        self.tool_timeout = tool_timeout
         self.tools = ToolManager()
         self.policies = PolicyManager()
         self.context = ContextManager()
@@ -78,6 +81,8 @@ class BaseHarness:
             system_prompt=system_prompt,
             max_turns=max_turns,
             retry_config=retry_config or ModelRetryConfig(enabled=True),
+            deadline=deadline,
+            tool_timeout=tool_timeout,
             before_tool_call=self._before_tool_call,
             after_tool_call=self._after_tool_call,
             prepare_context=self._prepare_context,
@@ -565,6 +570,7 @@ class BaseHarness:
             "aborted",
             "error",
             "turn_limit",
+            "deadline_exceeded",
         }:
             raise RuntimeError(f"Unsupported Agent end reason: {reason!r}")
         error_info = event.data.get("error_info")

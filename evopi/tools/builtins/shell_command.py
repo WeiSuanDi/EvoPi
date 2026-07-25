@@ -42,17 +42,10 @@ def create_shell_command_tool(
             **process_options,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            stdout, stderr = await process.communicate()
         except asyncio.CancelledError:
             await _terminate_process_tree(process, grace_period=abort_grace_period)
             raise
-        except TimeoutError:
-            await _terminate_process_tree(process, grace_period=abort_grace_period)
-            return ToolResult(
-                content=f"Command timed out after {timeout:g} seconds",
-                is_error=True,
-                metadata={"timeout": timeout},
-            )
 
         stdout_text = stdout.decode(errors="replace")
         stderr_text = stderr.decode(errors="replace")
@@ -76,6 +69,8 @@ def create_shell_command_tool(
             required=["command"],
         ),
         handler=shell_command,
+        timeout=timeout,
+        timeout_grace_period=abort_grace_period,
     )
 
 

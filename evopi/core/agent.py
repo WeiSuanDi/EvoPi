@@ -51,6 +51,8 @@ class Agent:
         tools: list[Tool] | None = None,
         max_turns: int = 20,
         retry_config: ModelRetryConfig | None = None,
+        deadline: float | None = None,
+        tool_timeout: float | None = None,
         before_tool_call: BeforeToolCall | None = None,
         after_tool_call: AfterToolCall | None = None,
         prepare_context: PrepareContext | None = None,
@@ -64,7 +66,7 @@ class Agent:
         self.messages: list[Message] = []
         if system_prompt:
             self.messages.append(SystemMessage(content=system_prompt))
-        self._loop = AgentLoop(max_turns=max_turns, retry_config=retry_config)
+        self._loop = AgentLoop(max_turns=max_turns, retry_config=retry_config, deadline=deadline, tool_timeout=tool_timeout)
         self._listeners: list[EventListener] = []
         self._before_tool_call = before_tool_call
         self._after_tool_call = after_tool_call

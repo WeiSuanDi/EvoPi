@@ -11,7 +11,7 @@ from evopi.core.tool import ToolCall
 
 
 MessageRole: TypeAlias = Literal["system", "user", "assistant", "tool_result"]
-StopReason: TypeAlias = Literal["stop", "length", "tool_use", "error", "aborted"]
+StopReason: TypeAlias = Literal["stop", "length", "tool_use", "error", "aborted", "deadline_exceeded"]
 
 
 def _new_message_id() -> str:
