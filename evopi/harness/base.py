@@ -185,9 +185,12 @@ class BaseHarness:
         else:
             self.lifecycle.complete(end_reason=end_reason)
 
-        # Auto-compaction check
+        # Auto-compaction check (best-effort, never crash)
         if end_reason not in ("aborted", "error", "turn_limit"):
-            await self._maybe_compact()
+            try:
+                await self._maybe_compact()
+            except Exception:
+                _logger.warning("Compaction check failed", exc_info=True)
         return answer
 
     def reset(self) -> None:
@@ -698,7 +701,7 @@ class BaseHarness:
         settings = self.compaction_settings
         if not settings.enabled:
             return
-        context_window = getattr(self.model, "context_window", 0)
+        context_window = getattr(self.model, "context_window", 0) or 0
         if context_window <= 0:
             return  # model doesn't report its window — skip
 

@@ -9,12 +9,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from rich.console import Console
+from rich.panel import Panel
 
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
+from evopi.cli.commands import handle_slash_command, set_last_prompt
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
+from evopi.cli.resume import pick_session
 from evopi.cli.session import print_session_opened, session_list_main
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
@@ -92,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use an ephemeral in-memory Session",
     )
+    session_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="Interactively pick a session to resume",
+    )
     parser.add_argument(
         "--session-root",
         type=Path,
@@ -105,15 +114,12 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     from evopi.session.compact import CompactionSettings
 
     session_manager = _session_manager_from_args(args)
-    # Model
     model = model_from_environment(
         getattr(args, "provider", None),
         timeout=getattr(args, "model_timeout", 120.0),
         model=getattr(args, "model", None),
         context_window=getattr(args, "context_window", 0),
     )
-
-    # Harness
     return CodingHarness(
         model=model,
         workspace=args.workspace,
@@ -137,7 +143,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
 
 async def _run_one_shot(args: argparse.Namespace) -> int:
     """Single prompt → response → exit."""
-    prompt = args.prompt
+    prompt_text = args.prompt
     harness: CodingHarness | None = None
     try:
         harness = _build_harness(args)
@@ -159,7 +165,7 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
                 )
 
         harness.subscribe(display)
-        answer = await harness.prompt(prompt)
+        answer = await harness.prompt(prompt_text)
         if not answer.content.endswith("\n"):
             print()
         return 0
@@ -170,33 +176,55 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
 
 async def _run_repl(args: argparse.Namespace) -> int:
     """Multi-turn REPL: prompt → response → prompt → ..."""
+    console = Console(file=sys.stderr)
     harness: CodingHarness | None = None
     try:
         harness = _build_harness(args)
 
+        # Welcome
+        console.print(Panel(
+            f"[bold]EvoPi[/] — Type your message, [bold]/help[/] for commands.\n"
+            f"Model: [cyan]{harness.model.name}[/] | "
+            f"Session: [dim]{harness.session.session_id[:12]}...[/] | "
+            f"Workspace: [dim]{harness.session.workspace[:40]}[/]",
+            border_style="blue",
+        ))
+
         display = ReplDisplay()
+        display.set_status(
+            f"Model: {harness.model.name} | "
+            f"Session: {harness.session.session_id[:12]}..."
+        )
         harness.subscribe(display.handle_event)
 
         session = PromptSession[str]()
-        print("EvoPi — type your message, Ctrl+C to abort, Ctrl+D to exit.")
-        print("/branch /switch /fork /compact /leaves\n")
-
         while True:
             try:
                 user_input = (await session.prompt_async("> ")).strip()
             except KeyboardInterrupt:
-                print("\nEvoPi aborted.")
+                console.print("\n[yellow]Aborted.[/]")
                 return 130
             except EOFError:
-                print("\nGoodbye.")
+                console.print("\n[dim]Goodbye.[/]")
                 return 0
 
             if not user_input:
                 continue
 
             if user_input.startswith("/"):
-                _handle_slash_command(harness, user_input)
-                continue
+                if user_input == "/retry":
+                    from evopi.cli.commands import _last_prompt
+                    if _last_prompt:
+                        user_input = _last_prompt
+                        console.print(f"[dim]Retrying: {user_input[:80]}...[/]")
+                    else:
+                        console.print("[yellow]No previous prompt to retry.[/]")
+                        continue
+                else:
+                    handle_slash_command(harness, user_input)
+                    continue
+
+            set_last_prompt(user_input)
 
             try:
                 display.start_run()
@@ -204,87 +232,15 @@ async def _run_repl(args: argparse.Namespace) -> int:
                 display.end_run()
             except (ValueError, RuntimeError) as exc:
                 display.end_run()
-                print(f"Error: {exc}", file=sys.stderr)
+                console.print(f"[red]Error: {exc}[/]")
                 continue
             except KeyboardInterrupt:
                 display.end_run()
-                print("  [aborted]")
+                console.print("[yellow][aborted][/]")
                 continue
     finally:
         if harness is not None and not harness.is_running:
             harness.close()
-
-
-def _handle_slash_command(harness: CodingHarness, text: str) -> None:
-    """Process a REPL slash-command against the active session."""
-    parts = text.split()
-    cmd = parts[0].lower()
-    session = harness.session
-
-    if cmd == "/leaves":
-        leaves = session.leaves()
-        active = session.leaf_id
-        print(f"{len(leaves)} leaf(ves):")
-        for lid in leaves:
-            marker = " *" if lid == active else ""
-            print(f"  {lid[:16]}...{marker}")
-
-    elif cmd == "/switch":
-        if len(parts) < 2:
-            print("Usage: /switch <leaf_id>")
-            return
-        try:
-            session.switch_leaf(parts[1])
-            lid = session.leaf_id or "?"
-            print(f"Switched to leaf {lid[:16]}...")
-        except Exception as exc:
-            print(f"Error: {exc}")
-
-    elif cmd == "/branch":
-        if session.leaf_id is None:
-            print("No active leaf to branch from.")
-            return
-        name = parts[1] if len(parts) > 1 else ""
-        try:
-            entry = session.branch(from_entry_id=session.leaf_id, branch_name=name)
-            pid = entry.parent_id or "?"
-            print(f"Branched from {pid[:16]}...")
-            print(f"New leaf: {entry.entry_id[:16]}...")
-        except Exception as exc:
-            print(f"Error: {exc}")
-
-    elif cmd == "/fork":
-        try:
-            new_session = session.fork()
-            print(f"Forked to new session: {new_session.session_id[:16]}...")
-            print("(original session unchanged; restart with --session to use fork)")
-        except Exception as exc:
-            print(f"Error: {exc}")
-
-    elif cmd == "/compact":
-        if len(parts) < 2:
-            print("Usage: /compact <summary of compacted messages>")
-            return
-        if session.leaf_id is None:
-            print("No active leaf to compact.")
-            return
-        summary = text[len("/compact "):].strip()
-        # Find last checkpoint as the compaction anchor
-        path = session.get_active_path()
-        anchor_id = path[0].entry_id if path else session.leaf_id
-        for path_entry in reversed(path):
-            if getattr(path_entry, "type", None) == "checkpoint":
-                anchor_id = path_entry.entry_id
-                break
-        try:
-            session.compact(up_to_entry_id=anchor_id, summary=summary)
-            print(f"Compacted. Active leaf now at {session.leaf_id[:16]}...")
-        except Exception as exc:
-            print(f"Error: {exc}")
-
-    else:
-        print(f"Unknown command: {cmd}")
-        print("Available: /leaves  /switch <id>  /branch [name]  /fork  /compact <summary>")
 
 
 def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
@@ -292,11 +248,13 @@ def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
     if not hasattr(args, "session_root"):
         return SessionManager.in_memory(workspace)
     root = args.session_root
-    if args.no_session:
+    if getattr(args, "no_session", False):
         return SessionManager.in_memory(workspace)
-    if args.new_session:
+    if getattr(args, "resume", False):
+        return pick_session(workspace, root=root)
+    if getattr(args, "new_session", False):
         return SessionManager.create(workspace, root=root)
-    if args.session is not None:
+    if getattr(args, "session", None) is not None:
         return SessionManager.open(args.session, workspace=workspace, root=root)
     return SessionManager.continue_recent(workspace, root=root)
 
@@ -304,7 +262,6 @@ def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
 
-    # Sub-commands
     if raw_args[:2] == ["policy", "review"]:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
