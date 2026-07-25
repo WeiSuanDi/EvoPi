@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.input import Input
+from prompt_toolkit.output import Output
 from rich.console import Console
 from rich.panel import Panel
 
@@ -146,6 +148,20 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     )
 
 
+def _create_repl_prompt_session(
+    *,
+    input: Input | None = None,
+    output: Output | None = None,
+) -> PromptSession[str]:
+    """Create the REPL editor without retaining its submitted input line."""
+
+    return PromptSession[str](
+        erase_when_done=True,
+        input=input,
+        output=output,
+    )
+
+
 async def _run_one_shot(args: argparse.Namespace) -> int:
     """Single prompt → response → exit."""
     prompt_text = args.prompt
@@ -202,7 +218,7 @@ async def _run_repl(args: argparse.Namespace) -> int:
         )
         harness.subscribe(display.handle_event)
 
-        session = PromptSession[str]()
+        session = _create_repl_prompt_session()
         while True:
             try:
                 user_input = (await session.prompt_async("> ")).strip()
