@@ -78,6 +78,7 @@ class BaseHarness:
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
         compaction_settings: CompactionSettings | None = None,
+        plugin_paths: list[str | Path] | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
@@ -90,6 +91,20 @@ class BaseHarness:
         self.context = ContextManager()
         self.lifecycle = Lifecycle()
         self.session = session_manager or SessionManager.in_memory()
+
+        # Plugin system
+        from evopi.plugins.runtime import PluginRuntime
+        self.plugin_runtime = PluginRuntime(
+            workspace=getattr(session_manager, "workspace", Path.cwd()) if session_manager else Path.cwd(),
+            extra_paths=list(plugin_paths) if plugin_paths else None,
+        )
+        for tool in self.plugin_runtime.tools:
+            self.tools.register(tool, replace=True)
+        for policy in self.plugin_runtime.policies:
+            self.policies.register(policy, replace=True)
+        for pack in self.plugin_runtime.packs:
+            self.policies.load_pack(pack)
+        self._plugin_commands = dict(self.plugin_runtime.commands)
         self.trace_path = Path(trace_path).resolve() if trace_path is not None else None
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
         self.confirmation_handler = confirmation_handler
@@ -112,6 +127,9 @@ class BaseHarness:
         )
         self.agent.messages.extend(self.session.messages)
         self.agent.subscribe(self._on_core_event)
+        # Subscribe plugin event handlers
+        for _event_type, handler in self.plugin_runtime.event_handlers:
+            self.agent.subscribe(handler)  # type: ignore[arg-type]
 
     @property
     def state(self):

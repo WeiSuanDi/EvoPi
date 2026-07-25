@@ -24,6 +24,7 @@ def handle_slash_command(harness: CodingHarness, text: str) -> None:
         "/clear": _cmd_clear,
         "/status": _cmd_status,
         "/retry": _cmd_retry,
+        "/reload": _cmd_reload,
         "/leaves": _cmd_leaves,
         "/switch": _cmd_switch,
         "/branch": _cmd_branch,
@@ -33,13 +34,23 @@ def handle_slash_command(harness: CodingHarness, text: str) -> None:
     handler = handlers.get(cmd)
     if handler is not None:
         handler(harness, parts, text)
-    else:
-        _console.print(Panel(
-            f"Unknown command: [bold]{cmd}[/]\n\n"
-            "Type [bold]/help[/] to see available commands.",
-            border_style="red",
-            title="Error",
-        ))
+        return
+
+    # Try plugin-registered commands
+    plugin_commands = getattr(harness, "_plugin_commands", {})
+    if cmd in plugin_commands:
+        try:
+            plugin_commands[cmd](text)
+        except Exception as exc:
+            _console.print(f"[red]Plugin command error: {exc}[/]")
+        return
+
+    _console.print(Panel(
+        f"Unknown command: [bold]{cmd}[/]\n\n"
+        "Type [bold]/help[/] to see available commands.",
+        border_style="red",
+        title="Error",
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +66,7 @@ def _cmd_help(harness: CodingHarness, parts: list[str], raw: str) -> None:
         ("/status", "Session info: model, turns, tokens"),
         ("/clear", "Clear the screen"),
         ("/retry", "Re-run the last prompt"),
+        ("/reload", "Reload plugins from disk"),
         ("/branch [name]", "Create a branch from current leaf"),
         ("/switch <id>", "Switch active leaf"),
         ("/fork", "Fork session into a new file"),
@@ -78,6 +90,46 @@ def _cmd_help(harness: CodingHarness, parts: list[str], raw: str) -> None:
 def _cmd_clear(harness: CodingHarness, parts: list[str], raw: str) -> None:
     import os
     os.system("cls" if os.name == "nt" else "clear")
+
+
+def _cmd_reload(harness: CodingHarness, parts: list[str], raw: str) -> None:
+    """Reload plugins from disk without restarting."""
+    from evopi.plugins.loader import discover_plugins, load_plugin
+    from evopi.plugins.protocol import PluginAPI
+
+    plugin_paths = discover_plugins(
+        harness.session.workspace,
+        root=getattr(harness.session, "root", None),
+    )
+    new_count = 0
+    for path in plugin_paths:
+        name = path.stem if path.suffix == ".py" else path.name
+        if harness.plugin_runtime.is_loaded(name):
+            continue
+        if plugin := load_plugin(path):
+            try:
+                api = PluginAPI(plugin.meta.name)
+                plugin.register(api)
+                for tool in api._tools:
+                    harness.tools.register(tool, replace=True)
+                    harness.agent.tools = harness.tools.all()
+                for policy in api._policies:
+                    harness.policies.register(policy, replace=True)
+                for pack in api._packs:
+                    harness.policies.load_pack(pack)
+                for cmd_name, handler in api._commands:
+                    harness._plugin_commands[cmd_name] = handler
+                for _et, handler in api._events:
+                    harness.agent.subscribe(handler)  # type: ignore[arg-type]
+                harness.plugin_runtime._plugins.append(plugin)
+                new_count += 1
+                _console.print(f"[green]Loaded: {plugin.meta.name} v{plugin.meta.version}[/]")
+            except Exception as exc:
+                _console.print(f"[red]Failed to load {path}: {exc}[/]")
+    if new_count == 0:
+        _console.print("[dim]No new plugins found.[/]")
+    else:
+        _console.print(f"[green]{new_count} new plugin(s) loaded.[/]")
 
 
 # ---------------------------------------------------------------------------

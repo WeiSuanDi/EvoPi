@@ -12,6 +12,7 @@ from evopi.policy.types import HookName, PolicyContext, RiskLevel
 @dataclass(slots=True)
 class FileWriteGuardPolicy:
     workspace: Path
+    extra_allowed_dirs: tuple[Path, ...] = ()
     name: str = "file_write_guard"
     version: str = "1.0.0"
     description: str = "Block writes that escape the workspace."
@@ -32,13 +33,16 @@ class FileWriteGuardPolicy:
         if not isinstance(value, str) or not value:
             return PolicyDecision(action="block", reason="write_file requires a path", risk_level="high")
         target = (self.workspace / value).resolve()
-        if not target.is_relative_to(self.workspace):
-            return PolicyDecision(
-                action="block",
-                reason=f"Write target escapes workspace: {value}",
-                risk_level="critical",
-            )
-        return PolicyDecision(action="allow", reason="Write target is inside workspace")
+        if target.is_relative_to(self.workspace):
+            return PolicyDecision(action="allow", reason="Write target is inside workspace")
+        for d in self.extra_allowed_dirs:
+            if target.is_relative_to(Path(d).resolve()):
+                return PolicyDecision(action="allow", reason=f"Write target is inside allowed dir: {d}")
+        return PolicyDecision(
+            action="block",
+            reason=f"Write target escapes workspace: {value}",
+            risk_level="critical",
+        )
 
 
 __all__ = ["FileWriteGuardPolicy"]

@@ -106,6 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Override the persisted Session root directory",
     )
+    parser.add_argument(
+        "--plugin", type=Path, action="append", metavar="PATH",
+        help="Load a plugin from PATH (repeatable)",
+    )
     return parser
 
 
@@ -138,6 +142,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         compaction_settings=CompactionSettings(
             enabled=(getattr(args, "compaction", "on") == "on"),
         ),
+        plugin_paths=getattr(args, "plugin", None),
     )
 
 
@@ -266,6 +271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
         return session_list_main(raw_args[2:])
+    if raw_args[:2] == ["plugin", "list"]:
+        return _plugin_list_main(raw_args[2:])
+    if raw_args[:2] == ["plugin", "install"]:
+        return _plugin_install_main(raw_args[2:])
+    if raw_args[:2] == ["plugin", "remove"]:
+        return _plugin_remove_main(raw_args[2:])
 
     args = (
         build_parser().parse_args()
@@ -283,6 +294,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nEvoPi aborted.")
         return 130
+
+
+def _plugin_list_main(argv: list[str]) -> int:
+    """``evopi plugin list`` — print loaded plugins."""
+    from evopi.plugins.loader import discover_plugins
+    workspace = Path.cwd()
+    plugins = discover_plugins(workspace)
+    if not plugins:
+        print("No plugins found.")
+        print("  Global: ~/.evopi/plugins/")
+        print(f"  Local:  {workspace / '.evopi' / 'plugins'}")
+        return 0
+    print(f"{len(plugins)} plugin(s):")
+    for p in plugins:
+        print(f"  {p}")
+    return 0
+
+
+def _plugin_install_main(argv: list[str]) -> int:
+    """``evopi plugin install <path>`` — copy a plugin file into global plugins dir."""
+    import shutil
+    if len(argv) < 1:
+        print("Usage: evopi plugin install <path>", file=sys.stderr)
+        return 1
+    src = Path(argv[0]).expanduser().resolve()
+    if not src.exists():
+        print(f"Error: {src} does not exist", file=sys.stderr)
+        return 1
+    dst_dir = Path.home() / ".evopi" / "plugins"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
+    shutil.copy2(src, dst)
+    print(f"Installed: {dst}")
+    return 0
+
+
+def _plugin_remove_main(argv: list[str]) -> int:
+    """``evopi plugin remove <name>`` — remove a plugin file from global plugins dir."""
+    if len(argv) < 1:
+        print("Usage: evopi plugin remove <name>", file=sys.stderr)
+        return 1
+    dst_dir = Path.home() / ".evopi" / "plugins"
+    target = dst_dir / argv[0]
+    if not target.exists():
+        target = dst_dir / f"{argv[0]}.py"
+    if not target.exists():
+        print(f"Error: plugin '{argv[0]}' not found", file=sys.stderr)
+        return 1
+    target.unlink()
+    print(f"Removed: {target}")
+    return 0
 
 
 if __name__ == "__main__":

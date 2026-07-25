@@ -1,4 +1,4 @@
-"""Rich-based REPL display with streaming Markdown and tool panels."""
+"""Rich-based REPL display with streaming Markdown and compact tool status."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ from rich.text import Text
 
 
 class ReplDisplay:
-    """Rich display for one REPL run.
+    """Rich display for one REPL run with minimal tool-call feedback.
+
+    Tool calls are shown as compact one-liners::
+
+        ✓ write_file    ✗ shell_command (exit 1)    ⏱ timed_out
 
     Usage::
 
@@ -27,7 +31,7 @@ class ReplDisplay:
     def __init__(self) -> None:
         self.console = Console(file=sys.stderr, highlight=False)
         self._text: str = ""
-        self._tool_panels: list[Panel] = []
+        self._tool_line: str = ""
         self._live: Live | None = None
         self._turn: int = 0
         self._status_text: str = ""
@@ -37,7 +41,7 @@ class ReplDisplay:
 
     def start_run(self) -> None:
         self._text = ""
-        self._tool_panels = []
+        self._tool_line = ""
         self._turn = 0
         self._live = Live(
             self._render(),
@@ -59,6 +63,8 @@ class ReplDisplay:
             "tool_execution_end": self._on_tool_end,
             "turn_start": self._on_turn,
             "model_retry_start": self._on_retry,
+            "confirmation_request": self._on_confirm_start,
+            "confirmation_response": self._on_confirm_end,
         }
         handler = h.get(event.type)
         if handler is not None:
@@ -75,62 +81,57 @@ class ReplDisplay:
 
     def _on_tool_start(self, data: dict[str, Any]) -> None:
         name = data.get("tool_name", "?")
-        self._tool_panels.append(
-            Panel(Text(f"Running {name}...", style="bold cyan"), border_style="cyan", title="Tool")
-        )
+        self._tool_line = f"[dim]… {name}[/]"
         self._refresh()
 
     def _on_tool_end(self, data: dict[str, Any]) -> None:
-        result = data.get("result")
         name = data.get("tool_name", "?")
-        meta: dict = getattr(result, "metadata", {}) if result else {}
-        content = getattr(result, "content", "") if result else ""
-        is_error = getattr(result, "is_error", False) if result else False
-
-        lines: list[Text] = []
-        if meta.get("exit_code") is not None:
-            lines.append(Text(f"exit: {meta['exit_code']}", style="dim"))
+        meta: dict = getattr(data.get("result"), "metadata", {}) if data.get("result") else {}
+        is_error = getattr(data.get("result"), "is_error", False) if data.get("result") else False
+        icon = "[red]✗[/]" if is_error else "[green]✓[/]"
+        extra = ""
         if meta.get("timed_out"):
-            lines.append(Text("TIMEOUT", style="bold red"))
-        if meta.get("blocked"):
-            lines.append(Text("BLOCKED", style="bold red"))
-        if content and not is_error:
-            lines.append(Text(content[:500], style="dim"))
-
-        icon = "✗" if is_error else "✓"
-        if self._tool_panels:
-            self._tool_panels[-1] = Panel(
-                Group(*lines) if lines else Text(""),
-                border_style="red" if is_error else "green",
-                title=f"{icon} {name}",
-            )
+            extra = " [red]TIMEOUT[/]"
+        elif meta.get("blocked"):
+            extra = " [red]BLOCKED[/]"
+        elif meta.get("exit_code") is not None and meta["exit_code"] != 0:
+            extra = f" [yellow](exit {meta['exit_code']})[/]"
+        self._tool_line = f"{icon} {name}{extra}"
         self._refresh()
+
+    def _on_confirm_start(self, data: dict[str, Any]) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    def _on_confirm_end(self, data: dict[str, Any]) -> None:
+        self._live = Live(
+            self._render(),
+            console=self.console,
+            refresh_per_second=10,
+            transient=False,
+        )
+        self._live.start()
 
     def _on_retry(self, data: dict[str, Any]) -> None:
         info = data.get("error_info")
         kind = getattr(info, "kind", "?") if info else "?"
-        self._tool_panels.append(
-            Panel(
-                Text(f"Retrying after {kind} (attempt {data.get('next_attempt', '?')})", style="yellow"),
-                border_style="yellow",
-                title="Retry",
-            )
-        )
+        self._tool_line = f"[yellow]↻ retrying after {kind}[/]"
         self._refresh()
 
     def _render(self) -> Group:
         items: list[Any] = []
-        # Status line at top
+        # Status line
         parts = [self._status_text] if self._status_text else []
         if self._turn:
             parts.append(f"Turn {self._turn}")
+        if self._tool_line:
+            parts.append(self._tool_line)
         if parts:
             items.append(Text(" | ".join(parts), style="bold"))
         # Chat content
         if self._text:
             items.append(Panel(Markdown(self._text), border_style="blue", title="EvoPi"))
-        # Tools
-        items.extend(self._tool_panels)
         return Group(*items)
 
     def _refresh(self) -> None:

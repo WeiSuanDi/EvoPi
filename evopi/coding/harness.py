@@ -34,6 +34,7 @@ class CodingHarness(BaseHarness):
         deadline: float | None = None,
         tool_timeout: float | None = None,
         compaction_settings: CompactionSettings | None = None,
+        plugin_paths: list[str | Path] | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         super().__init__(
@@ -51,6 +52,7 @@ class CodingHarness(BaseHarness):
             deadline=deadline,
             tool_timeout=tool_timeout,
             compaction_settings=compaction_settings,
+            plugin_paths=plugin_paths,
         )
         for tool in coding_tools(self.workspace):
             self.register_tool(tool)
