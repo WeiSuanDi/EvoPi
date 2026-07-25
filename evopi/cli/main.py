@@ -1,4 +1,4 @@
-"""Command-line entry point for the CodingHarness MVP."""
+"""Command-line entry point for the EvoPi coding agent."""
 
 from __future__ import annotations
 
@@ -67,17 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run(args: argparse.Namespace) -> int:
+async def _run_one_shot(args: argparse.Namespace) -> int:
+    """Single prompt → response → exit."""
     prompt = args.prompt
-    if prompt is None:
-        prompt = (await PromptSession[str]().prompt_async("EvoPi> ")).strip()
     session_manager = _session_manager_from_args(args)
     harness: CodingHarness | None = None
     try:
-        if hasattr(args, "model_timeout"):
-            model = model_from_environment(args.provider, timeout=args.model_timeout)
-        else:  # Compatibility for callers constructing a pre-v1 Namespace.
-            model = model_from_environment(args.provider)
+        model = model_from_environment(
+            args.provider, timeout=getattr(args, "model_timeout", 120.0)
+        )
         harness = CodingHarness(
             model=model,
             workspace=args.workspace,
@@ -92,8 +90,6 @@ async def _run(args: argparse.Namespace) -> int:
 
         def display(event: CoreEvent) -> None:
             if event.type == "session_start":
-                # Runtime comparison happens immediately before agent_start, so
-                # delaying this notice includes Harness/model/tool/policy drift.
                 print_session_opened(session_manager)
             elif event.type == "message_update" and event.data.get("kind") == "text":
                 print(event.data.get("delta", ""), end="", flush=True)
@@ -120,10 +116,92 @@ async def _run(args: argparse.Namespace) -> int:
             session_manager.close()
 
 
+async def _run_repl(args: argparse.Namespace) -> int:
+    """Multi-turn REPL: prompt → response → prompt → ..."""
+    session_manager = _session_manager_from_args(args)
+    harness: CodingHarness | None = None
+    try:
+        model = model_from_environment(
+            args.provider, timeout=getattr(args, "model_timeout", 120.0)
+        )
+        harness = CodingHarness(
+            model=model,
+            workspace=args.workspace,
+            trace_path=args.trace,
+            retry_config=ModelRetryConfig(
+                enabled=not getattr(args, "no_retry", False),
+                max_retries=getattr(args, "max_retries", 3),
+            ),
+            confirmation_handler=async_terminal_confirmation_handler,
+            session_manager=session_manager,
+        )
+
+        harness.subscribe(_repl_event_handler(session_manager))
+
+        session = PromptSession[str]()
+        print("EvoPi — type your message, Ctrl+C to abort, Ctrl+D to exit.\n")
+
+        while True:
+            try:
+                user_input = (await session.prompt_async("> ")).strip()
+            except KeyboardInterrupt:
+                print("\nEvoPi aborted.")
+                return 130
+            except EOFError:
+                print("\nGoodbye.")
+                return 0
+
+            if not user_input:
+                continue
+
+            try:
+                answer = await harness.prompt(user_input)
+            except (ValueError, RuntimeError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                continue
+            except KeyboardInterrupt:
+                print("  [aborted]")
+                continue
+
+            if not answer.content.endswith("\n"):
+                print()
+    finally:
+        if harness is not None and not harness.is_running:
+            harness.close()
+        elif harness is None:
+            session_manager.close()
+
+
+def _repl_event_handler(session_manager: SessionManager):
+    """Return an event listener suitable for the REPL display loop."""
+
+    def display(event: CoreEvent) -> None:
+        if event.type == "message_update" and event.data.get("kind") == "text":
+            print(event.data.get("delta", ""), end="", flush=True)
+        elif event.type == "model_retry_start":
+            info = event.data.get("error_info")
+            kind = getattr(info, "kind", "unknown")
+            print(
+                f"\nRetrying after {kind} error "
+                f"(attempt {event.data.get('next_attempt')})...",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.type == "tool_execution_start":
+            name = event.data.get("tool_name", "?")
+            print(f"\n  ⚡ {name}...", end="", flush=True, file=sys.stderr)
+        elif event.type == "tool_execution_end":
+            result = event.data.get("result")
+            is_error = getattr(result, "is_error", False) if result is not None else False
+            icon = "✗" if is_error else "✓"
+            print(f"{icon}", file=sys.stderr, flush=True)
+
+    return display
+
+
 def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
-    workspace = args.workspace
+    workspace = getattr(args, "workspace", Path.cwd())
     if not hasattr(args, "session_root"):
-        # Compatibility for callers constructing a pre-Session Namespace.
         return SessionManager.in_memory(workspace)
     root = args.session_root
     if args.no_session:
@@ -137,17 +215,23 @@ def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
+
+    # Sub-commands
     if raw_args[:2] == ["policy", "review"]:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
         return session_list_main(raw_args[2:])
+
     args = (
         build_parser().parse_args()
         if argv is None
         else build_parser().parse_args(raw_args)
     )
+
     try:
-        return asyncio.run(_run(args))
+        if getattr(args, "prompt", None):
+            return asyncio.run(_run_one_shot(args))
+        return asyncio.run(_run_repl(args))
     except (ValueError, RuntimeError) as exc:
         print(f"EvoPi error: {exc}", file=sys.stderr)
         return 1

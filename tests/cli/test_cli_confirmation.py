@@ -153,7 +153,7 @@ def test_cli_injects_confirmation_handler_and_runs_approved_shell(
         workspace=tmp_path,
         trace=trace_path,
     )
-    monkeypatch.setattr(cli_main, "model_from_environment", lambda provider: ShellModel())
+    monkeypatch.setattr(cli_main, "model_from_environment", lambda provider, *, timeout: ShellModel())
 
     async def approve(request: ConfirmationRequest, *, signal=None):
         return terminal_confirmation_handler(
@@ -164,7 +164,7 @@ def test_cli_injects_confirmation_handler_and_runs_approved_shell(
 
     monkeypatch.setattr(cli_main, "async_terminal_confirmation_handler", approve)
 
-    exit_code = asyncio.run(cli_main._run(args))
+    exit_code = asyncio.run(cli_main._run_one_shot(args))
 
     assert exit_code == 0
     records = list(read_trace(trace_path))
@@ -179,13 +179,13 @@ def test_cli_injects_confirmation_handler_and_runs_approved_shell(
 def test_main_returns_130_for_keyboard_interrupt(monkeypatch, capsys) -> None:
     class Parser:
         def parse_args(self):
-            return argparse.Namespace()
+            return argparse.Namespace(prompt="test")
 
     async def interrupt(args):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli_main, "build_parser", lambda: Parser())
-    monkeypatch.setattr(cli_main, "_run", interrupt)
+    monkeypatch.setattr(cli_main, "_run_one_shot", interrupt)
 
     assert cli_main.main() == 130
     assert "EvoPi aborted." in capsys.readouterr().out
@@ -229,7 +229,7 @@ def test_cli_retries_by_default_and_reports_to_stderr(tmp_path, monkeypatch, cap
         model_timeout=9.0,
     )
 
-    assert asyncio.run(cli_main._run(args)) == 0
+    assert asyncio.run(cli_main._run_one_shot(args)) == 0
 
     output = capsys.readouterr()
     assert model.calls == 2

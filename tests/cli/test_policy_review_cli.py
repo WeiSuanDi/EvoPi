@@ -280,7 +280,7 @@ def test_subcommand_dispatch_preserves_legacy_prompt_path(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr(cli_main_module, "build_parser", lambda: Parser())
-    monkeypatch.setattr(cli_main_module, "_run", fake_run)
+    monkeypatch.setattr(cli_main_module, "_run_one_shot", fake_run)
     monkeypatch.setattr(
         cli_main_module,
         "policy_review_main",

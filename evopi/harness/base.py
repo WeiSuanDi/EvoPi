@@ -30,6 +30,7 @@ from evopi.harness.confirmation import (
 from evopi.harness.lifecycle import Lifecycle
 from evopi.harness.policy_manager import PolicyManager
 from evopi.harness.tool_manager import ToolManager
+from evopi.policy.approval import ApprovalMode, ApprovalStore
 from evopi.policy.decisions import PolicyEvaluation
 from evopi.policy.registry import PolicyPack
 from evopi.policy.types import Policy, PolicyContext
@@ -60,12 +61,16 @@ class BaseHarness:
         deadline: float | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
         session_manager: SessionManager | None = None,
+        approvals_path: str | Path | None = None,
+        approval_mode: ApprovalMode = "warn",
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
         self.tool_timeout = tool_timeout
         self.tools = ToolManager()
-        self.policies = PolicyManager()
+        self.policies = PolicyManager(
+            ApprovalStore(approvals_path, mode=approval_mode)
+        )
         self.context = ContextManager()
         self.lifecycle = Lifecycle()
         self.session = session_manager or SessionManager.in_memory()

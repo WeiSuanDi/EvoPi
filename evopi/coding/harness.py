@@ -11,6 +11,7 @@ from evopi.core.model import Model
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
+from evopi.policy.approval import ApprovalMode
 from evopi.session import SessionManager
 
 
@@ -27,6 +28,8 @@ class CodingHarness(BaseHarness):
         system_prompt: str = CODING_SYSTEM_PROMPT,
         confirmation_handler: ConfirmationHandler | None = None,
         session_manager: SessionManager | None = None,
+        approvals_path: str | Path | None = None,
+        approval_mode: ApprovalMode = "warn",
     ) -> None:
         self.workspace = Path(workspace).resolve()
         super().__init__(
@@ -39,6 +42,8 @@ class CodingHarness(BaseHarness):
             session_manager=(
                 session_manager or SessionManager.in_memory(self.workspace)
             ),
+            approvals_path=approvals_path,
+            approval_mode=approval_mode,
         )
         for tool in coding_tools(self.workspace):
             self.register_tool(tool)

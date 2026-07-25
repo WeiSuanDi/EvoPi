@@ -91,7 +91,7 @@ def test_cli_auto_continues_latest_session_across_invocations(
 
     assert (
         asyncio.run(
-            cli_main._run(
+            cli_main._run_one_shot(
                 prompt_args(
                     prompt="first question",
                     workspace=workspace,
@@ -103,7 +103,7 @@ def test_cli_auto_continues_latest_session_across_invocations(
     )
     assert (
         asyncio.run(
-            cli_main._run(
+            cli_main._run_one_shot(
                 prompt_args(
                     prompt="second question",
                     workspace=workspace,
