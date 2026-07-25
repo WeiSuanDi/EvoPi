@@ -44,6 +44,14 @@ class Tool:
     description: str
     parameters: JsonObject
     handler: ToolHandler
+    timeout: float | None = None
+    timeout_grace_period: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.timeout is not None and self.timeout <= 0:
+            raise ValueError("timeout must be positive or None")
+        if self.timeout_grace_period < 0:
+            raise ValueError("timeout_grace_period cannot be negative")
 
     def definition(self) -> JsonObject:
         return {
@@ -60,7 +68,9 @@ class Tool:
         arguments: JsonObject,
         *,
         signal: AbortSignal | None = None,
+        timeout: float | None = None,
     ) -> ToolResult:
+        effective_timeout = timeout if timeout is not None else self.timeout
         try:
             _validate_arguments(self.name, self.parameters, arguments)
             if signal is not None and signal.aborted:
@@ -68,34 +78,95 @@ class Tool:
             value = self.handler(**arguments)
             if inspect.isawaitable(value):
                 task = asyncio.ensure_future(value)
-                if signal is None:
-                    value = await task
-                else:
-                    abort_task = asyncio.create_task(signal.wait())
-                    done, _ = await asyncio.wait(
-                        {task, abort_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if abort_task in done:
-                        if task.done():
-                            value = await task
-                            return _completed_after_abort(_normalize_result(value))
-                        task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
-                        return _aborted_result("Operation aborted during tool execution")
-                    abort_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await abort_task
-                    value = await task
-            result = _normalize_result(value)
-            if signal is not None and signal.aborted:
-                return _completed_after_abort(result)
+                result = await self._race_async_handler(
+                    task,
+                    signal=signal,
+                    timeout=effective_timeout,
+                )
+            else:
+                # Sync handlers run inline and cannot be timed out.
+                result = _normalize_result(value)
+                if signal is not None and signal.aborted:
+                    return _completed_after_abort(result)
             return result
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:  # Tool failures belong in the model transcript.
             return ToolResult(content=f"{type(exc).__name__}: {exc}", is_error=True)
+
+    async def _race_async_handler(
+        self,
+        task: "asyncio.Task[Any]",
+        *,
+        signal: AbortSignal | None,
+        timeout: float | None,
+    ) -> ToolResult:
+        """Race an async handler against an optional abort signal and timeout.
+
+        Priority: abort > timeout > handler completion.
+        """
+        race_tasks: set[asyncio.Task[Any]] = {task}
+        abort_task: asyncio.Task[None] | None = None
+        timeout_task: asyncio.Task[None] | None = None
+
+        if signal is not None:
+            abort_task = asyncio.create_task(signal.wait())
+            race_tasks.add(abort_task)
+        if timeout is not None:
+            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+            race_tasks.add(timeout_task)
+
+        if len(race_tasks) == 1:
+            # No signal, no timeout: simple await.
+            value = await task
+            return _normalize_result(value)
+
+        done, _ = await asyncio.wait(race_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        # --- Abort won -------------------------------------------------------
+        if abort_task is not None and abort_task in done:
+            if timeout_task is not None:
+                timeout_task.cancel()
+            if task.done():
+                value = await task
+                return _completed_after_abort(_normalize_result(value))
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            return _aborted_result("Operation aborted during tool execution")
+
+        # --- Timeout won -----------------------------------------------------
+        if timeout_task is not None and timeout_task in done:
+            assert timeout is not None  # guaranteed when timeout_task was created
+            if abort_task is not None:
+                abort_task.cancel()
+            if task.done():
+                value = await task
+                return _completed_after_timeout(_normalize_result(value), timeout)
+            task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=self.timeout_grace_period
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            return _tool_timeout_result(timeout)
+
+        # --- Handler won -----------------------------------------------------
+        if abort_task is not None:
+            abort_task.cancel()
+        if timeout_task is not None:
+            timeout_task.cancel()
+        for t in (abort_task, timeout_task):
+            if t is not None:
+                with suppress(asyncio.CancelledError):
+                    await t
+
+        value = await task
+        result = _normalize_result(value)
+        if signal is not None and signal.aborted:
+            return _completed_after_abort(result)
+        return result
 
 
 def _aborted_result(content: str) -> ToolResult:
@@ -115,6 +186,28 @@ def _completed_after_abort(result: ToolResult) -> ToolResult:
             **result.metadata,
             "aborted": True,
             "completed_after_abort": True,
+        },
+    )
+
+
+def _tool_timeout_result(timeout: float) -> ToolResult:
+    return ToolResult(
+        content=f"Tool execution timed out after {timeout:g} seconds",
+        is_error=True,
+        metadata={"timeout": timeout, "timed_out": True},
+    )
+
+
+def _completed_after_timeout(result: ToolResult, timeout: float) -> ToolResult:
+    return ToolResult(
+        content=result.content,
+        is_error=True,
+        terminate=False,
+        metadata={
+            **result.metadata,
+            "timeout": timeout,
+            "timed_out": True,
+            "completed_after_timeout": True,
         },
     )
 

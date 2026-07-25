@@ -14,6 +14,7 @@ AgentEndReason: TypeAlias = Literal[
     "aborted",
     "error",
     "turn_limit",
+    "deadline_exceeded",
 ]
 
 

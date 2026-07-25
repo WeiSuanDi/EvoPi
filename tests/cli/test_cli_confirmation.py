@@ -214,7 +214,7 @@ def test_cli_retries_by_default_and_reports_to_stderr(tmp_path, monkeypatch, cap
         captured_timeout.append(timeout)
         return model
 
-    async def no_wait(delay, signal):
+    async def no_wait(delay, signal, deadline_event=None):
         return True
 
     monkeypatch.setattr(cli_main, "model_from_environment", factory)

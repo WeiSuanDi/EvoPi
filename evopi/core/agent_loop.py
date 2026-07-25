@@ -93,11 +93,19 @@ class AgentLoop:
         *,
         max_turns: int = 20,
         retry_config: ModelRetryConfig | None = None,
+        deadline: float | None = None,
+        tool_timeout: float | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
+        if deadline is not None and deadline <= 0:
+            raise ValueError("deadline must be positive or None")
+        if tool_timeout is not None and tool_timeout <= 0:
+            raise ValueError("tool_timeout must be positive or None")
         self.max_turns = max_turns
         self.retry_config = retry_config or ModelRetryConfig()
+        self.deadline = deadline
+        self.tool_timeout = tool_timeout
 
     async def run(
         self,
@@ -144,67 +152,162 @@ class AgentLoop:
         run_id: str | None = None,
         signal: AbortSignal | None = None,
     ) -> AgentLoopResult:
-        for turn in range(1, self.max_turns + 1):
-            await notify(
-                emit,
-                CoreEvent(type="turn_start", run_id=run_id, data={"turn": turn}),
-                signal=signal,
-            )
-            model_outcome = await self._call_model_with_retry(
-                model=model,
-                context=context,
-                emit=emit,
-                run_id=run_id,
-                turn=turn,
-                prepare_context=prepare_context,
-                signal=signal,
-            )
-            assistant = model_outcome.message
-            model_was_aborted = assistant.stop_reason == "aborted"
-            if after_model_call is not None:
-                replacement = call_with_optional_signal(
-                    after_model_call,
-                    context,
-                    assistant,
-                    signal=signal,
-                )
-                if inspect.isawaitable(replacement):
-                    replacement = await replacement
-                if replacement is not None:
-                    replacement.id = assistant.id
-                    if model_was_aborted:
-                        replacement.stop_reason = "aborted"
-                        replacement.tool_calls = []
-                        replacement.metadata = {
-                            **replacement.metadata,
-                            **assistant.metadata,
-                            "aborted": True,
-                        }
-                    assistant = replacement
-            context.append(assistant)
-            await notify(
-                emit,
-                CoreEvent(type="message_end", run_id=run_id, data={"message": assistant}),
-                signal=signal,
-            )
-            if model_outcome.retry_started:
+        deadline_event: asyncio.Event | None = None
+        deadline_task: asyncio.Task[None] | None = None
+        deadline_expired = False
+        if self.deadline is not None:
+            deadline_event = asyncio.Event()
+
+            async def _deadline_timer() -> None:
+                await asyncio.sleep(self.deadline)  # type: ignore[arg-type]
+                nonlocal deadline_expired
+                deadline_expired = True
+                deadline_event.set()  # type: ignore[union-attr]
+
+            deadline_task = asyncio.create_task(_deadline_timer())
+
+        try:
+            for turn in range(1, self.max_turns + 1):
+                if deadline_expired:
+                    return AgentLoopResult(
+                        message=self._last_assistant(context),
+                        end_reason="deadline_exceeded",
+                    )
                 await notify(
                     emit,
-                    CoreEvent(
-                        type="model_retry_end",
-                        run_id=run_id,
-                        data={
-                            "success": not model_outcome.cancelled,
-                            "cancelled": model_outcome.cancelled,
-                            "attempts": model_outcome.attempts,
-                            "retries": model_outcome.attempts - 1,
-                            "max_retries": self.retry_config.max_retries,
-                        },
-                    ),
+                    CoreEvent(type="turn_start", run_id=run_id, data={"turn": turn}),
                     signal=signal,
                 )
+                model_outcome = await self._call_model_with_retry(
+                    model=model,
+                    context=context,
+                    emit=emit,
+                    run_id=run_id,
+                    turn=turn,
+                    prepare_context=prepare_context,
+                    signal=signal,
+                    deadline_event=deadline_event,
+                )
+                assistant = model_outcome.message
+                model_was_aborted = assistant.stop_reason == "aborted"
+                if after_model_call is not None:
+                    replacement = call_with_optional_signal(
+                        after_model_call,
+                        context,
+                        assistant,
+                        signal=signal,
+                    )
+                    if inspect.isawaitable(replacement):
+                        replacement = await replacement
+                    if replacement is not None:
+                        replacement.id = assistant.id
+                        if model_was_aborted:
+                            replacement.stop_reason = "aborted"
+                            replacement.tool_calls = []
+                            replacement.metadata = {
+                                **replacement.metadata,
+                                **assistant.metadata,
+                                "aborted": True,
+                            }
+                        assistant = replacement
+                context.append(assistant)
+                await notify(
+                    emit,
+                    CoreEvent(type="message_end", run_id=run_id, data={"message": assistant}),
+                    signal=signal,
+                )
+                if model_outcome.retry_started:
+                    await notify(
+                        emit,
+                        CoreEvent(
+                            type="model_retry_end",
+                            run_id=run_id,
+                            data={
+                                "success": not model_outcome.cancelled,
+                                "cancelled": model_outcome.cancelled,
+                                "attempts": model_outcome.attempts,
+                                "retries": model_outcome.attempts - 1,
+                                "max_retries": self.retry_config.max_retries,
+                            },
+                        ),
+                        signal=signal,
+                    )
 
-            if not assistant.tool_calls:
+                if not assistant.tool_calls:
+                    await notify(
+                        emit,
+                        CoreEvent(
+                            type="turn_end",
+                            run_id=run_id,
+                            data={
+                                "turn": turn,
+                                "message": assistant,
+                                "tool_results": [],
+                            },
+                        ),
+                        signal=signal,
+                    )
+                    should_stop = await self._finish_turn(
+                        context=context,
+                        assistant=assistant,
+                        results=[],
+                        after_turn=after_turn,
+                        should_stop_after_turn=should_stop_after_turn,
+                        signal=signal,
+                    )
+                    if signal is not None and signal.aborted:
+                        await signal._wait_until_notified()
+                        return AgentLoopResult(message=assistant, end_reason="aborted")
+                    if deadline_expired:
+                        return AgentLoopResult(
+                            message=assistant, end_reason="deadline_exceeded"
+                        )
+                    return AgentLoopResult(
+                        message=assistant,
+                        end_reason="terminated" if should_stop else "completed",
+                    )
+
+                tool_messages: list[ToolResultMessage] = []
+                for tool_call in assistant.tool_calls:
+                    result = await self._execute_tool_call(
+                        context=context,
+                        assistant=assistant,
+                        tool_call=tool_call,
+                        emit=emit,
+                        before_tool_call=before_tool_call,
+                        after_tool_call=after_tool_call,
+                        run_id=run_id,
+                        signal=signal,
+                    )
+                    message = ToolResultMessage(
+                        content=result.content,
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        is_error=result.is_error,
+                        terminate=result.terminate,
+                        metadata=result.metadata,
+                    )
+                    await notify(
+                        emit,
+                        CoreEvent(
+                            type="message_start",
+                            run_id=run_id,
+                            data={"message_id": message.id, "role": message.role},
+                        ),
+                        signal=signal,
+                    )
+                    context.append(message)
+                    tool_messages.append(message)
+                    await notify(
+                        emit,
+                        CoreEvent(type="message_end", run_id=run_id, data={"message": message}),
+                        signal=signal,
+                    )
+
+                terminate = bool(tool_messages) and all(
+                    message.terminate for message in tool_messages
+                )
+
                 await notify(
                     emit,
                     CoreEvent(
@@ -213,7 +316,7 @@ class AgentLoop:
                         data={
                             "turn": turn,
                             "message": assistant,
-                            "tool_results": [],
+                            "tool_results": tool_messages,
                         },
                     ),
                     signal=signal,
@@ -221,7 +324,7 @@ class AgentLoop:
                 should_stop = await self._finish_turn(
                     context=context,
                     assistant=assistant,
-                    results=[],
+                    results=tool_messages,
                     after_turn=after_turn,
                     should_stop_after_turn=should_stop_after_turn,
                     signal=signal,
@@ -229,80 +332,30 @@ class AgentLoop:
                 if signal is not None and signal.aborted:
                     await signal._wait_until_notified()
                     return AgentLoopResult(message=assistant, end_reason="aborted")
-                return AgentLoopResult(
-                    message=assistant,
-                    end_reason="terminated" if should_stop else "completed",
-                )
+                if deadline_expired:
+                    return AgentLoopResult(
+                        message=assistant, end_reason="deadline_exceeded"
+                    )
+                if terminate or should_stop:
+                    return AgentLoopResult(message=assistant, end_reason="terminated")
 
-            tool_messages: list[ToolResultMessage] = []
-            for tool_call in assistant.tool_calls:
-                result = await self._execute_tool_call(
-                    context=context,
-                    assistant=assistant,
-                    tool_call=tool_call,
-                    emit=emit,
-                    before_tool_call=before_tool_call,
-                    after_tool_call=after_tool_call,
-                    run_id=run_id,
-                    signal=signal,
-                )
-                message = ToolResultMessage(
-                    content=result.content,
-                    tool_call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    is_error=result.is_error,
-                    terminate=result.terminate,
-                    metadata=result.metadata,
-                )
-                await notify(
-                    emit,
-                    CoreEvent(
-                        type="message_start",
-                        run_id=run_id,
-                        data={"message_id": message.id, "role": message.role},
-                    ),
-                    signal=signal,
-                )
-                context.append(message)
-                tool_messages.append(message)
-                await notify(
-                    emit,
-                    CoreEvent(type="message_end", run_id=run_id, data={"message": message}),
-                    signal=signal,
-                )
+            raise TurnLimitError(f"Agent loop exceeded {self.max_turns} turns")
+        finally:
+            if deadline_task is not None:
+                deadline_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await deadline_task
 
-            terminate = bool(tool_messages) and all(
-                message.terminate for message in tool_messages
-            )
-
-            await notify(
-                emit,
-                CoreEvent(
-                    type="turn_end",
-                    run_id=run_id,
-                    data={
-                        "turn": turn,
-                        "message": assistant,
-                        "tool_results": tool_messages,
-                    },
-                ),
-                signal=signal,
-            )
-            should_stop = await self._finish_turn(
-                context=context,
-                assistant=assistant,
-                results=tool_messages,
-                after_turn=after_turn,
-                should_stop_after_turn=should_stop_after_turn,
-                signal=signal,
-            )
-            if signal is not None and signal.aborted:
-                await signal._wait_until_notified()
-                return AgentLoopResult(message=assistant, end_reason="aborted")
-            if terminate or should_stop:
-                return AgentLoopResult(message=assistant, end_reason="terminated")
-
-        raise TurnLimitError(f"Agent loop exceeded {self.max_turns} turns")
+    @staticmethod
+    def _last_assistant(context: AgentContext) -> AssistantMessage:
+        for message in reversed(context.messages):
+            if isinstance(message, AssistantMessage):
+                return message
+        return AssistantMessage(
+            content="",
+            stop_reason="deadline_exceeded",
+            metadata={"deadline_exceeded": True},
+        )
 
     @staticmethod
     async def _finish_turn(
@@ -349,6 +402,7 @@ class AgentLoop:
         turn: int,
         prepare_context: PrepareContext | None,
         signal: AbortSignal | None,
+        deadline_event: asyncio.Event | None = None,
     ) -> _ModelCallOutcome:
         attempt = 1
         retry_started = False
@@ -412,7 +466,7 @@ class AgentLoop:
                     ),
                     signal=signal,
                 )
-                if not await self._wait_for_retry(delay, signal):
+                if not await self._wait_for_retry(delay, signal, deadline_event):
                     aborted = AssistantMessage(
                         content=failure.message.content,
                         stop_reason="aborted",
@@ -474,28 +528,53 @@ class AgentLoop:
         return max(local_delay, error_info.retry_after or 0.0)
 
     @staticmethod
-    async def _wait_for_retry(delay: float, signal: AbortSignal | None) -> bool:
-        if signal is None:
+    async def _wait_for_retry(
+        delay: float,
+        signal: AbortSignal | None,
+        deadline_event: asyncio.Event | None = None,
+    ) -> bool:
+        if signal is None and deadline_event is None:
             await asyncio.sleep(delay)
             return True
-        if signal.aborted:
+        if signal is not None and signal.aborted:
             await signal._wait_until_notified()
             return False
+        if deadline_event is not None and deadline_event.is_set():
+            return False
         sleep_task = asyncio.create_task(asyncio.sleep(delay))
-        abort_task = asyncio.create_task(signal.wait())
+        race_tasks: set[asyncio.Task[Any]] = {sleep_task}
+        abort_task: asyncio.Task[None] | None = None
+        deadline_wait: "asyncio.Task[Any]" | None = None
+        if signal is not None:
+            abort_task = asyncio.create_task(signal.wait())
+            race_tasks.add(abort_task)
+        if deadline_event is not None:
+            deadline_wait = asyncio.create_task(deadline_event.wait())
+            race_tasks.add(deadline_wait)
         done, _ = await asyncio.wait(
-            {sleep_task, abort_task},
+            race_tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if abort_task in done:
+        if abort_task is not None and abort_task in done:
             sleep_task.cancel()
             with suppress(asyncio.CancelledError):
                 await sleep_task
-            await signal._wait_until_notified()
+            await signal._wait_until_notified()  # type: ignore[union-attr]
             return False
-        abort_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await abort_task
+        if deadline_wait is not None and deadline_wait in done:
+            sleep_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sleep_task
+            return False
+        # Sleep completed normally — cancel the watch tasks
+        if abort_task is not None:
+            abort_task.cancel()
+        if deadline_wait is not None:
+            deadline_wait.cancel()
+        for t in (abort_task, deadline_wait):
+            if t is not None:
+                with suppress(asyncio.CancelledError):
+                    await t
         await sleep_task
         return True
 
@@ -804,8 +883,8 @@ class AgentLoop:
         )
         return result
 
-    @staticmethod
     async def _prepare_and_execute_tool(
+        self,
         *,
         context: AgentContext,
         assistant: AssistantMessage,
@@ -843,7 +922,7 @@ class AgentLoop:
         tool = next((item for item in context.tools if item.name == tool_call.name), None)
         if tool is None:
             return ToolResult(content=f"Tool '{tool_call.name}' not found", is_error=True)
-        return await tool.execute(arguments, signal=signal)
+        return await tool.execute(arguments, signal=signal, timeout=self.tool_timeout)
 
     @staticmethod
     def _force_aborted_result(
