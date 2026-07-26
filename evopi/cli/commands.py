@@ -14,7 +14,7 @@ from evopi.coding.harness import CodingHarness
 _console = Console(file=sys.stderr)
 
 
-def handle_slash_command(harness: CodingHarness, text: str) -> None:
+async def handle_slash_command(harness: CodingHarness, text: str) -> None:
     """Dispatch a REPL slash-command to its handler."""
     parts = text.split()
     cmd = parts[0].lower()
@@ -36,13 +36,12 @@ def handle_slash_command(harness: CodingHarness, text: str) -> None:
         handler(harness, parts, text)
         return
 
-    # Try plugin-registered commands
-    plugin_commands = getattr(harness, "_plugin_commands", {})
-    if cmd in plugin_commands:
-        try:
-            plugin_commands[cmd](text)
-        except Exception as exc:
-            _console.print(f"[red]Plugin command error: {exc}[/]")
+    try:
+        handled = await harness.dispatch_plugin_command(text)
+    except Exception as exc:
+        _console.print(f"[red]Plugin command error: {exc}[/]")
+        return
+    if handled:
         return
 
     _console.print(Panel(
@@ -75,6 +74,11 @@ def _cmd_help(harness: CodingHarness, parts: list[str], raw: str) -> None:
     ]
     for key, desc in commands:
         grid.add_row(key, desc)
+    for command in harness.plugin_commands:
+        grid.add_row(
+            command.usage or command.name,
+            command.description or f"Plugin command from {command.runtime_plugin_name}",
+        )
 
     _console.print(Panel(grid, border_style="blue", title="EvoPi Commands"))
     _console.print(Panel(

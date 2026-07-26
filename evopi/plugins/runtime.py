@@ -7,6 +7,7 @@ utilities that call ``register()`` and collect registrations.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 
 from evopi.core.tool import Tool
@@ -34,15 +35,84 @@ __all__ = [
 def filtered_event_listener(
     event_type: str,
     handler: Callable[..., Awaitable[None] | None],
+    *,
+    plugin_name: str = "unknown",
+    on_contract_error: Callable[[str], None] | None = None,
 ) -> EventListener:
     """Wrap a Plugin handler so it receives only its declared event type."""
 
     def listener(event: CoreEvent) -> Awaitable[None] | None:
         if event.type != event_type:
             return None
-        return handler(event)
+        try:
+            result = handler(event)
+        except Exception as exc:
+            _report_contract_error(
+                on_contract_error,
+                f"Plugin '{plugin_name}' event handler for '{event_type}' raised "
+                f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        if inspect.isawaitable(result):
+            return _finish_event_handler(
+                result,
+                plugin_name=plugin_name,
+                event_type=event_type,
+                on_contract_error=on_contract_error,
+            )
+        if result is not None:
+            _report_observational_return(
+                plugin_name,
+                event_type,
+                on_contract_error,
+            )
+        return None
 
     return listener
+
+
+async def _finish_event_handler(
+    result: Awaitable[object],
+    *,
+    plugin_name: str,
+    event_type: str,
+    on_contract_error: Callable[[str], None] | None,
+) -> None:
+    try:
+        value = await result
+    except Exception as exc:
+        _report_contract_error(
+            on_contract_error,
+            f"Plugin '{plugin_name}' event handler for '{event_type}' raised "
+            f"{type(exc).__name__}: {exc}",
+        )
+        return
+    if value is not None:
+        _report_observational_return(
+            plugin_name,
+            event_type,
+            on_contract_error,
+        )
+
+
+def _report_observational_return(
+    plugin_name: str,
+    event_type: str,
+    callback: Callable[[str], None] | None,
+) -> None:
+    _report_contract_error(
+        callback,
+        f"Plugin '{plugin_name}' event handler for '{event_type}' returned a value; "
+        "event handlers are observational and Policy is the only execution arbiter",
+    )
+
+
+def _report_contract_error(
+    callback: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if callback is not None:
+        callback(message)
 
 
 def wire_plugins(

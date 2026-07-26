@@ -138,6 +138,20 @@ class CodingHarness(BaseHarness):
             tool_timeout=tool_timeout,
             compaction_settings=compaction_settings,
             plugin_paths=plugin_paths,
+            reserved_plugin_commands=frozenset(
+                {
+                    "/help",
+                    "/clear",
+                    "/status",
+                    "/retry",
+                    "/reload",
+                    "/leaves",
+                    "/switch",
+                    "/branch",
+                    "/fork",
+                    "/compact",
+                }
+            ),
             memory_enabled=self._memory_store is not None,
             skills_enabled=self._skill_loader is not None,
             assembly_warnings=tuple(assembly_warnings),

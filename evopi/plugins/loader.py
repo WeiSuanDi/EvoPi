@@ -200,6 +200,31 @@ class PluginLoader:
             return
         self._plugins.append(plugin)
         self._source_paths[name] = path
+        manifest_root = _find_manifest_root(path)
+        if manifest_root is not None:
+            from evopi.plugins.candidates import (
+                PluginCandidateError,
+                review_plugin,
+            )
+
+            try:
+                manifest = review_plugin(manifest_root).candidate.manifest
+            except PluginCandidateError as exc:
+                self._invalid_plugins.add(name)
+                self._errors.append(
+                    f"Plugin '{name}' approved manifest is invalid: {exc}"
+                )
+            else:
+                if (
+                    plugin.meta.name != manifest.name
+                    or plugin.meta.version != manifest.version
+                    or plugin.meta.dependencies != manifest.dependencies
+                ):
+                    self._invalid_plugins.add(name)
+                    self._errors.append(
+                        f"Plugin '{name}' runtime metadata does not match its "
+                        "approved manifest"
+                    )
 
     def _validate_dependencies(self) -> None:
         names = {p.meta.name for p in self._plugins}
@@ -239,6 +264,15 @@ class PluginLoader:
         """Return whether static dependency validation permits activation."""
 
         return name not in self._invalid_plugins
+
+
+def _find_manifest_root(path: Path) -> Path | None:
+    resolved = path.expanduser().resolve()
+    start = resolved if resolved.is_dir() else resolved.parent
+    for directory in (start, *start.parents):
+        if (directory / "evopi-plugin.json").is_file():
+            return directory
+    return None
 
 
 __all__ = ["PluginLoader", "discover_plugin_paths", "load_plugin"]

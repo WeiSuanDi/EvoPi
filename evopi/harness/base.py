@@ -64,36 +64,6 @@ from evopi.trace.writer import JsonlTraceWriter
 _logger = logging.getLogger(__name__)
 
 
-def _plugin_candidate_root(entrypoint: Path) -> Path:
-    for directory in (entrypoint.parent, *entrypoint.parents):
-        if (directory / "evopi-plugin.json").is_file():
-            return directory
-    raise RuntimeError(f"Approved Plugin manifest not found for {entrypoint}")
-
-
-def _approved_plugin_override_capabilities(
-    workspace: Path,
-    paths: list[str | Path],
-) -> dict[str, frozenset[str]]:
-    from evopi.plugins import approved_plugin_entrypoints, review_plugin
-
-    approved = {
-        path.expanduser().resolve()
-        for path in approved_plugin_entrypoints(workspace)
-    }
-    capabilities: dict[str, frozenset[str]] = {}
-    for raw_path in paths:
-        entrypoint = Path(raw_path).expanduser().resolve()
-        if entrypoint not in approved:
-            continue
-        report = review_plugin(_plugin_candidate_root(entrypoint))
-        if report.passed:
-            capabilities[report.candidate.name] = frozenset(
-                report.candidate.manifest.requested_capabilities
-            )
-    return capabilities
-
-
 class PolicyBlockedError(RuntimeError):
     pass
 
@@ -116,6 +86,7 @@ class BaseHarness:
         compaction_settings: CompactionSettings | None = None,
         plugin_paths: list[str | Path] | None = None,
         enabled_plugins: set[str] | None = None,
+        reserved_plugin_commands: frozenset[str] = frozenset(),
         memory_enabled: bool = False,
         skills_enabled: bool = False,
         assembly_warnings: tuple[str, ...] = (),
@@ -137,6 +108,10 @@ class BaseHarness:
         self._assembly_warnings = assembly_warnings
         self._run_started_at: float | None = None
         self._internal_abort_controller: AbortController | None = None
+        self._reserved_plugin_commands = frozenset(
+            "/" + name.lstrip("/").lower()
+            for name in reserved_plugin_commands
+        )
 
         # Plugin system
         from evopi.plugins import PluginLoader, filtered_event_listener, wire_plugins
@@ -152,30 +127,51 @@ class BaseHarness:
             discover_defaults=False,
         )
         self._workspace = Path(_ws).expanduser().resolve()
-        self._plugin_override_capabilities = _approved_plugin_override_capabilities(
-            self._workspace,
-            list(plugin_paths or ()),
-        )
         apis = wire_plugins(self.plugin_loader, enabled=enabled_plugins)
-        self._pending_plugin_events: list[tuple[str, Any]] = []
+        self._pending_plugin_events: list[tuple[str, str, Any]] = []
+        self._plugin_apis = {api.plugin_name: api for api in apis}
+        self._plugin_tool_overrides: set[tuple[str, str]] = set()
+        self._plugin_active_overrides: dict[
+            str, tuple[str, frozenset[str]]
+        ] = {}
+        self._plugin_prompt_fragments: list[tuple[str, Any]] = []
+        self._plugin_context_providers: list[ContextProvider] = []
+        self._pending_plugin_runtime_events: list[CoreEvent] = []
         for api in apis:
             for tool in api.tools:
-                self.tools.register(tool)
+                replace = bool(tool.metadata.get("plugin_replace"))
+                self.tools.register(tool, replace=replace)
+                if replace:
+                    self._plugin_tool_overrides.add((api.plugin_name, tool.name))
             for policy in api.policies:
                 self.policies.register(policy)
             for pack in api.policy_packs:
                 for policy in pack.policies:
                     self.policies.register(policy)
-            self._pending_plugin_events.extend(api.events)
+            for provider in api.context_providers:
+                self.context.add(provider)
+                self._plugin_context_providers.append(provider)
+            self._plugin_prompt_fragments.extend(
+                (api.plugin_name, fragment)
+                for fragment in api.prompt_fragments
+            )
+            self._pending_plugin_events.extend(
+                (api.plugin_name, event_type, handler)
+                for event_type, handler in api.events
+            )
         # Collect commands from all plugins for CLI dispatch
-        self._plugin_commands: dict[str, object] = {}
+        self._plugin_commands: dict[str, Any] = {}
         for api in apis:
-            for name, handler in api.commands:
-                if name in self._plugin_commands:
+            for command in api.commands:
+                if command.name in self._reserved_plugin_commands:
                     raise ValueError(
-                        f"Plugin command '{name}' is registered more than once"
+                        f"Plugin command '{command.name}' is reserved by the host"
                     )
-                self._plugin_commands[name] = handler
+                if command.name in self._plugin_commands:
+                    raise ValueError(
+                        f"Plugin command '{command.name}' is registered more than once"
+                    )
+                self._plugin_commands[command.name] = command
         self._plugin_names = tuple(sorted(api.plugin_name for api in apis))
         self.trace_path = Path(trace_path).resolve() if trace_path is not None else None
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
@@ -199,10 +195,19 @@ class BaseHarness:
         )
         self.agent.messages.extend(self.session.messages)
         self.agent.subscribe(self._on_core_event)
+        for api in apis:
+            self._bind_plugin_api(api)
         # Subscribe plugin event handlers
         self._plugin_event_unsubscribers = [
-            self.agent.subscribe(filtered_event_listener(event_type, handler))
-            for event_type, handler in self._pending_plugin_events
+            self.agent.subscribe(
+                filtered_event_listener(
+                    event_type,
+                    handler,
+                    plugin_name=plugin_name,
+                    on_contract_error=self._record_plugin_handler_error,
+                )
+            )
+            for plugin_name, event_type, handler in self._pending_plugin_events
         ]
 
     @property
@@ -240,10 +245,78 @@ class BaseHarness:
         return self.agent.is_running
 
     def plugin_can_override_tool(self, plugin_name: str, tool_name: str) -> bool:
-        return (
-            f"override_tool:{tool_name}"
-            in self._plugin_override_capabilities.get(plugin_name, frozenset())
+        return (plugin_name, tool_name) in self._plugin_tool_overrides
+
+    @property
+    def plugin_commands(self):
+        """Return immutable descriptions of commands registered by Plugins."""
+
+        return tuple(
+            self._plugin_commands[name]
+            for name in sorted(self._plugin_commands)
         )
+
+    async def dispatch_plugin_command(self, text: str) -> bool:
+        """Dispatch one Plugin command through the public Harness boundary."""
+
+        from evopi.plugins import PluginCommandContext
+
+        stripped = text.strip()
+        if not stripped:
+            return False
+        command_name, _, arguments = stripped.partition(" ")
+        command_name = "/" + command_name.lstrip("/").lower()
+        command = self._plugin_commands.get(command_name)
+        if command is None:
+            return False
+        api = self._plugin_apis[command.runtime_plugin_name]
+        assert api.runtime is not None
+        context = PluginCommandContext(
+            command_name=command_name,
+            raw=stripped,
+            runtime=api.runtime,
+        )
+        await self.agent.emit_event(
+            CoreEvent(
+                type="plugin_command_start",
+                data={"plugin": api.plugin_name, "command": command_name},
+            )
+        )
+        try:
+            result = self._call_plugin_command(
+                command.handler,
+                arguments.strip(),
+                context,
+            )
+            if inspect.isawaitable(result):
+                await result
+            await self._emit_pending_plugin_runtime_events()
+        except Exception as exc:
+            await self.agent.emit_event(
+                CoreEvent(
+                    type="plugin_command_error",
+                    data={
+                        "plugin": api.plugin_name,
+                        "command": command_name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+            raise
+        await self.agent.emit_event(
+            CoreEvent(
+                type="plugin_command_end",
+                data={"plugin": api.plugin_name, "command": command_name},
+            )
+        )
+        return True
+
+    @staticmethod
+    def _call_plugin_command(handler, arguments: str, context):
+        parameters = list(inspect.signature(handler).parameters.values())
+        if len(parameters) >= 2:
+            return handler(arguments, context)
+        return handler(context.raw)
 
     @property
     def remaining_deadline(self) -> float | None:
@@ -287,9 +360,108 @@ class BaseHarness:
             )
         return selected
 
+    def _bind_plugin_api(self, api) -> None:
+        from evopi.plugins import PluginRuntimeContext
+
+        api.tools.bind(
+            get_all=self.tools.all,
+            get_active=self._active_tools,
+            set_active=self._set_plugin_active_tools,
+            clear_active=self._clear_plugin_active_tools,
+        )
+        runtime = PluginRuntimeContext(
+            plugin_name=api.plugin_name,
+            plugin_version=api.plugin_version,
+            workspace=str(self._workspace),
+            session_id=self.session.session_id,
+            tools=api.tools,
+            state=api.state,
+            ui=api.ui,
+        )
+        api.bind_runtime(runtime, ui=api.ui)
+
+    def _active_tools(self) -> list[Tool]:
+        tools = self.tools.all()
+        if not self._plugin_active_overrides:
+            return tools
+        allowed = {tool.name for tool in tools}
+        for _, names in self._plugin_active_overrides.values():
+            allowed.intersection_update(names)
+        return [tool for tool in tools if tool.name in allowed]
+
+    def _set_plugin_active_tools(
+        self,
+        plugin_name: str,
+        names: tuple[str, ...],
+        scope: str,
+    ) -> None:
+        from evopi.plugins import PluginContractError
+
+        if scope not in {"run", "session"}:
+            raise PluginContractError("Plugin Tool scope must be 'run' or 'session'")
+        known = {tool.name for tool in self.tools.all()}
+        unknown = sorted(set(names) - known)
+        if unknown:
+            raise PluginContractError(
+                "Unknown active Tool name(s): " + ", ".join(unknown)
+            )
+        self._plugin_active_overrides[plugin_name] = (
+            scope,
+            frozenset(names),
+        )
+        self.agent.tools = self._active_tools()
+        self._pending_plugin_runtime_events.append(
+            CoreEvent(
+                type="plugin_tools_changed",
+                data={
+                    "plugin": plugin_name,
+                    "scope": scope,
+                    "active_tools": sorted(names),
+                },
+            )
+        )
+
+    def _clear_plugin_active_tools(self, plugin_name: str) -> None:
+        self._plugin_active_overrides.pop(plugin_name, None)
+        self.agent.tools = self._active_tools()
+        self._pending_plugin_runtime_events.append(
+            CoreEvent(
+                type="plugin_tools_changed",
+                data={"plugin": plugin_name, "scope": "clear"},
+            )
+        )
+
+    def _clear_run_plugin_overrides(self) -> None:
+        expired = [
+            plugin_name
+            for plugin_name, (scope, _) in self._plugin_active_overrides.items()
+            if scope == "run"
+        ]
+        for plugin_name in expired:
+            self._plugin_active_overrides.pop(plugin_name, None)
+        self.agent.tools = self._active_tools()
+
+    def _record_plugin_handler_error(self, message: str) -> None:
+        _logger.warning("%s", message)
+        if self.trace_writer is not None:
+            self.trace_writer.write(
+                TraceRecord(
+                    type="plugin_handler_error",
+                    data={"error": message},
+                )
+            )
+
+    async def _emit_pending_plugin_runtime_events(self) -> None:
+        events = self._pending_plugin_runtime_events
+        self._pending_plugin_runtime_events = []
+        for event in events:
+            await self.agent.emit_event(event)
+
     def register_tool(self, tool: Tool, *, replace: bool = False) -> None:
+        if "effects" not in tool.metadata:
+            tool.metadata["effects"] = ["unknown"]
         self.tools.register(tool, replace=replace)
-        self.agent.tools = self.tools.all()
+        self.agent.tools = self._active_tools()
 
     def register_policy(self, policy: Policy, *, replace: bool = False) -> None:
         self.policies.register(policy, replace=replace)
@@ -304,7 +476,8 @@ class BaseHarness:
         return self.agent.subscribe(listener)
 
     async def prompt(self, content: str) -> AssistantMessage:
-        self.agent.tools = self.tools.all()
+        self.agent.tools = self._active_tools()
+        await self._emit_pending_plugin_runtime_events()
         self._runtime_fingerprint = self._build_runtime_fingerprint()
         self.session.compare_runtime(self._runtime_fingerprint)
         self.lifecycle.start()
@@ -316,6 +489,7 @@ class BaseHarness:
             error = self.agent.last_run.error if self.agent.last_run is not None else None
             self.lifecycle.abort(error)
             self._run_started_at = None
+            self._clear_run_plugin_overrides()
             raise
         except Exception as exc:
             await self._emit_pending_session_events()
@@ -326,6 +500,7 @@ class BaseHarness:
             )
             self.lifecycle.fail(exc, end_reason=end_reason)
             self._run_started_at = None
+            self._clear_run_plugin_overrides()
             raise
         await self._emit_pending_session_events()
         end_reason = (
@@ -346,6 +521,7 @@ class BaseHarness:
             except Exception:
                 _logger.warning("Compaction check failed", exc_info=True)
         self._run_started_at = None
+        self._clear_run_plugin_overrides()
         return answer
 
     def reset(self) -> None:
@@ -401,49 +577,80 @@ class BaseHarness:
             if policy.metadata.get("plugin_source") not in old_plugin_names:
                 next_policies.register(policy)
 
-        override_capabilities = _approved_plugin_override_capabilities(
-            self._workspace,
-            paths,
-        )
-        commands: dict[str, object] = {}
-        pending_events: list[tuple[str, Any]] = []
+        commands: dict[str, Any] = {}
+        pending_events: list[tuple[str, str, Any]] = []
+        prompt_fragments: list[tuple[str, Any]] = []
+        context_providers: list[ContextProvider] = []
+        tool_overrides: set[tuple[str, str]] = set()
         for api in apis:
             for tool in api.tools:
-                capability = f"override_tool:{tool.name}"
+                replace = bool(tool.metadata.get("plugin_replace"))
                 next_tools.register(
                     tool,
-                    replace=(
-                        capability
-                        in override_capabilities.get(api.plugin_name, set())
-                    ),
+                    replace=replace,
                 )
+                if replace:
+                    tool_overrides.add((api.plugin_name, tool.name))
             for policy in api.policies:
                 next_policies.register(policy)
             for pack in api.policy_packs:
                 for policy in pack.policies:
                     next_policies.register(policy)
-            for name, handler in api.commands:
-                if name in commands:
+            for command in api.commands:
+                if command.name in self._reserved_plugin_commands:
                     raise RuntimeError(
-                        f"Plugin command '{name}' is registered more than once"
+                        f"Plugin command '{command.name}' is reserved by the host"
                     )
-                commands[name] = handler
-            pending_events.extend(api.events)
+                if command.name in commands:
+                    raise RuntimeError(
+                        f"Plugin command '{command.name}' is registered more than once"
+                    )
+                commands[command.name] = command
+            pending_events.extend(
+                (api.plugin_name, event_type, handler)
+                for event_type, handler in api.events
+            )
+            context_providers.extend(api.context_providers)
+            prompt_fragments.extend(
+                (api.plugin_name, fragment)
+                for fragment in api.prompt_fragments
+            )
 
         for unsubscribe in self._plugin_event_unsubscribers:
             unsubscribe()
+        for provider in self._plugin_context_providers:
+            self.context.remove(provider)
         self.tools = next_tools
         self.policies = next_policies
         self.plugin_loader = loader
         self._plugin_commands = commands
         self._plugin_names = tuple(sorted(api.plugin_name for api in apis))
-        self._plugin_override_capabilities = override_capabilities
+        self._plugin_apis = {api.plugin_name: api for api in apis}
+        self._plugin_tool_overrides = tool_overrides
+        self._plugin_prompt_fragments = prompt_fragments
+        self._plugin_context_providers = context_providers
+        self._plugin_active_overrides = {
+            name: value
+            for name, value in self._plugin_active_overrides.items()
+            if name in self._plugin_apis
+        }
+        for provider in context_providers:
+            self.context.add(provider)
+        for api in apis:
+            self._bind_plugin_api(api)
         self._pending_plugin_events = pending_events
         self._plugin_event_unsubscribers = [
-            self.agent.subscribe(filtered_event_listener(event_type, handler))
-            for event_type, handler in pending_events
+            self.agent.subscribe(
+                filtered_event_listener(
+                    event_type,
+                    handler,
+                    plugin_name=plugin_name,
+                    on_contract_error=self._record_plugin_handler_error,
+                )
+            )
+            for plugin_name, event_type, handler in pending_events
         ]
-        self.agent.tools = self.tools.all()
+        self.agent.tools = self._active_tools()
         self._refresh_system_prompt_after_capability_change()
         if self.trace_writer is not None:
             self.trace_writer.write(
@@ -469,6 +676,39 @@ class BaseHarness:
         signal: AbortSignal | None = None,
     ) -> AgentContext:
         prepared = await self.context.prepare(context, signal=signal)
+        prepared.tools = self._active_tools()
+        if self._plugin_prompt_fragments:
+            from evopi.plugins import PluginPromptContext
+
+            active_names = tuple(tool.name for tool in prepared.tools)
+            fragments = sorted(
+                self._plugin_prompt_fragments,
+                key=lambda item: (item[1].priority, item[0], item[1].name),
+            )
+            for plugin_name, fragment in fragments:
+                api = self._plugin_apis[plugin_name]
+                prompt_context = PluginPromptContext(
+                    plugin_name=plugin_name,
+                    plugin_version=api.plugin_version,
+                    workspace=str(self._workspace),
+                    session_id=self.session.session_id,
+                    active_tools=active_names,
+                    state=api.state.snapshot(),
+                )
+                value = fragment.provider(prompt_context)
+                if inspect.isawaitable(value):
+                    value = await value
+                if value:
+                    prepared.messages.insert(0, SystemMessage(content=value))
+                    await self.agent.emit_event(
+                        CoreEvent(
+                            type="plugin_prompt_applied",
+                            data={
+                                "plugin": plugin_name,
+                                "fragment": fragment.name,
+                            },
+                        )
+                    )
         evaluation = await self._evaluate(
             PolicyContext(
                 hook="before_model_call",

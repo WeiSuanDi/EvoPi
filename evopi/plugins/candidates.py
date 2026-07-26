@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from evopi.evolution import ActivationStore, ArtifactCandidate
+from evopi.plugins.protocol import PLUGIN_API_VERSION
 
 PLUGIN_MANIFEST_SCHEMA_VERSION = 1
 
@@ -40,6 +41,7 @@ class PluginManifest:
     description: str = ""
     dependencies: tuple[str, ...] = ()
     requested_capabilities: tuple[str, ...] = ()
+    api_version: int = PLUGIN_API_VERSION
     schema_version: int = PLUGIN_MANIFEST_SCHEMA_VERSION
 
 
@@ -76,7 +78,7 @@ def review_plugin(path: str | Path) -> PluginReviewReport:
     """Review syntax and manifest without importing or executing candidate code."""
 
     candidate_path = Path(path).expanduser().resolve()
-    manifest = _read_manifest(candidate_path)
+    manifest, manifest_warnings = _read_manifest(candidate_path)
     entry = (candidate_path / manifest.entrypoint).resolve()
     try:
         entry.relative_to(candidate_path)
@@ -101,6 +103,7 @@ def review_plugin(path: str | Path) -> PluginReviewReport:
             "entrypoint": manifest.entrypoint,
             "dependencies": list(manifest.dependencies),
             "requested_capabilities": list(manifest.requested_capabilities),
+            "api_version": manifest.api_version,
         },
     )
     return PluginReviewReport(
@@ -110,6 +113,7 @@ def review_plugin(path: str | Path) -> PluginReviewReport:
             artifact=artifact,
         ),
         errors=tuple(errors),
+        warnings=manifest_warnings,
     )
 
 
@@ -228,7 +232,7 @@ class PluginArtifactStore:
         return entry
 
 
-def _read_manifest(path: Path) -> PluginManifest:
+def _read_manifest(path: Path) -> tuple[PluginManifest, tuple[str, ...]]:
     manifest_path = path / "evopi-plugin.json"
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -250,16 +254,35 @@ def _read_manifest(path: Path) -> PluginManifest:
     capabilities = _string_tuple(
         raw.get("requested_capabilities", []), "requested_capabilities"
     )
+    raw_api_version = raw.get("api_version")
+    warnings: tuple[str, ...] = ()
+    if raw_api_version is None:
+        api_version = PLUGIN_API_VERSION
+        warnings = (
+            "Plugin manifest omits api_version; assuming PluginAPI v1",
+        )
+    elif not isinstance(raw_api_version, int) or isinstance(raw_api_version, bool):
+        raise PluginCandidateError("Plugin api_version must be an integer")
+    elif raw_api_version != PLUGIN_API_VERSION:
+        raise PluginCandidateError(
+            f"unsupported Plugin API version: {raw_api_version}"
+        )
+    else:
+        api_version = raw_api_version
     description = raw.get("description", "")
     if not isinstance(description, str):
         raise PluginCandidateError("Plugin description must be a string")
-    return PluginManifest(
-        name=name,
-        version=version,
-        entrypoint=entrypoint,
-        description=description,
-        dependencies=dependencies,
-        requested_capabilities=capabilities,
+    return (
+        PluginManifest(
+            name=name,
+            version=version,
+            entrypoint=entrypoint,
+            description=description,
+            dependencies=dependencies,
+            requested_capabilities=capabilities,
+            api_version=api_version,
+        ),
+        warnings,
     )
 
 

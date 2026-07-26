@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from evopi.evolution import ActivationDecision, ActivationStore
 from evopi.plugins import (
+    PLUGIN_API_VERSION,
     PluginArtifactStore,
+    PluginCandidateError,
     PluginCandidateStatus,
+    PluginLoader,
     PluginManager,
     review_plugin,
 )
@@ -52,6 +57,50 @@ def test_review_plugin_never_imports_candidate_code(tmp_path: Path) -> None:
     assert report.passed is True
     assert marker.exists() is False
     assert report.candidate.name == "demo"
+
+
+def test_manifest_defaults_legacy_candidate_to_api_v1_with_warning(
+    tmp_path: Path,
+) -> None:
+    path = write_candidate(tmp_path / "legacy")
+
+    report = review_plugin(path)
+
+    assert report.candidate.manifest.api_version == PLUGIN_API_VERSION
+    assert report.warnings == (
+        "Plugin manifest omits api_version; assuming PluginAPI v1",
+    )
+
+
+def test_manifest_rejects_unsupported_api_version(tmp_path: Path) -> None:
+    path = write_candidate(tmp_path / "future")
+    manifest = path / "evopi-plugin.json"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")[:-1] + ',"api_version":99}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PluginCandidateError, match="Plugin API version"):
+        review_plugin(path)
+
+
+def test_loader_rejects_runtime_metadata_that_disagrees_with_manifest(
+    tmp_path: Path,
+) -> None:
+    path = write_candidate(tmp_path / "mismatch")
+    (path / "plugin.py").write_text(
+        PLUGIN.replace('name="demo"', 'name="other"'),
+        encoding="utf-8",
+    )
+
+    loader = PluginLoader(
+        workspace=tmp_path,
+        extra_paths=[path / "plugin.py"],
+        discover_defaults=False,
+    )
+
+    assert loader.is_valid("other") is False
+    assert any("does not match its approved manifest" in error for error in loader.errors)
 
 
 def test_manager_marks_changed_approved_source_as_stale(tmp_path: Path) -> None:

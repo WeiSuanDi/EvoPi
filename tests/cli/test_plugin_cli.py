@@ -150,22 +150,28 @@ def test_idle_reload_atomically_adds_and_removes_approved_plugin(
 
 
 @pytest.mark.parametrize(
-    ("requested_capabilities", "should_load"),
+    ("requested_capabilities", "explicit_replace", "should_load"),
     [
-        (("override_tool:read_file",), True),
-        ((), False),
+        ((), True, True),
+        (("override_tool:read_file",), False, False),
     ],
 )
-def test_builtin_tool_override_requires_approved_manifest_capability(
+def test_builtin_tool_override_requires_explicit_registration_intent(
     tmp_path: Path,
     monkeypatch,
     requested_capabilities: tuple[str, ...],
+    explicit_replace: bool,
     should_load: bool,
 ) -> None:
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     source = PLUGIN.replace('name="plugin_ping"', 'name="read_file"')
+    if explicit_replace:
+        source = source.replace(
+            '        ))\n',
+            '        ), replace=True)\n',
+        )
     candidate = _candidate(
         workspace / "candidate",
         source=source,

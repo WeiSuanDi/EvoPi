@@ -20,6 +20,12 @@ class ContextManager:
     def add(self, provider: ContextProvider) -> None:
         self._providers.append(provider)
 
+    def remove(self, provider: ContextProvider) -> None:
+        try:
+            self._providers.remove(provider)
+        except ValueError:
+            return
+
     async def prepare(
         self,
         context: AgentContext,

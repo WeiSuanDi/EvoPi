@@ -7,8 +7,22 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from evopi.core.tool import Tool
+from evopi.harness.context_manager import ContextProvider
+from evopi.plugins.host import (
+    NullPluginUI,
+    PluginCommandHandler,
+    PluginCommandSpec,
+    PluginPromptFragment,
+    PluginPromptProvider,
+    PluginRuntimeContext,
+    PluginStateStore,
+    PluginTools,
+    PluginUI,
+)
 from evopi.policy.registry import PolicyPack
 from evopi.policy.types import Policy
+
+PLUGIN_API_VERSION = 1
 
 # ---------------------------------------------------------------------------
 # Plugin metadata
@@ -79,29 +93,29 @@ class PluginAPI:
         self.plugin_version = plugin_version
 
         # -- collected registrations (public, read by harness) --
-        self.tools: list[Tool] = []
+        self.tools = PluginTools(plugin_name, plugin_version)
         self.events: list[tuple[str, EventHandler]] = []
-        self.commands: list[tuple[str, EventHandler]] = []
+        self.commands: list[PluginCommandSpec] = []
         self.policies: list[Policy] = []
         self.policy_packs: list[PolicyPack] = []
+        self.context_providers: list[ContextProvider] = []
+        self.prompt_fragments: list[PluginPromptFragment] = []
+        self.state = PluginStateStore()
+        self.ui: PluginUI = NullPluginUI()
+        self.runtime: PluginRuntimeContext | None = None
 
         # -- runtime dependencies declared via require() --
         self._declared_deps: list[tuple[str, str | None]] = []
 
     # -- tools ----------------------------------------------------------------
 
-    def register_tool(self, tool: Tool) -> Tool:
+    def register_tool(self, tool: Tool, *, replace: bool = False) -> Tool:
         """Register a tool the LLM can call.
 
         The tool's ``metadata`` dict is tagged with ``plugin_source`` and
         ``plugin_version`` so Policies can make plugin-level trust decisions.
         """
-        tool.metadata.update(
-            plugin_source=self.plugin_name,
-            plugin_version=self.plugin_version,
-        )
-        self.tools.append(tool)
-        return tool
+        return self.tools.register(tool, replace=replace)
 
     # -- event handlers -------------------------------------------------------
 
@@ -115,9 +129,58 @@ class PluginAPI:
 
     # -- commands -------------------------------------------------------------
 
-    def register_command(self, name: str, handler: EventHandler) -> None:
-        """Register a ``/`` command callable from a REPL or CLI."""
-        self.commands.append((name, handler))
+    def register_command(
+        self,
+        name: str,
+        handler: PluginCommandHandler,
+        *,
+        description: str = "",
+        usage: str = "",
+    ) -> None:
+        """Register a host-neutral command callable from an interactive client."""
+
+        normalized = "/" + name.lstrip("/").strip().lower()
+        if normalized == "/":
+            raise ValueError("Plugin command name cannot be empty")
+        self.commands.append(
+            PluginCommandSpec(
+                name=normalized,
+                handler=handler,
+                description=description,
+                usage=usage,
+                runtime_plugin_name=self.plugin_name,
+            )
+        )
+
+    def register_context_provider(self, provider: ContextProvider) -> None:
+        self.context_providers.append(provider)
+
+    def register_prompt_fragment(
+        self,
+        name: str,
+        provider: PluginPromptProvider,
+        *,
+        priority: int = 0,
+    ) -> None:
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError("Plugin Prompt Fragment name cannot be empty")
+        self.prompt_fragments.append(
+            PluginPromptFragment(
+                name=normalized,
+                provider=provider,
+                priority=priority,
+            )
+        )
+
+    def bind_runtime(
+        self,
+        runtime: PluginRuntimeContext,
+        *,
+        ui: PluginUI,
+    ) -> None:
+        self.runtime = runtime
+        self.ui = ui
 
     # -- policies -------------------------------------------------------------
 
@@ -146,4 +209,10 @@ class PluginAPI:
         self._declared_deps.append((plugin_name, version))
 
 
-__all__ = ["Plugin", "PluginAPI", "PluginMetadata", "EventHandler"]
+__all__ = [
+    "PLUGIN_API_VERSION",
+    "Plugin",
+    "PluginAPI",
+    "PluginMetadata",
+    "EventHandler",
+]

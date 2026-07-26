@@ -327,7 +327,7 @@ async def _run_repl(args: argparse.Namespace) -> int:
                         console.print("[yellow]No previous prompt to retry.[/]")
                         continue
                 else:
-                    handle_slash_command(harness, user_input)
+                    await handle_slash_command(harness, user_input)
                     continue
 
             set_last_prompt(user_input)
