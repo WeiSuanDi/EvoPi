@@ -33,6 +33,8 @@ class PolicyContext:
     error: str | None = None
     error_info: ModelErrorInfo | None = None
     aborted: bool = False
+    tool_plugin_source: str | None = None
+    policy_plugin_source: str | None = None
     metadata: Metadata = field(default_factory=dict)
 
 

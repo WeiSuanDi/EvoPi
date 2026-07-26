@@ -94,34 +94,34 @@ def _cmd_clear(harness: CodingHarness, parts: list[str], raw: str) -> None:
 
 def _cmd_reload(harness: CodingHarness, parts: list[str], raw: str) -> None:
     """Reload plugins from disk without restarting."""
-    from evopi.plugins.loader import discover_plugins, load_plugin
+    from evopi.plugins.loader import discover_plugin_paths, load_plugin
     from evopi.plugins.protocol import PluginAPI
 
-    plugin_paths = discover_plugins(
+    plugin_paths = discover_plugin_paths(
         harness.session.workspace,
         root=getattr(harness.session, "root", None),
     )
     new_count = 0
     for path in plugin_paths:
         name = path.stem if path.suffix == ".py" else path.name
-        if harness.plugin_runtime.is_loaded(name):
+        if harness.plugin_loader.is_loaded(name):
             continue
         if plugin := load_plugin(path):
             try:
-                api = PluginAPI(plugin.meta.name)
+                api = PluginAPI(plugin.meta.name, plugin.meta.version)
                 plugin.register(api)
-                for tool in api._tools:
+                for tool in api.tools:
                     harness.tools.register(tool, replace=True)
                     harness.agent.tools = harness.tools.all()
-                for policy in api._policies:
+                for policy in api.policies:
                     harness.policies.register(policy, replace=True)
-                for pack in api._packs:
+                for pack in api.policy_packs:
                     harness.policies.load_pack(pack)
-                for cmd_name, handler in api._commands:
+                for cmd_name, handler in api.commands:
                     harness._plugin_commands[cmd_name] = handler
-                for _et, handler in api._events:
+                for _et, handler in api.events:
                     harness.agent.subscribe(handler)  # type: ignore[arg-type]
-                harness.plugin_runtime._plugins.append(plugin)
+                harness.plugin_loader._plugins.append(plugin)
                 new_count += 1
                 _console.print(f"[green]Loaded: {plugin.meta.name} v{plugin.meta.version}[/]")
             except Exception as exc:

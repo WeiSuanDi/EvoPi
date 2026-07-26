@@ -17,10 +17,15 @@ from evopi.policy.types import Policy
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class PluginMetadata:
+    """Immutable identity card for a Plugin.
+
+    Declared by the plugin author.  The loader validates *dependencies* against
+    other discovered plugins before registration begins.
+    """
+
     name: str
     version: str = "0.1.0"
     description: str = ""
-    source_path: str = ""
     dependencies: tuple[str, ...] = ()
 
 
@@ -33,57 +38,69 @@ class Plugin(ABC):
     """A plugin registers tools, handlers, commands, and policies.
 
     Each ``.py`` file in ``~/.evopi/plugins/`` or ``<project>/.evopi/plugins/``
-    that exports a class inheriting from ``Plugin`` is auto-discovered.
+    that exports a class inheriting from ``Plugin`` is auto-discovered by
+    :class:`PluginLoader`.
     """
 
     @property
     @abstractmethod
-    def meta(self) -> PluginMetadata: ...
+    def meta(self) -> PluginMetadata:
+        """Return the plugin's identity metadata (called once by the loader)."""
+        ...
 
     @abstractmethod
     def register(self, api: PluginAPI) -> None:
-        """Called at load time.  Use *api* to declare tools, policies, etc."""
+        """Called by the harness after discovery.
+
+        Use *api* to declare tools, event handlers, commands, and policies.
+        """
         ...
 
 
 # ---------------------------------------------------------------------------
-# PluginAPI
+# PluginAPI — registration surface
 # ---------------------------------------------------------------------------
 
-EventHandler = Callable[..., Any]  # called with CoreEvent
+EventHandler = Callable[..., Any]
 
 
 class PluginAPI:
     """Registration surface passed to :meth:`Plugin.register`.
 
-    All registrations are collected by the :class:`PluginRuntime` and applied
-    when the harness is wired.
+    All registrations are collected by the harness and wired into the
+    appropriate registries (ToolRegistry, PolicyRegistry, EventBus, etc.).
+
+    Tools are automatically tagged with ``metadata["plugin_source"]`` and
+    ``metadata["plugin_version"]`` so that Policies can identify their origin.
     """
 
-    def __init__(self, plugin_name: str) -> None:
-        self._plugin = plugin_name
-        self._tools: list[Tool] = []
-        self._events: list[tuple[str, EventHandler]] = []
-        self._commands: list[tuple[str, EventHandler]] = []
-        self._policies: list[Policy] = []
-        self._packs: list[PolicyPack] = []
+    def __init__(self, plugin_name: str, plugin_version: str) -> None:
+        self.plugin_name = plugin_name
+        self.plugin_version = plugin_version
+
+        # -- collected registrations (public, read by harness) --
+        self.tools: list[Tool] = []
+        self.events: list[tuple[str, EventHandler]] = []
+        self.commands: list[tuple[str, EventHandler]] = []
+        self.policies: list[Policy] = []
+        self.policy_packs: list[PolicyPack] = []
+
+        # -- runtime dependencies declared via require() --
+        self._declared_deps: list[tuple[str, str | None]] = []
 
     # -- tools ----------------------------------------------------------------
 
     def register_tool(self, tool: Tool) -> Tool:
         """Register a tool the LLM can call.
 
-        The tool's description is appended with the plugin source so
-        Policies can identify its origin via tool name matching.
+        The tool's ``metadata`` dict is tagged with ``plugin_source`` and
+        ``plugin_version`` so Policies can make plugin-level trust decisions.
         """
-        # Tag the tool as plugin-sourced via the description
-        if f"plugin:{self._plugin}" not in tool.description:
-            object.__setattr__(
-                tool,
-                "description",
-                tool.description + f" [plugin:{self._plugin}]",
-            )
-        self._tools.append(tool)
+        tool.metadata.update(
+            plugin_source=self.plugin_name,
+            plugin_version=self.plugin_version,
+        )
+        self.tools.append(tool)
         return tool
 
     # -- event handlers -------------------------------------------------------
@@ -91,33 +108,37 @@ class PluginAPI:
     def on(self, event_type: str, handler: EventHandler) -> None:
         """Subscribe *handler* to a CoreEvent type.
 
-        Valid types: ``"agent_start"``, ``"message_update"``,
-        ``"tool_execution_start"``, etc.
+        Valid event types include ``"agent_start"``, ``"message_update"``,
+        ``"tool_execution_start"``, ``"error"``, etc.
         """
-        self._events.append((event_type, handler))
+        self.events.append((event_type, handler))
 
     # -- commands -------------------------------------------------------------
 
     def register_command(self, name: str, handler: EventHandler) -> None:
-        """Register a ``/`` command callable from the REPL."""
-        self._commands.append((name, handler))
+        """Register a ``/`` command callable from a REPL or CLI."""
+        self.commands.append((name, handler))
 
     # -- policies -------------------------------------------------------------
 
     def register_policy(self, policy: Policy) -> None:
-        """Register a Policy that the plugin provides."""
-        self._policies.append(policy)
+        """Register a Policy that this plugin provides."""
+        self.policies.append(policy)
 
     def load_policy_pack(self, pack: PolicyPack) -> None:
-        """Load a complete PolicyPack."""
-        self._packs.append(pack)
+        """Register a complete PolicyPack."""
+        self.policy_packs.append(pack)
 
     # -- dependencies ---------------------------------------------------------
 
     def require(self, plugin_name: str, version: str | None = None) -> None:
-        """Declare a dependency on another plugin."""
-        # Dependencies are validated by PluginRuntime after all plugins are loaded.
-        pass  # metadata-only for now; checked at runtime
+        """Declare a runtime dependency on another plugin.
+
+        Dependencies declared via *require* are validated by the harness after
+        all plugins have registered. Static dependencies should be listed in
+        :attr:`PluginMetadata.dependencies` instead.
+        """
+        self._declared_deps.append((plugin_name, version))
 
 
-__all__ = ["Plugin", "PluginAPI", "PluginMetadata"]
+__all__ = ["Plugin", "PluginAPI", "PluginMetadata", "EventHandler"]

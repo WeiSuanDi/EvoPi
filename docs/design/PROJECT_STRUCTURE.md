@@ -13,6 +13,7 @@ EvoPi/
 │   ├── core/
 │   ├── harness/
 │   ├── policy/
+│   ├── plugins/
 │   ├── tools/
 │   ├── memory/
 │   ├── skills/
@@ -100,6 +101,27 @@ Harness 负责 Agent 怎么被组织和治理。
 Policy 负责具体怎么治理。
 ```
 
+## evopi/plugins
+
+插件扩展层。
+
+职责：
+
+- 文件系统自动发现（~/.evopi/plugins/ + <project>/.evopi/plugins/）
+- Plugin ABC + PluginAPI 注册协议
+- PluginLoader：发现、加载、依赖校验
+- wire_plugins()：Harness 装配工具
+- Policy 可感知工具插件来源（tool_plugin_source）
+
+Plugin 是 Pi Extension 的 Python 对应物：注册 Tool、Event Handler、Command、Policy。
+Plugin 和 PolicyPack 平级，由 Harness 统一装配。
+
+一句话：
+
+```text
+Plugin 提供可热插拔的第三方扩展能力。
+```
+
 ## evopi/tools
 
 工具能力层。
@@ -150,9 +172,9 @@ Skill 是任务经验包，不是底层工具。
 - 中断 Run 闭合与未知 ToolResult 恢复
 - 运行时指纹比较和结构化恢复 warning
 
-Session 负责一个任务或对话窗口如何跨 Run、跨 CLI 进程持续存在。v1 只维护单一活动
-路径，不实现 branch/fork/compact。完整协议见
-[`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
+Session 负责一个任务或对话窗口如何跨 Run、跨 CLI 进程持续存在。当前已实现
+Tree-ready Entry、branch/fork 基础操作、compact 上下文压缩和 Checkpoint 快照。
+完整协议见 [`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
 
 ## evopi/trace
 

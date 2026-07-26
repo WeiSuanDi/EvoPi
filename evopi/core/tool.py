@@ -46,6 +46,7 @@ class Tool:
     handler: ToolHandler
     timeout: float | None = None
     timeout_grace_period: float = 1.0
+    metadata: Metadata = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:

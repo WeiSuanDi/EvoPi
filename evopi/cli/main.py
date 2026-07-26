@@ -314,9 +314,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _plugin_list_main(argv: list[str]) -> int:
     """``evopi plugin list`` — print loaded plugins."""
-    from evopi.plugins.loader import discover_plugins
+    from evopi.plugins.loader import discover_plugin_paths
     workspace = Path.cwd()
-    plugins = discover_plugins(workspace)
+    plugins = discover_plugin_paths(workspace)
     if not plugins:
         print("No plugins found.")
         print("  Global: ~/.evopi/plugins/")
