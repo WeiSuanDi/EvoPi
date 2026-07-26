@@ -71,6 +71,8 @@ def test_repl_plugin_ui_pauses_live_region_for_modal_interactions() -> None:
         assert await ui.input("Value", "Enter") == "typed"
         await ui.set_status("mode", "PLAN")
         await ui.set_status("mode", None)
+        await ui.set_status("sample:mode", "PLAN")
+        ui.clear_plugin_statuses("sample")
 
     asyncio.run(run())
 

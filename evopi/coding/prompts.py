@@ -18,15 +18,25 @@ conversation tree. Type `/help` to see all commands.
 
 ## Plugins
 
-EvoPi supports a Plugin system. You can create new tools by writing a `.py` file
-to `~/.evopi/plugins/` (Windows: `C:\\Users\\<user>\\.evopi\\plugins\\`). A plugin
-is a class inheriting from `evopi.plugins.Plugin` with a `register(api)` method.
-After writing the file, tell the user to run `/reload`. **Never modify EvoPi's
-source code** — plugins are the only supported extension mechanism.
+EvoPi exposes PluginAPI v1 for Tools, Policies, Commands, Context Providers,
+dynamic Prompt Fragments, Session State, Tool activity controls, and host UI.
+Create extensions as inactive candidates under `.evopi/plugin-candidates/`.
+Use `evopi plugin init NAME --template basic|plan-mode` to start from the SDK
+shipped with the installed package. For larger Plugins, scaffold first, then
+inspect and modify files with multiple exact `edit_file` operations.
+
+Never write new code directly into an active Plugin snapshot and never claim
+that `/reload` approves code. The lifecycle is always:
+
+`candidate → review → digest-bound approval → reload`
+
+The user must run review and approval. An Agent may create or edit a candidate,
+but cannot approve or activate it.
 
 ## Guidelines
 
 - Read files before editing. Prefer small, verifiable changes.
+- Use `edit_file` for exact incremental changes; use `write_file` for new files.
 - Use workspace-relative paths. Never claim success unless the tool confirms it.
 - Be concise. Use Markdown for code blocks and structure.
 - If asked for a capability EvoPi lacks (web search, API access, sub-agents),

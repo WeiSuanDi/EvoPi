@@ -11,7 +11,7 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent, TextDelta
-from evopi.core.tool import Tool, ToolCall, ToolResult
+from evopi.core.tool import Tool, ToolArgumentError, ToolCall, ToolResult
 
 
 class ScriptedModel:
@@ -85,6 +85,72 @@ def test_missing_tool_is_returned_to_model_as_error() -> None:
     result = next(message for message in agent.messages if isinstance(message, ToolResultMessage))
     assert result.is_error is True
     assert "not found" in result.content
+
+
+def test_invalid_tool_arguments_skip_policy_and_handler_then_recover() -> None:
+    calls = 0
+    policy_calls = 0
+
+    def handler(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return value
+
+    def before_tool_call(*args, **kwargs):
+        nonlocal policy_calls
+        policy_calls += 1
+        return None
+
+    model = ScriptedModel(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="broken-1",
+                        name="echo",
+                        argument_error=ToolArgumentError(
+                            code="invalid_json",
+                            message="Tool arguments are not valid JSON",
+                            raw_fragment='{"value":',
+                        ),
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            AssistantMessage(content="I corrected the call.", stop_reason="stop"),
+        ]
+    )
+    tool = Tool(
+        name="echo",
+        description="echo",
+        parameters={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+        handler=handler,
+    )
+    events: list[CoreEvent] = []
+    agent = Agent(model=model, tools=[tool], before_tool_call=before_tool_call)
+    agent.subscribe(events.append)
+
+    answer = asyncio.run(agent.prompt("call echo"))
+
+    assert answer.content == "I corrected the call."
+    assert calls == 0
+    assert policy_calls == 0
+    result = next(
+        message for message in agent.messages
+        if isinstance(message, ToolResultMessage)
+    )
+    assert result.is_error is True
+    assert "not valid JSON" in result.content
+    start = next(
+        event for event in events
+        if event.type == "tool_execution_start"
+    )
+    assert start.data["argument_error"]["raw_fragment"] == '{"value":'
 
 
 def test_single_terminating_tool_skips_follow_up_model_call() -> None:

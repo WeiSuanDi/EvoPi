@@ -16,11 +16,21 @@ class ToolValidationError(ValueError):
     """Raised when model-supplied arguments do not match a tool schema."""
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ToolArgumentError:
+    """Structured parse failure for one model-produced ToolCall."""
+
+    code: str
+    message: str
+    raw_fragment: str | None = None
+
+
 @dataclass(slots=True, kw_only=True)
 class ToolCall:
     id: str
     name: str
     arguments: JsonObject = field(default_factory=dict)
+    argument_error: ToolArgumentError | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -261,4 +271,10 @@ def _validate_arguments(name: str, schema: JsonObject, arguments: JsonObject) ->
             )
 
 
-__all__ = ["Tool", "ToolCall", "ToolResult", "ToolValidationError"]
+__all__ = [
+    "Tool",
+    "ToolArgumentError",
+    "ToolCall",
+    "ToolResult",
+    "ToolValidationError",
+]

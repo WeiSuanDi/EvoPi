@@ -110,12 +110,15 @@ Policy 负责具体怎么治理。
 - 非执行式 Manifest / AST 候选发现
 - SHA-256 摘要绑定 Approval 与内容寻址不可变快照
 - Workspace Trust、依赖/冲突验证与事务式 Reload
-- Plugin ABC + PluginAPI 注册协议
+- Plugin ABC + 通用 PluginAPI v1
 - PluginLoader：发现、加载、依赖校验
 - wire_plugins()：Harness 装配工具
 - Policy 可感知工具插件来源（tool_plugin_source）
+- Command / Context Provider / Prompt Fragment / Session State / Tool View / UI
+- package data SDK、候选脚手架和 Plan Mode 普通样例
 
-Plugin 是 Pi Extension 的 Python 对应物：注册 Tool、Event Handler、Command、Policy。
+Plugin 是 Pi Extension 的 Python 对应物：同一 API 注册 Tool、Policy、Event Handler、
+Command、Context、Prompt 和状态能力。Plugin 不按功能分类；Plan Mode 是普通样例。
 Plugin 和 PolicyPack 平级，由 Harness 统一装配。
 
 一句话：
@@ -262,6 +265,7 @@ Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 
 - Harness 设计
 - Policy 设计
 - Session / Checkpoint 设计
+- Plugin Runtime 设计
 - 项目结构
 
 ## examples

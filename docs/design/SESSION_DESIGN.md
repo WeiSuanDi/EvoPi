@@ -1,4 +1,4 @@
-# Session / Checkpoint v2 设计
+# Session / Checkpoint v3 设计
 
 ## 角色与层级
 
@@ -20,13 +20,14 @@ Session → Run → Turn → Model Attempt
 ## 事实来源与 Tree-ready Entry
 
 每个持久 Session 使用追加式 `session.jsonl` 作为事实来源。第一条是
-`SessionHeader`，之后是带独立 `schema_version=2`、UUID 与 UTC 时间的 Entry：
+`SessionHeader`，之后是带独立 `schema_version=3`、UUID 与 UTC 时间的 Entry：
 
 ```text
 run_start → message* → run_end → checkpoint
                          ├→ branch
                          ├→ compact
-                         └→ leaf_selected
+                         ├→ leaf_selected
+                         └→ plugin_state
 ```
 
 Entry 通过 `entry_id / parent_id` 构成树。`LeafSelectedEntry` 的 `parent_id` 指向
@@ -42,6 +43,10 @@ Policy/Confirmation 决策和工具执行细节只进入 Trace。
 Message Codec 是严格、双向且可恢复的。它保留消息 ID、UTC 时间、ToolCall、
 StopReason 与 JSON-safe metadata；遇到不支持的值会使事实日志写入失败，不使用
 `repr` 产生不可恢复数据。
+
+`PluginStateEntry` 是 v3 的通用插件状态事实，包含插件名/版本、键、`set/delete`
+操作、严格 JSON-safe 值和可选 Run ID。状态沿当前活动叶投影，因此 branch、switch、
+fork 和重启拥有一致语义。单值默认限制 64 KiB，单插件活动投影限制 1 MiB。
 
 ## 磁盘布局与锁
 
@@ -75,6 +80,7 @@ Checkpoint 是每个 Run 结束后的不可变恢复投影，不是第二份事�
 - 当前活动路径上已经提交的对话消息；
 - 最近 Run 的状态与结构化模型错误；
 - Harness、模型、System Prompt、工具定义和 Policy 描述的运行时指纹；
+- 当前活动路径的 Plugin 状态投影；
 - 快照校验信息。
 
 快照中的消息只是缓存。加载时必须与活动路径的消息 ID、顺序、角色和工具关联一致；
@@ -114,12 +120,13 @@ Trace 数据暴露差异。
 
 ## 事件与 CLI
 
-Session 使用三个治理可观测事件，Trace schema 继续保持 v2：
+Session 与 Plugin State 使用治理可观测事件，Trace schema 继续保持 v2：
 
 ```text
 session_start
 session_checkpoint
 session_error
+plugin_state_changed
 ```
 
 普通 CLI Prompt 默认继续当前工作区最近的 Session：
@@ -136,11 +143,12 @@ evopi session list --all --json
 Session 信息与 warning 写 stderr，模型文本继续写 stdout。`reset()` 创建并绑定新
 Session；`close()` 释放锁，运行中禁止关闭。
 
-## v1 迁移
+## v1 / v2 迁移
 
-打开 v1 日志时先在持锁状态下做完整结构验证，再生成只读
-`session.v1.jsonl.bak`，将 Header 和 Entry 原子重写为 v2 并重新校验。旧 Checkpoint
-不作为 v2 上下文事实；恢复优先从日志重建，后续 Run 生成新的 v2 Checkpoint。
+打开 v1/v2 日志时先在持锁状态下做完整结构验证，再分别生成只读
+`session.v1.jsonl.bak` / `session.v2.jsonl.bak`，将 Header 和 Entry 原子重写为 v3
+并重新校验。旧 Checkpoint 不作为 v3 Plugin 状态事实；恢复优先从日志重建，后续
+Run 生成新的 v3 Checkpoint。
 
 ## Compaction
 
@@ -150,8 +158,8 @@ Compaction 只处理当前活动路径，并保持 ToolCall / ToolResult 关系�
 墙钟上限，并记录 `session_compaction_start/end/error`。失败或阻断不会写
 `CompactEntry`，也不改变已完成 Run。
 
-## 隐私与 v2 边界
+## 隐私与 v3 边界
 
 Session 和 Checkpoint 是本地明文，可能包含 Prompt、模型回复与工具输出。用户应像
-保护 Trace 一样保护 Session 根目录。v2 不做自动脱敏、加密、远程存储、删除/重命名、
+保护 Trace 一样保护 Session 根目录。v3 不做自动脱敏、加密、远程存储、删除/重命名、
 Checkpoint GC、branch merge、运行中继续执行或工具幂等重放。

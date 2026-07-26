@@ -7,6 +7,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.input import Input
@@ -42,6 +43,13 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evopi", description="Run the EvoPi coding agent")
     parser.add_argument("prompt", nargs="?", help="Task for the agent")
@@ -51,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))
     parser.add_argument("--no-retry", action="store_true")
     parser.add_argument("--max-retries", type=_non_negative_int, default=3)
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_int,
+        default=4096,
+        metavar="N",
+        help="Maximum output tokens for each model attempt (default: 4096)",
+    )
     parser.add_argument(
         "--model-timeout", type=_positive_float, default=120.0,
         help="HTTP stream idle timeout in seconds",
@@ -139,11 +154,16 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     from evopi.session.compact import CompactionSettings
 
     session_manager = _session_manager_from_args(args)
+    model_options: dict[str, Any] = {
+        "timeout": getattr(args, "model_timeout", 120.0),
+        "model": getattr(args, "model", None),
+        "context_window": getattr(args, "context_window", 0),
+    }
+    if hasattr(args, "max_output_tokens"):
+        model_options["max_tokens"] = args.max_output_tokens
     model = model_from_environment(
         getattr(args, "provider", None),
-        timeout=getattr(args, "model_timeout", 120.0),
-        model=getattr(args, "model", None),
-        context_window=getattr(args, "context_window", 0),
+        **model_options,
     )
 
     # Auto-detect Memory — always on, stored in workspace

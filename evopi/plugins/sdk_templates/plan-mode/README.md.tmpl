@@ -1,0 +1,19 @@
+# {{PLUGIN_NAME}}
+
+This inactive candidate is the packaged EvoPi Plan Mode example. It uses only
+the general PluginAPI v1:
+
+- commands (`/plan` and `/execute`);
+- Session Tree state;
+- dynamic Prompt Fragment;
+- owner-scoped active Tool control;
+- a defensive `before_tool_call` Policy;
+- host-neutral confirmation and status UI.
+
+It never approves or activates itself. Review and activate the exact digest:
+
+```text
+evopi plugin review .
+evopi plugin approve . --trust-workspace
+/reload
+```

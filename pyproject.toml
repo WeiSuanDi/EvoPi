@@ -29,6 +29,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["evopi*"]
 
+[tool.setuptools.package-data]
+"evopi.plugins" = ["sdk_templates/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

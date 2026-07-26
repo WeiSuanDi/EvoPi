@@ -71,6 +71,7 @@ def create_shell_command_tool(
         handler=shell_command,
         timeout=timeout,
         timeout_grace_period=abort_grace_period,
+        metadata={"effects": ["execute"]},
     )
 
 

@@ -42,6 +42,12 @@ from evopi.plugins.candidates import (
     PluginState,
     review_plugin,
 )
+from evopi.plugins.sdk import (
+    PluginTemplate,
+    available_plugin_templates,
+    initialize_plugin_candidate,
+    plugin_sdk_guide,
+)
 
 __all__ = [
     "EventHandler",
@@ -79,4 +85,8 @@ __all__ = [
     "PluginReviewReport",
     "PluginState",
     "review_plugin",
+    "PluginTemplate",
+    "available_plugin_templates",
+    "initialize_plugin_candidate",
+    "plugin_sdk_guide",
 ]

@@ -27,11 +27,18 @@ class FileWriteGuardPolicy:
         self.workspace = Path(self.workspace).resolve()
 
     def run(self, context: PolicyContext) -> PolicyDecision:
-        if context.tool_call is None or context.tool_call.name != "write_file":
+        if (
+            context.tool_call is None
+            or context.tool_call.name not in {"write_file", "edit_file"}
+        ):
             return PolicyDecision()
         value = (context.arguments or {}).get("path")
         if not isinstance(value, str) or not value:
-            return PolicyDecision(action="block", reason="write_file requires a path", risk_level="high")
+            return PolicyDecision(
+                action="block",
+                reason=f"{context.tool_call.name} requires a path",
+                risk_level="high",
+            )
         target = (self.workspace / value).resolve()
         if target.is_relative_to(self.workspace):
             return PolicyDecision(action="allow", reason="Write target is inside workspace")

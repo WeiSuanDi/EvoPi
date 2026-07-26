@@ -194,16 +194,28 @@ def test_main_returns_130_for_keyboard_interrupt(monkeypatch, capsys) -> None:
 def test_cli_retry_flags_validate_values() -> None:
     parser = cli_main.build_parser()
     args = parser.parse_args(
-        ["task", "--no-retry", "--max-retries", "5", "--model-timeout", "30"]
+        [
+            "task",
+            "--no-retry",
+            "--max-retries",
+            "5",
+            "--model-timeout",
+            "30",
+            "--max-output-tokens",
+            "8192",
+        ]
     )
     assert args.no_retry is True
     assert args.max_retries == 5
     assert args.model_timeout == 30
+    assert args.max_output_tokens == 8192
 
     with pytest.raises(SystemExit):
         parser.parse_args(["task", "--max-retries", "-1"])
     with pytest.raises(SystemExit):
         parser.parse_args(["task", "--model-timeout", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["task", "--max-output-tokens", "0"])
 
 
 def test_cli_retries_by_default_and_reports_to_stderr(tmp_path, monkeypatch, capsys) -> None:

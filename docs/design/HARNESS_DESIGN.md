@@ -237,6 +237,20 @@ Plugin、SubAgent 或 Session 语义塞回 Core。
 本次 Run 的能力。运行期间禁止 Reload；空闲 Reload 必须先在临时注册表验证，成功后
 整体替换。
 
+## 通用 Plugin Runtime
+
+BaseHarness 是 `PluginAPI v1` 的宿主，但不把 Plugin 语义下沉到 Core。Harness 提供
+公共异步 Command 分派、Context Provider、动态 Prompt Fragment、所有者隔离的 Tool
+活动视图、Session-backed State 和宿主无关 UI。Plugin 不访问 BaseHarness 私有字段。
+
+Plugin 的所有注册先进入暂存装配，完成依赖、重复命令/Tool、显式覆盖和 Handler
+绑定校验后整体提交。运行中禁止 Reload。活动 Tool 集是基础集合与所有插件限制的
+交集，只能收窄；session 作用域覆盖通过 Session schema v3 恢复。
+
+Event Handler 只观察订阅事件，返回值不能修改执行。`allow/block/confirmation/rewrite`
+必须由注册到 Policy Engine 的 Policy 给出。UI 只提供交互，不替代 Tool Confirmation
+Handler；非交互宿主的 Plugin 确认默认拒绝。
+
 ## Harness 和 Policy 的关系
 
 ```text

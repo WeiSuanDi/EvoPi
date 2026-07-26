@@ -30,6 +30,7 @@ class ReplPluginUI:
         self._display = display
         self._prompt = prompt
         self._console = console or Console(file=sys.stderr)
+        self._status_keys: set[str] = set()
 
     async def notify(self, message: str, *, level: str = "info") -> None:
         styles = {
@@ -72,7 +73,18 @@ class ReplPluginUI:
         return await self._modal_prompt(label)
 
     async def set_status(self, key: str, text: str | None) -> None:
+        if text is None:
+            self._status_keys.discard(key)
+        else:
+            self._status_keys.add(key)
         self._display.set_plugin_status(key, text)
+
+    def clear_plugin_statuses(self, plugin_name: str) -> None:
+        prefix = f"{plugin_name}:"
+        keys = [key for key in self._status_keys if key.startswith(prefix)]
+        for key in keys:
+            self._display.set_plugin_status(key, None)
+            self._status_keys.discard(key)
 
     async def _modal_prompt(self, label: str) -> str:
         self._display.pause()

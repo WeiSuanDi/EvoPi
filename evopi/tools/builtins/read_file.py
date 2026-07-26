@@ -25,6 +25,7 @@ def create_read_file_tool(workspace: str | Path) -> Tool:
             required=["path"],
         ),
         handler=read_file,
+        metadata={"effects": ["read"]},
     )
 
 

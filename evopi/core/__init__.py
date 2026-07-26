@@ -21,7 +21,7 @@ from evopi.core.model_errors import (
     ModelRetryConfig,
 )
 from evopi.core.run import AgentEndReason, AgentLoopResult, AgentRunState
-from evopi.core.tool import Tool, ToolCall, ToolResult
+from evopi.core.tool import Tool, ToolArgumentError, ToolCall, ToolResult
 
 __all__ = [
     "Agent",
@@ -44,6 +44,7 @@ __all__ = [
     "ShouldStopAfterTurn",
     "SystemMessage",
     "Tool",
+    "ToolArgumentError",
     "ToolCall",
     "ToolResult",
     "ToolResultMessage",

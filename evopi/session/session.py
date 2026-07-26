@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -392,7 +393,7 @@ class SessionManager:
     def plugin_state(self, plugin_name: str) -> dict[str, Any]:
         """Return a detached projection of one Plugin namespace."""
 
-        return dict(self._plugin_state.get(plugin_name, {}))
+        return copy.deepcopy(self._plugin_state.get(plugin_name, {}))
 
     def plugin_state_version(self, plugin_name: str) -> str | None:
         return self._plugin_state_versions.get(plugin_name)

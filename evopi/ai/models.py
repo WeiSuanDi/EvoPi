@@ -12,6 +12,7 @@ def model_from_environment(
     timeout: float = 120.0,
     model: str | None = None,
     context_window: int = 0,
+    max_tokens: int = 4096,
 ):
     load_dotenv()
     selected = (provider or os.getenv("EVOPI_PROVIDER") or "anthropic").lower()
@@ -24,6 +25,7 @@ def model_from_environment(
             base_url=os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
             timeout=timeout,
             context_window=context_window,
+            max_tokens=max_tokens,
         )
     if selected in {"openai", "openai-compatible"}:
         resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("EVOPI_MODEL")
@@ -34,6 +36,7 @@ def model_from_environment(
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             timeout=timeout,
             context_window=context_window,
+            max_tokens=max_tokens,
         )
     raise ValueError(f"Unknown provider: {selected}")
 

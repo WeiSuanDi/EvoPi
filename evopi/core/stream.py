@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 from evopi.core.messages import AssistantMessage, StopReason
-from evopi.core.tool import ToolCall
+from evopi.core.tool import ToolArgumentError, ToolCall
 from evopi.core.types import Metadata
 
 
@@ -68,14 +68,17 @@ class AssistantMessageBuilder:
         stop_reason: StopReason,
         metadata: Metadata | None = None,
     ) -> AssistantMessage:
-        calls = [
-            ToolCall(
-                id=state["id"] or f"call-{index}",
-                name=state["name"],
-                arguments=_parse_arguments(state["arguments"]),
+        calls: list[ToolCall] = []
+        for index, state in sorted(self._tool_calls.items()):
+            arguments, argument_error = _parse_arguments(state["arguments"])
+            calls.append(
+                ToolCall(
+                    id=state["id"] or f"call-{index}",
+                    name=state["name"],
+                    arguments=arguments,
+                    argument_error=argument_error,
+                )
             )
-            for index, state in sorted(self._tool_calls.items())
-        ]
         return AssistantMessage(
             content="".join(self._text_parts),
             tool_calls=calls,
@@ -84,14 +87,29 @@ class AssistantMessageBuilder:
         )
 
 
-def _parse_arguments(value: str) -> dict[str, Any]:
+def _parse_arguments(
+    value: str,
+) -> tuple[dict[str, Any], ToolArgumentError | None]:
     if not value:
-        return {}
+        return {}, None
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {"_raw": value}
-    return parsed if isinstance(parsed, dict) else {"_value": parsed}
+    except json.JSONDecodeError as exc:
+        return {}, ToolArgumentError(
+            code="invalid_json",
+            message=(
+                "Tool arguments are not valid JSON "
+                f"(line {exc.lineno}, column {exc.colno})"
+            ),
+            raw_fragment=value[:4096],
+        )
+    if not isinstance(parsed, dict):
+        return {}, ToolArgumentError(
+            code="invalid_type",
+            message="Tool arguments must decode to a JSON object",
+            raw_fragment=value[:4096],
+        )
+    return parsed, None
 
 
 __all__ = [

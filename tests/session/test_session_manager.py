@@ -12,7 +12,7 @@ from evopi.core.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from evopi.core.tool import ToolCall
+from evopi.core.tool import ToolArgumentError, ToolCall
 from evopi.session import (
     CheckpointEntry,
     MessageEntry,
@@ -101,6 +101,32 @@ def test_message_codec_round_trips_all_persisted_roles() -> None:
     assert restored[1].tool_calls[0].arguments == {"path": "README.md"}
     assert isinstance(restored[2], ToolResultMessage)
     assert restored[2].terminate is True
+
+
+def test_message_codec_omits_raw_invalid_tool_argument_fragment() -> None:
+    message = AssistantMessage(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id=uuid4().hex,
+                name="write_file",
+                argument_error=ToolArgumentError(
+                    code="invalid_json",
+                    message="Tool arguments are not valid JSON",
+                    raw_fragment="SECRET-RAW-FRAGMENT",
+                ),
+            )
+        ],
+        stop_reason="tool_use",
+    )
+
+    encoded = message_to_dict(message)
+    restored = message_from_dict(encoded)
+
+    assert "SECRET-RAW-FRAGMENT" not in json.dumps(encoded)
+    assert isinstance(restored, AssistantMessage)
+    assert restored.tool_calls[0].argument_error is not None
+    assert restored.tool_calls[0].argument_error.raw_fragment is None
 
 
 def test_persistent_session_round_trip_and_tree_contract(tmp_path: Path) -> None:

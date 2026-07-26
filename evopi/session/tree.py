@@ -18,7 +18,7 @@ from evopi.core.messages import (
     UserMessage,
 )
 from evopi.core.model_errors import ModelErrorInfo, ModelErrorKind
-from evopi.core.tool import ToolCall
+from evopi.core.tool import ToolArgumentError, ToolCall
 from evopi.session.errors import SessionFormatError, SessionSerializationError
 
 SESSION_SCHEMA_VERSION = 3
@@ -448,6 +448,14 @@ def message_to_dict(message: Message) -> dict[str, Any]:
                 "id": call.id,
                 "name": call.name,
                 "arguments": json_value(call.arguments),
+                "argument_error": (
+                    {
+                        "code": call.argument_error.code,
+                        "message": call.argument_error.message,
+                    }
+                    if call.argument_error is not None
+                    else None
+                ),
             }
             for call in message.tool_calls
         ]
@@ -494,11 +502,29 @@ def message_from_dict(value: Mapping[str, Any]) -> Message:
         for raw_call in raw_calls:
             item = _require_mapping(raw_call, "tool_call")
             arguments = _require_mapping(item.get("arguments", {}), "tool_call.arguments")
+            raw_argument_error = item.get("argument_error")
+            argument_error = None
+            if raw_argument_error is not None:
+                error_value = _require_mapping(
+                    raw_argument_error,
+                    "tool_call.argument_error",
+                )
+                argument_error = ToolArgumentError(
+                    code=_require_string(
+                        error_value.get("code"),
+                        "tool_call.argument_error.code",
+                    ),
+                    message=_require_string(
+                        error_value.get("message"),
+                        "tool_call.argument_error.message",
+                    ),
+                )
             calls.append(
                 ToolCall(
                     id=_require_id(item.get("id"), "tool_call.id"),
                     name=_require_string(item.get("name"), "tool_call.name"),
                     arguments=dict(arguments),
+                    argument_error=argument_error,
                 )
             )
         stop_reason = value.get("stop_reason")
