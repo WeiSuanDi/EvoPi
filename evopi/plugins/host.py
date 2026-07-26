@@ -74,17 +74,39 @@ class PluginStateStore:
 
     def __init__(self) -> None:
         self._values: dict[str, Any] = {}
+        self._get_values: Callable[[], JsonObject] | None = None
+        self._set_value: Callable[[str, Any], None] | None = None
+        self._delete_value: Callable[[str], None] | None = None
+
+    def bind(
+        self,
+        *,
+        get_values: Callable[[], JsonObject],
+        set_value: Callable[[str, Any], None],
+        delete_value: Callable[[str], None],
+    ) -> None:
+        self._get_values = get_values
+        self._set_value = set_value
+        self._delete_value = delete_value
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self._values.get(key, default)
+        return self.snapshot().get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        if self._set_value is not None:
+            self._set_value(key, value)
+            return
         self._values[key] = value
 
     def delete(self, key: str) -> None:
+        if self._delete_value is not None:
+            self._delete_value(key)
+            return
         self._values.pop(key, None)
 
     def snapshot(self) -> JsonObject:
+        if self._get_values is not None:
+            return dict(self._get_values())
         return dict(self._values)
 
 

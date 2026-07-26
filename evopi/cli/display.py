@@ -22,6 +22,7 @@ class ReplDisplay:
         self._live: Live | None = None
         self._turn: int = 0
         self._status_text: str = ""
+        self._plugin_status: dict[str, str] = {}
 
     def set_status(self, text: str) -> None:
         self._status_text = text
@@ -36,6 +37,21 @@ class ReplDisplay:
                 padding=(0, 1),
             )
         )
+
+    def pause(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    def resume(self) -> None:
+        self._start_live()
+
+    def set_plugin_status(self, key: str, text: str | None) -> None:
+        if text is None:
+            self._plugin_status.pop(key, None)
+        else:
+            self._plugin_status[key] = text
+        self._refresh()
 
     def start_run(self) -> None:
         self._text = ""
@@ -126,6 +142,11 @@ class ReplDisplay:
             status_parts.append(f"Turn {self._turn}")
         if self._tool_status:
             status_parts.append("  ".join(self._tool_status))
+        if self._plugin_status:
+            status_parts.extend(
+                f"{key}: {value}"
+                for key, value in sorted(self._plugin_status.items())
+            )
         if status_parts:
             items.append(Text(" | ".join(status_parts), style="bold"))
         if self._text:

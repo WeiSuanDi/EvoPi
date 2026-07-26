@@ -139,7 +139,7 @@ def test_persistent_session_round_trip_and_tree_contract(tmp_path: Path) -> None
         for previous, current in zip(restored.entries, restored.entries[1:])
     )
     header = json.loads(session_path.read_text(encoding="utf-8").splitlines()[0])
-    assert header["schema_version"] == 2
+    assert header["schema_version"] == 3
     assert header["type"] == "session"
     restored.close()
 
@@ -196,7 +196,39 @@ def test_v1_log_is_atomically_migrated_with_backup(tmp_path: Path) -> None:
         json.loads(line)
         for line in session_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert all(record["schema_version"] == 2 for record in migrated)
+    assert all(record["schema_version"] == 3 for record in migrated)
+
+
+def test_v2_log_is_atomically_migrated_with_backup(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "sessions"
+    manager = SessionManager.create(workspace, root=root)
+    complete_run(manager)
+    session_path = manager.session_path
+    assert session_path is not None
+    manager.close()
+
+    records = [
+        json.loads(line)
+        for line in session_path.read_text(encoding="utf-8").splitlines()
+    ]
+    for record in records:
+        record["schema_version"] = 2
+    session_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    restored = SessionManager.open(session_path, workspace=workspace, root=root)
+    restored.close()
+
+    assert (session_path.parent / "session.v2.jsonl.bak").exists()
+    migrated = [
+        json.loads(line)
+        for line in session_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert all(record["schema_version"] == 3 for record in migrated)
 
 
 def test_interrupted_run_gets_unknown_tool_result_without_execution(

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -62,10 +65,104 @@ from evopi.trace.events import TraceRecord
 from evopi.trace.writer import JsonlTraceWriter
 
 _logger = logging.getLogger(__name__)
+_PLUGIN_ACTIVE_TOOLS_STATE_KEY = "_evopi.active_tools"
 
 
 class PolicyBlockedError(RuntimeError):
     pass
+
+
+class _ObservedPluginUI:
+    """Emit shape-only UI events without recording user-visible or entered text."""
+
+    def __init__(
+        self,
+        *,
+        plugin_name: str,
+        delegate: Any,
+        emit: Callable[[CoreEvent], Awaitable[None]],
+    ) -> None:
+        self._plugin_name = plugin_name
+        self._delegate = delegate
+        self._emit = emit
+
+    async def notify(self, message: str, *, level: str = "info") -> None:
+        await self._call(
+            "notify",
+            lambda: self._delegate.notify(message, level=level),
+            request={"level": level},
+        )
+
+    async def confirm(self, title: str, message: str) -> bool:
+        result = await self._call(
+            "confirm",
+            lambda: self._delegate.confirm(title, message),
+        )
+        return bool(result)
+
+    async def select(self, title: str, options: Sequence[str]) -> str:
+        result = await self._call(
+            "select",
+            lambda: self._delegate.select(title, options),
+            request={"option_count": len(options)},
+        )
+        return str(result)
+
+    async def input(self, title: str, prompt: str = "") -> str:
+        result = await self._call(
+            "input",
+            lambda: self._delegate.input(title, prompt),
+        )
+        return str(result)
+
+    async def set_status(self, key: str, text: str | None) -> None:
+        await self._call(
+            "set_status",
+            lambda: self._delegate.set_status(key, text),
+            request={"key": key, "cleared": text is None},
+        )
+
+    async def _call(
+        self,
+        operation: str,
+        callback: Callable[[], Awaitable[Any]],
+        *,
+        request: dict[str, Any] | None = None,
+    ) -> Any:
+        await self._emit(
+            CoreEvent(
+                type="plugin_ui_request",
+                data={
+                    "plugin": self._plugin_name,
+                    "operation": operation,
+                    **(request or {}),
+                },
+            )
+        )
+        try:
+            result = await callback()
+        except Exception as exc:
+            await self._emit(
+                CoreEvent(
+                    type="plugin_ui_response",
+                    data={
+                        "plugin": self._plugin_name,
+                        "operation": operation,
+                        "success": False,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            )
+            raise
+        response: dict[str, Any] = {
+            "plugin": self._plugin_name,
+            "operation": operation,
+            "success": True,
+        }
+        if operation == "confirm":
+            response["approved"] = bool(result)
+        await self._emit(CoreEvent(type="plugin_ui_response", data=response))
+        return result
 
 
 class BaseHarness:
@@ -87,6 +184,7 @@ class BaseHarness:
         plugin_paths: list[str | Path] | None = None,
         enabled_plugins: set[str] | None = None,
         reserved_plugin_commands: frozenset[str] = frozenset(),
+        plugin_ui: Any | None = None,
         memory_enabled: bool = False,
         skills_enabled: bool = False,
         assembly_warnings: tuple[str, ...] = (),
@@ -112,6 +210,11 @@ class BaseHarness:
             "/" + name.lstrip("/").lower()
             for name in reserved_plugin_commands
         )
+        if plugin_ui is None:
+            from evopi.plugins import NullPluginUI
+
+            plugin_ui = NullPluginUI()
+        self._plugin_ui = plugin_ui
 
         # Plugin system
         from evopi.plugins import PluginLoader, filtered_event_listener, wire_plugins
@@ -341,6 +444,7 @@ class BaseHarness:
         if self.is_running:
             raise RuntimeError("Cannot switch Session leaf while the Harness is running")
         selected = self.session.switch_leaf(leaf_id)
+        self._restore_plugin_overrides()
         restored: list[Message] = []
         if self.system_prompt:
             restored.append(SystemMessage(content=self.system_prompt))
@@ -363,11 +467,30 @@ class BaseHarness:
     def _bind_plugin_api(self, api) -> None:
         from evopi.plugins import PluginRuntimeContext
 
+        api.state.bind(
+            get_values=lambda: self.session.plugin_state(api.plugin_name),
+            set_value=lambda key, value: self._set_plugin_state(
+                api.plugin_name,
+                api.plugin_version,
+                key,
+                value,
+            ),
+            delete_value=lambda key: self._delete_plugin_state(
+                api.plugin_name,
+                api.plugin_version,
+                key,
+            ),
+        )
         api.tools.bind(
             get_all=self.tools.all,
             get_active=self._active_tools,
             set_active=self._set_plugin_active_tools,
             clear_active=self._clear_plugin_active_tools,
+        )
+        observed_ui = _ObservedPluginUI(
+            plugin_name=api.plugin_name,
+            delegate=self._plugin_ui,
+            emit=self.agent.emit_event,
         )
         runtime = PluginRuntimeContext(
             plugin_name=api.plugin_name,
@@ -376,9 +499,27 @@ class BaseHarness:
             session_id=self.session.session_id,
             tools=api.tools,
             state=api.state,
-            ui=api.ui,
+            ui=observed_ui,
         )
-        api.bind_runtime(runtime, ui=api.ui)
+        api.bind_runtime(runtime, ui=observed_ui)
+        stored_version = self.session.plugin_state_version(api.plugin_name)
+        if stored_version is not None and stored_version != api.plugin_version:
+            warning = (
+                f"Plugin '{api.plugin_name}' state was written by version "
+                f"{stored_version}; current version is {api.plugin_version}"
+            )
+            if warning not in self._assembly_warnings:
+                self._assembly_warnings += (warning,)
+        self._restore_plugin_override(api.plugin_name)
+
+    def attach_plugin_ui(self, ui) -> None:
+        """Attach a host-neutral UI while the Harness is idle."""
+
+        if self.is_running:
+            raise RuntimeError("Cannot replace Plugin UI while the Harness is running")
+        self._plugin_ui = ui
+        for api in self._plugin_apis.values():
+            self._bind_plugin_api(api)
 
     def _active_tools(self) -> list[Tool]:
         tools = self.tools.all()
@@ -409,6 +550,14 @@ class BaseHarness:
             scope,
             frozenset(names),
         )
+        if scope == "session":
+            api = self._plugin_apis[plugin_name]
+            self._set_plugin_state(
+                plugin_name,
+                api.plugin_version,
+                _PLUGIN_ACTIVE_TOOLS_STATE_KEY,
+                list(names),
+            )
         self.agent.tools = self._active_tools()
         self._pending_plugin_runtime_events.append(
             CoreEvent(
@@ -423,6 +572,13 @@ class BaseHarness:
 
     def _clear_plugin_active_tools(self, plugin_name: str) -> None:
         self._plugin_active_overrides.pop(plugin_name, None)
+        if _PLUGIN_ACTIVE_TOOLS_STATE_KEY in self.session.plugin_state(plugin_name):
+            api = self._plugin_apis[plugin_name]
+            self._delete_plugin_state(
+                plugin_name,
+                api.plugin_version,
+                _PLUGIN_ACTIVE_TOOLS_STATE_KEY,
+            )
         self.agent.tools = self._active_tools()
         self._pending_plugin_runtime_events.append(
             CoreEvent(
@@ -440,6 +596,76 @@ class BaseHarness:
         for plugin_name in expired:
             self._plugin_active_overrides.pop(plugin_name, None)
         self.agent.tools = self._active_tools()
+
+    def _restore_plugin_overrides(self) -> None:
+        self._plugin_active_overrides.clear()
+        for plugin_name in self._plugin_apis:
+            self._restore_plugin_override(plugin_name)
+        self.agent.tools = self._active_tools()
+
+    def _restore_plugin_override(self, plugin_name: str) -> None:
+        raw_names = self.session.plugin_state(plugin_name).get(
+            _PLUGIN_ACTIVE_TOOLS_STATE_KEY
+        )
+        if isinstance(raw_names, list) and all(
+            isinstance(name, str) for name in raw_names
+        ):
+            self._plugin_active_overrides[plugin_name] = (
+                "session",
+                frozenset(raw_names),
+            )
+
+    def _set_plugin_state(
+        self,
+        plugin_name: str,
+        plugin_version: str,
+        key: str,
+        value: Any,
+    ) -> None:
+        entry = self.session.append_plugin_state(
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            key=key,
+            value=value,
+        )
+        self._record_plugin_state_event(entry)
+
+    def _delete_plugin_state(
+        self,
+        plugin_name: str,
+        plugin_version: str,
+        key: str,
+    ) -> None:
+        entry = self.session.append_plugin_state(
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            key=key,
+            operation="delete",
+        )
+        self._record_plugin_state_event(entry)
+
+    def _record_plugin_state_event(self, entry) -> None:
+        value_digest = hashlib.sha256(
+            json.dumps(
+                entry.value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._pending_plugin_runtime_events.append(
+            CoreEvent(
+                type="plugin_state_changed",
+                data={
+                    "plugin": entry.plugin_name,
+                    "plugin_version": entry.plugin_version,
+                    "key": entry.key,
+                    "operation": entry.operation,
+                    "value_sha256": value_digest,
+                    "entry_id": entry.entry_id,
+                },
+            )
+        )
 
     def _record_plugin_handler_error(self, message: str) -> None:
         _logger.warning("%s", message)
@@ -535,6 +761,10 @@ class BaseHarness:
         self._session_started_emitted = False
         self._session_failure = None
         self._pending_session_events.clear()
+        self._pending_plugin_runtime_events.clear()
+        self._plugin_active_overrides.clear()
+        for api in self._plugin_apis.values():
+            self._bind_plugin_api(api)
 
     def close(self) -> None:
         if self.is_running:

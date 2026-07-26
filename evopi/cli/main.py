@@ -304,6 +304,15 @@ async def _run_repl(args: argparse.Namespace) -> int:
         harness.subscribe(display.handle_event)
 
         session = _create_repl_prompt_session()
+        from evopi.cli.plugin_ui import ReplPluginUI
+
+        harness.attach_plugin_ui(
+            ReplPluginUI(
+                display=display,
+                prompt=session.prompt_async,
+                console=console,
+            )
+        )
         while True:
             try:
                 user_input = (await session.prompt_async("> ")).strip()

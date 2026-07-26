@@ -34,6 +34,7 @@ from evopi.session.tree import (
     CompactEntry,
     LeafSelectedEntry,
     MessageEntry,
+    PluginStateEntry,
     RunEndEntry,
     RunStartEntry,
     RuntimeFingerprint,
@@ -52,6 +53,8 @@ from evopi.session.tree import (
 _SESSION_FILENAME = "session.jsonl"
 _CHECKPOINT_DIRECTORY = "checkpoints"
 _LOCK_FILENAME = "session.lock"
+_PLUGIN_STATE_VALUE_LIMIT = 64 * 1024
+_PLUGIN_STATE_TOTAL_LIMIT = 1024 * 1024
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -182,6 +185,8 @@ class SessionManager:
         self._entry_index: dict[str, SessionEntry] = {}
         self._messages: list[UserMessage | AssistantMessage | ToolResultMessage] = []
         self._message_source_ids: list[str] = []
+        self._plugin_state: dict[str, dict[str, Any]] = {}
+        self._plugin_state_versions: dict[str, str] = {}
         self._last_checkpoint: SessionCheckpoint | None = None
         self._lock: _SessionFileLock | None = None
         self._closed = False
@@ -258,10 +263,17 @@ class SessionManager:
         manager._recovery = _RecoveryState(reason="open")
         try:
             header, entries, repaired = _read_session_file(path, repair=True)
-            if _session_file_version(path) == 1:
-                backup_path = _migrate_v1_session_file(path, header, entries)
+            source_version = _session_file_version(path)
+            if source_version < 3:
+                backup_path = _migrate_session_file(
+                    path,
+                    header,
+                    entries,
+                    source_version=source_version,
+                )
                 manager._recovery.warnings.append(
-                    f"Session schema v1 was migrated to v2; backup: {backup_path}"
+                    f"Session schema v{source_version} was migrated to v3; "
+                    f"backup: {backup_path}"
                 )
             manager.header = header
             manager._entries = entries
@@ -376,6 +388,103 @@ class SessionManager:
         """Tree Entry IDs backing the current projected messages."""
 
         return tuple(self._message_source_ids)
+
+    def plugin_state(self, plugin_name: str) -> dict[str, Any]:
+        """Return a detached projection of one Plugin namespace."""
+
+        return dict(self._plugin_state.get(plugin_name, {}))
+
+    def plugin_state_version(self, plugin_name: str) -> str | None:
+        return self._plugin_state_versions.get(plugin_name)
+
+    def append_plugin_state(
+        self,
+        *,
+        plugin_name: str,
+        plugin_version: str,
+        key: str,
+        value: Any = None,
+        operation: Literal["set", "delete"] = "set",
+        run_id: str | None = None,
+    ) -> PluginStateEntry:
+        """Append one strict, branch-aware Plugin state mutation."""
+
+        self._ensure_available()
+        normalized_name = plugin_name.strip()
+        normalized_version = plugin_version.strip()
+        normalized_key = key.strip()
+        if not normalized_name or not normalized_version or not normalized_key:
+            raise SessionSerializationError(
+                "Plugin state name, version and key cannot be empty"
+            )
+        if operation not in {"set", "delete"}:
+            raise SessionSerializationError(
+                "Plugin state operation must be set or delete"
+            )
+        if operation == "delete" and value is not None:
+            raise SessionSerializationError(
+                "Deleted Plugin state must have a null value"
+            )
+        safe_value = json_value(value, path="plugin_state.value")
+        encoded = json.dumps(
+            safe_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > _PLUGIN_STATE_VALUE_LIMIT:
+            raise SessionSerializationError(
+                "Plugin state values cannot exceed 64 KiB"
+            )
+        projected = {
+            name: dict(values)
+            for name, values in self._plugin_state.items()
+        }
+        namespace = projected.setdefault(normalized_name, {})
+        if operation == "set":
+            namespace[normalized_key] = safe_value
+        else:
+            namespace.pop(normalized_key, None)
+        projected_size = len(
+            json.dumps(
+                projected.get(normalized_name, {}),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if projected_size > _PLUGIN_STATE_TOTAL_LIMIT:
+            raise SessionSerializationError(
+                "A Plugin state projection cannot exceed 1 MiB"
+            )
+        open_run = self._open_run()
+        resolved_run_id = (
+            _normalize_uuid(run_id, "run_id")
+            if run_id is not None
+            else (open_run.run_id if open_run is not None else None)
+        )
+        if (
+            resolved_run_id is not None
+            and (
+                open_run is None
+                or resolved_run_id != open_run.run_id
+            )
+        ):
+            raise SessionPersistenceError(
+                "Plugin state run_id must match the currently open Run"
+            )
+        entry = PluginStateEntry(
+            entry_id=new_id(),
+            parent_id=self.leaf_id,
+            run_id=resolved_run_id,
+            plugin_name=normalized_name,
+            plugin_version=normalized_version,
+            key=normalized_key,
+            operation=operation,
+            value=safe_value if operation == "set" else None,
+        )
+        self._append_entry(entry)
+        return entry
 
     @property
     def last_checkpoint(self) -> SessionCheckpoint | None:
@@ -532,6 +641,10 @@ class SessionManager:
                 error_info=run_end.error_info,
             ),
             runtime_fingerprint=runtime_fingerprint,
+            plugin_state={
+                name: dict(values)
+                for name, values in self._plugin_state.items()
+            },
         )
         if self.session_path is None:
             payload = json.dumps(
@@ -607,21 +720,37 @@ class SessionManager:
         if anchor_id is None or anchor_id not in self._entry_index:
             raise SessionError(f"Entry '{from_entry_id}' does not exist")
 
-        # Collect messages up to (and including) anchor_id
-        fork_messages: list[UserMessage | AssistantMessage | ToolResultMessage] = []
+        # Project messages and Plugin state up to (and including) anchor_id.
+        fork_path: list[SessionEntry] = []
         current: str | None = anchor_id
         while current is not None:
             entry = self._entry_index.get(current)
             if entry is None:
                 break
-            if isinstance(entry, MessageEntry):
-                fork_messages.append(entry.message)
+            fork_path.append(entry)
             current = entry.parent_id
-        fork_messages.reverse()
+        fork_path.reverse()
+        fork_messages = [
+            message for _, message in _project_messages(fork_path)
+        ]
+        fork_plugin_state = _project_plugin_state(fork_path)
+        fork_plugin_versions: dict[str, str] = {}
+        for entry in fork_path:
+            if isinstance(entry, PluginStateEntry):
+                fork_plugin_versions[entry.plugin_name] = entry.plugin_version
 
         new_session = SessionManager.create(
             self.attached_workspace, root=self.root
         )
+        for plugin_name, values in fork_plugin_state.items():
+            plugin_version = fork_plugin_versions[plugin_name]
+            for key, value in values.items():
+                new_session.append_plugin_state(
+                    plugin_name=plugin_name,
+                    plugin_version=plugin_version,
+                    key=key,
+                    value=value,
+                )
         # Seed the new session with forked messages via a throwaway run
         run_id = new_id()
         fingerprint = self.last_runtime_fingerprint
@@ -819,6 +948,8 @@ class SessionManager:
         if isinstance(entry, MessageEntry):
             self._messages.append(entry.message)
             self._message_source_ids.append(entry.entry_id)
+        elif isinstance(entry, PluginStateEntry):
+            self._apply_plugin_state_entry(entry)
         elif isinstance(entry, (CompactEntry, LeafSelectedEntry)):
             self._restore_messages()
 
@@ -844,6 +975,13 @@ class SessionManager:
                     )
                 if isinstance(entry, RunEndEntry):
                     open_run = None
+            elif isinstance(entry, PluginStateEntry):
+                if entry.run_id is not None and (
+                    open_run is None or entry.run_id != open_run.run_id
+                ):
+                    raise SessionFormatError(
+                        "Plugin state run_id does not belong to the active Run"
+                    )
             elif open_run is not None:
                 raise SessionFormatError(
                     "Checkpoint cannot be written before run_end"
@@ -908,6 +1046,14 @@ class SessionManager:
                         raise SessionFormatError(
                             "Checkpoint messages do not match the active Session path"
                         )
+                    expected_plugin_state = _project_plugin_state(
+                        path[: active_index + 1]
+                    )
+                    if candidate.plugin_state != expected_plugin_state:
+                        raise SessionFormatError(
+                            "Checkpoint Plugin state does not match the active "
+                            "Session path"
+                        )
                     checkpoint = candidate
                     break
                 except SessionFormatError as exc:
@@ -918,6 +1064,24 @@ class SessionManager:
             self._last_checkpoint = checkpoint
             self._recovery.checkpoint_id = checkpoint.checkpoint_id
         self._messages = messages
+        self._restore_plugin_state(path)
+
+    def _restore_plugin_state(self, path: List[SessionEntry]) -> None:
+        self._plugin_state = _project_plugin_state(path)
+        self._plugin_state_versions = {}
+        for entry in path:
+            if isinstance(entry, PluginStateEntry):
+                self._plugin_state_versions[entry.plugin_name] = (
+                    entry.plugin_version
+                )
+
+    def _apply_plugin_state_entry(self, entry: PluginStateEntry) -> None:
+        namespace = self._plugin_state.setdefault(entry.plugin_name, {})
+        if entry.operation == "set":
+            namespace[entry.key] = entry.value
+        else:
+            namespace.pop(entry.key, None)
+        self._plugin_state_versions[entry.plugin_name] = entry.plugin_version
 
     def _recover_interrupted_run(self) -> None:
         open_run = self._open_run()
@@ -1178,14 +1342,16 @@ def _session_file_version(path: Path) -> int:
     raise SessionFormatError("Session header has no valid schema_version")
 
 
-def _migrate_v1_session_file(
+def _migrate_session_file(
     path: Path,
     header: SessionHeader,
     entries: list[SessionEntry],
+    *,
+    source_version: int,
 ) -> Path:
-    """Atomically rewrite one validated v1 log as v2 and preserve a backup."""
+    """Atomically rewrite one validated legacy log and preserve a backup."""
 
-    backup = path.with_name("session.v1.jsonl.bak")
+    backup = path.with_name(f"session.v{source_version}.jsonl.bak")
     temporary_backup = backup.with_name(f".{backup.name}.{new_id()}.tmp")
     temporary_log = path.with_name(f".{path.name}.{new_id()}.tmp")
     try:
@@ -1210,17 +1376,17 @@ def _migrate_v1_session_file(
             repair=False,
         )
         if (
-            migrated_header.schema_version != 2
-            or any(entry.schema_version != 2 for entry in migrated_entries)
+            migrated_header.schema_version != 3
+            or any(entry.schema_version != 3 for entry in migrated_entries)
         ):
             raise SessionFormatError(
-                "migrated Session did not validate as schema v2"
+                "migrated Session did not validate as schema v3"
             )
     except (OSError, SessionError) as exc:
         temporary_backup.unlink(missing_ok=True)
         temporary_log.unlink(missing_ok=True)
         raise SessionPersistenceError(
-            f"Session v1 migration failed: {exc}"
+            f"Session v{source_version} migration failed: {exc}"
         ) from exc
     return backup
 
@@ -1301,6 +1467,21 @@ def _project_messages(
                 ),
             ),
         )
+    return projected
+
+
+def _project_plugin_state(
+    path: List[SessionEntry],
+) -> dict[str, dict[str, Any]]:
+    projected: dict[str, dict[str, Any]] = {}
+    for entry in path:
+        if not isinstance(entry, PluginStateEntry):
+            continue
+        namespace = projected.setdefault(entry.plugin_name, {})
+        if entry.operation == "set":
+            namespace[entry.key] = entry.value
+        else:
+            namespace.pop(entry.key, None)
     return projected
 
 
