@@ -45,6 +45,9 @@ CoreEventType: TypeAlias = Literal[
     "plugin_handler_error",
     "plugin_prompt_applied",
     "plugin_tools_changed",
+    "plugin_state_changed",
+    "plugin_ui_request",
+    "plugin_ui_response",
     "error",
 ]
 

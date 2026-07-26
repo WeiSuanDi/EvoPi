@@ -21,8 +21,9 @@ from evopi.core.model_errors import ModelErrorInfo, ModelErrorKind
 from evopi.core.tool import ToolCall
 from evopi.session.errors import SessionFormatError, SessionSerializationError
 
-SESSION_SCHEMA_VERSION = 2
+SESSION_SCHEMA_VERSION = 3
 LEGACY_SESSION_SCHEMA_VERSION = 1
+SUPPORTED_SESSION_SCHEMA_VERSIONS = (1, 2, SESSION_SCHEMA_VERSION)
 
 SessionRunEndReason: TypeAlias = Literal[
     "completed",
@@ -41,7 +42,9 @@ SessionEntryType: TypeAlias = Literal[
     "branch",
     "compact",
     "leaf_selected",
+    "plugin_state",
 ]
+PluginStateOperation: TypeAlias = Literal["set", "delete"]
 
 
 def new_id() -> str:
@@ -168,9 +171,24 @@ class LeafSelectedEntry:
     type: Literal["leaf_selected"] = field(default="leaf_selected", init=False)
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class PluginStateEntry:
+    entry_id: str
+    parent_id: str | None
+    run_id: str | None
+    plugin_name: str
+    plugin_version: str
+    key: str
+    operation: PluginStateOperation
+    value: Any = None
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = SESSION_SCHEMA_VERSION
+    type: Literal["plugin_state"] = field(default="plugin_state", init=False)
+
+
 SessionEntry: TypeAlias = (
     RunStartEntry | MessageEntry | RunEndEntry | CheckpointEntry
-    | BranchEntry | CompactEntry | LeafSelectedEntry
+    | BranchEntry | CompactEntry | LeafSelectedEntry | PluginStateEntry
 )
 
 
@@ -240,6 +258,16 @@ def entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
         base["compacted_entry_ids"] = list(entry.compacted_entry_ids)
     elif isinstance(entry, LeafSelectedEntry):
         base["from_entry_id"] = entry.from_entry_id
+    elif isinstance(entry, PluginStateEntry):
+        base.update(
+            {
+                "plugin_name": entry.plugin_name,
+                "plugin_version": entry.plugin_version,
+                "key": entry.key,
+                "operation": entry.operation,
+                "value": json_value(entry.value, path="plugin_state.value"),
+            }
+        )
     return base
 
 
@@ -249,8 +277,13 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
     entry_id = _require_id(value.get("entry_id"), "entry_id")
     parent_id = _optional_id(value.get("parent_id"), "parent_id")
     created_at = _require_datetime(value.get("created_at"), "created_at")
-    run_id = _require_id(value.get("run_id"), "run_id")
+    run_id = (
+        _optional_id(value.get("run_id"), "run_id")
+        if entry_type == "plugin_state"
+        else _require_id(value.get("run_id"), "run_id")
+    )
     if entry_type == "run_start":
+        assert run_id is not None
         trace_path = value.get("trace_path")
         if trace_path is not None and not isinstance(trace_path, str):
             raise SessionFormatError("trace_path must be a string or null")
@@ -265,6 +298,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             trace_path=trace_path,
         )
     if entry_type == "message":
+        assert run_id is not None
         message = message_from_dict(_require_mapping(value.get("message"), "message"))
         if isinstance(message, SystemMessage):
             raise SessionFormatError("SystemMessage cannot be stored as a Session entry")
@@ -276,6 +310,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             message=message,
         )
     if entry_type == "run_end":
+        assert run_id is not None
         reason = value.get("reason")
         if reason not in {
             "completed",
@@ -312,6 +347,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             recovered=recovered,
         )
     if entry_type == "checkpoint":
+        assert run_id is not None
         return CheckpointEntry(
             entry_id=entry_id,
             parent_id=parent_id,
@@ -325,6 +361,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             ),
         )
     if entry_type == "branch":
+        assert run_id is not None
         branch_name = value.get("branch_name", "")
         if not isinstance(branch_name, str):
             raise SessionFormatError("branch_name must be a string")
@@ -336,6 +373,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             branch_name=branch_name,
         )
     if entry_type == "compact":
+        assert run_id is not None
         summary = _require_string(value.get("summary"), "compact.summary")
         raw_ids = value.get("compacted_entry_ids", [])
         if not isinstance(raw_ids, list):
@@ -352,6 +390,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             compacted_entry_ids=tuple(compacted),
         )
     if entry_type == "leaf_selected":
+        assert run_id is not None
         return LeafSelectedEntry(
             entry_id=entry_id,
             parent_id=parent_id,
@@ -360,6 +399,33 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             from_entry_id=_require_id(
                 value.get("from_entry_id"), "leaf_selected.from_entry_id"
             ),
+        )
+    if entry_type == "plugin_state":
+        plugin_name = _require_string(value.get("plugin_name"), "plugin_name").strip()
+        plugin_version = _require_string(
+            value.get("plugin_version"), "plugin_version"
+        ).strip()
+        key = _require_string(value.get("key"), "plugin_state.key").strip()
+        if not plugin_name or not plugin_version or not key:
+            raise SessionFormatError(
+                "Plugin state name, version and key cannot be empty"
+            )
+        operation = value.get("operation")
+        if operation not in {"set", "delete"}:
+            raise SessionFormatError("Plugin state operation must be set or delete")
+        raw_value = value.get("value")
+        if operation == "delete" and raw_value is not None:
+            raise SessionFormatError("Deleted Plugin state must have a null value")
+        return PluginStateEntry(
+            entry_id=entry_id,
+            parent_id=parent_id,
+            created_at=created_at,
+            run_id=run_id,
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            key=key,
+            operation=cast(PluginStateOperation, operation),
+            value=raw_value,
         )
     raise SessionFormatError(f"unsupported Session entry type: {entry_type!r}")
 
@@ -566,10 +632,10 @@ def json_value(value: Any, *, path: str = "metadata") -> Any:
 
 def _require_version(value: Mapping[str, Any]) -> None:
     version = value.get("schema_version")
-    if version not in {LEGACY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
+    if version not in SUPPORTED_SESSION_SCHEMA_VERSIONS:
         raise SessionFormatError(
             f"unsupported Session schema_version {version!r}; "
-            f"expected {LEGACY_SESSION_SCHEMA_VERSION} or {SESSION_SCHEMA_VERSION}"
+            f"expected one of {SUPPORTED_SESSION_SCHEMA_VERSIONS}"
         )
 
 
@@ -649,10 +715,13 @@ __all__ = [
     "LeafSelectedEntry",
     "LEGACY_SESSION_SCHEMA_VERSION",
     "MessageEntry",
+    "PluginStateEntry",
+    "PluginStateOperation",
     "RunEndEntry",
     "RunStartEntry",
     "RuntimeFingerprint",
     "SESSION_SCHEMA_VERSION",
+    "SUPPORTED_SESSION_SCHEMA_VERSIONS",
     "SessionEntry",
     "SessionEntryType",
     "SessionHeader",

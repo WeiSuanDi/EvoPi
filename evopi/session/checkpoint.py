@@ -27,6 +27,7 @@ from evopi.session.tree import (
     message_to_dict,
     model_error_info_from_dict,
     model_error_info_to_dict,
+    json_value,
     utc_now,
 )
 
@@ -48,6 +49,7 @@ class SessionCheckpoint:
     messages: tuple[UserMessage | AssistantMessage | ToolResultMessage, ...]
     last_run: SessionRunState
     runtime_fingerprint: RuntimeFingerprint
+    plugin_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     schema_version: int = SESSION_SCHEMA_VERSION
 
@@ -74,6 +76,10 @@ def checkpoint_to_dict(checkpoint: SessionCheckpoint) -> dict[str, Any]:
         },
         "runtime_fingerprint": fingerprint_to_dict(
             checkpoint.runtime_fingerprint
+        ),
+        "plugin_state": json_value(
+            checkpoint.plugin_state,
+            path="checkpoint.plugin_state",
         ),
     }
 
@@ -134,6 +140,15 @@ def checkpoint_from_dict(value: Mapping[str, Any]) -> SessionCheckpoint:
         raise SessionFormatError(
             "Checkpoint log_offset must be a non-negative integer"
         )
+    raw_plugin_state = _require_mapping(
+        value.get("plugin_state", {}),
+        "plugin_state",
+    )
+    plugin_state: dict[str, dict[str, Any]] = {}
+    for plugin_name, raw_values in raw_plugin_state.items():
+        plugin_state[plugin_name] = dict(
+            _require_mapping(raw_values, f"plugin_state.{plugin_name}")
+        )
     return SessionCheckpoint(
         checkpoint_id=_require_id(
             value.get("checkpoint_id"), "checkpoint_id"
@@ -156,6 +171,7 @@ def checkpoint_from_dict(value: Mapping[str, Any]) -> SessionCheckpoint:
                 value.get("runtime_fingerprint"), "runtime_fingerprint"
             )
         ),
+        plugin_state=plugin_state,
     )
 
 
