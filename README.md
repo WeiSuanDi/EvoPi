@@ -13,6 +13,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Policy-governed actions** — allow, block, rewrite, validate, or terminate work at runtime hooks.
 - **Reliable provider boundary** — built-in Anthropic Messages and OpenAI-compatible adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
 - **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
+- **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
@@ -109,6 +110,7 @@ Harness-backed CLI runs retry transient model failures up to three additional ti
 
 ```powershell
 evopi --max-retries 5 --model-timeout 90 'Review this repository.'
+evopi --max-output-tokens 8192 'Build a larger candidate incrementally.'
 evopi --no-retry 'Run this task without automatic model retries.'
 ```
 
@@ -148,6 +150,9 @@ Plugin review never imports candidate Python. Approval is bound to a SHA-256 dig
 code is loaded from a content-addressed immutable snapshot:
 
 ```bash
+evopi plugin examples
+evopi plugin init my-helper --template basic
+evopi plugin init plan-mode --template plan-mode
 evopi plugin review ./my-plugin --json
 evopi plugin approve ./my-plugin --trust-workspace
 evopi plugin list --json
@@ -156,7 +161,20 @@ evopi plugin deny ./my-plugin
 
 Project Plugins require both digest approval and Workspace Trust. REPL `/reload` validates
 dependencies and registration conflicts in temporary registries before atomically replacing the
-active Plugin capability set.
+active Plugin capability set. Generated candidates default to
+`.evopi/plugin-candidates/<name>/` and never approve or activate themselves.
+
+`PluginAPI v1` is a single extension surface for Tools, Policies, asynchronous Commands, Context
+Providers, dynamic Prompt Fragments, branch-aware Session state, owner-scoped active Tool
+restrictions, host-neutral UI, and observational events. It does not define separate Plan,
+Memory, or Tool Plugin types. Approved Plugin Python runs with the current user's permissions;
+the API and digest gate are governance boundaries, not an OS sandbox.
+
+The packaged Plan Mode example is an ordinary Plugin. After explicit review, approval, and
+`/reload`, `/plan on` persists planning state, contributes planning guidance, exposes only
+`effects=["read"]` Tools, and adds a defensive Policy against direct effectful calls.
+`/execute` asks the host UI for confirmation before restoring Tools; it does not automatically
+execute the plan.
 
 ## Python API
 
@@ -204,10 +222,10 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
 
-Session logs use schema v2. Active-leaf changes are append-only facts, keeping the Harness
+Session logs use schema v3. Active-leaf and Plugin-state changes are append-only facts, keeping the Harness
 transcript, Agent context, Checkpoint projection, and restart recovery aligned. Validated v1 logs
-are backed up and atomically migrated. Checkpoint messages are discarded whenever they disagree
-with the authoritative active path.
+or v2 logs are backed up and atomically migrated. Checkpoint messages and Plugin state are
+discarded whenever they disagree with the authoritative active path.
 
 Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
 
@@ -234,7 +252,10 @@ The first case proves that every sibling tool executes before an all-terminating
 
 ## Runtime governance
 
-The included `CodingHarness` registers workspace-scoped tools for directory listing, file reads, file writes, and shell commands. Its default policy pack adds:
+The included `CodingHarness` registers workspace-scoped tools for directory listing, file reads,
+exact atomic edits, full file writes, and shell commands. Each Tool declares effects used by
+Policy and Plugin Tool views. Invalid or truncated Tool JSON becomes a structured recoverable
+ToolResult and never reaches Policy or the Tool handler. Its default policy pack adds:
 
 - destructive shell-pattern blocking;
 - human confirmation before non-blocked shell commands;

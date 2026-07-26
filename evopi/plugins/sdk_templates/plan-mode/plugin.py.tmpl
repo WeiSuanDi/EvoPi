@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from evopi.plugins import Plugin, PluginAPI, PluginMetadata
+from evopi.policy import PolicyContext, PolicyDecision
+
+
+_FORBIDDEN_EFFECTS = {
+    "write",
+    "execute",
+    "network",
+    "memory_write",
+    "delegate",
+    "unknown",
+}
+
+
+@dataclass(slots=True)
+class PlanModePolicy:
+    api: PluginAPI
+    name: str = "{{PLUGIN_NAME}}.write_guard"
+    version: str = "0.1.0"
+    description: str = "Block effectful Tools while Plan Mode is enabled."
+    hooks: tuple = ("before_tool_call",)
+    priority: int = 100
+    enabled: bool = True
+    source: str = "plugin"
+    risk_level: str = "high"
+    metadata: dict = field(default_factory=dict)
+
+    def run(self, context: PolicyContext) -> PolicyDecision:
+        if not self.api.state.get("enabled", False) or context.tool_call is None:
+            return PolicyDecision()
+        descriptor = next(
+            (
+                tool for tool in self.api.tools.all()
+                if tool.name == context.tool_call.name
+            ),
+            None,
+        )
+        effects = set(descriptor.effects if descriptor is not None else ("unknown",))
+        blocked = sorted(effects & _FORBIDDEN_EFFECTS)
+        if not blocked:
+            return PolicyDecision()
+        return PolicyDecision(
+            action="block",
+            reason=(
+                "Plan Mode blocks Tool effects: " + ", ".join(blocked)
+            ),
+            risk_level="high",
+        )
+
+
+class {{CLASS_NAME}}(Plugin):
+    @property
+    def meta(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="{{PLUGIN_NAME}}",
+            version="0.1.0",
+            description="A governed Plan Mode workflow.",
+        )
+
+    def register(self, api: PluginAPI) -> None:
+        async def plan(arguments: str, context) -> None:
+            action = arguments.strip().lower() or "status"
+            if action == "status":
+                mode = "on" if api.state.get("enabled", False) else "off"
+                await api.ui.notify(f"Plan Mode is {mode}.")
+                return
+            if action == "on":
+                read_tools = [
+                    tool.name
+                    for tool in api.tools.all()
+                    if tool.effects == ("read",)
+                ]
+                api.tools.set_active(read_tools, scope="session")
+                api.state.set("enabled", True)
+                await api.ui.set_status("plan-mode", "PLAN")
+                await api.ui.notify("Plan Mode enabled.", level="success")
+                return
+            if action == "off":
+                api.tools.clear_active_override()
+                api.state.set("enabled", False)
+                await api.ui.set_status("plan-mode", None)
+                await api.ui.notify("Plan Mode disabled.")
+                return
+            raise ValueError("Usage: /plan on|off|status")
+
+        async def execute(arguments: str, context) -> None:
+            if not api.state.get("enabled", False):
+                await api.ui.notify("Plan Mode is already off.")
+                return
+            approved = await api.ui.confirm(
+                "Exit Plan Mode",
+                "Restore effectful Tools for a later execution request?",
+            )
+            if not approved:
+                await api.ui.notify("Plan Mode remains enabled.", level="warning")
+                return
+            api.tools.clear_active_override()
+            api.state.set("enabled", False)
+            await api.ui.set_status("plan-mode", None)
+            await api.ui.notify(
+                "Plan Mode disabled. Submit an execution request when ready.",
+                level="success",
+            )
+
+        api.register_command(
+            "plan",
+            plan,
+            description="Enable, disable, or inspect Plan Mode.",
+            usage="/plan on|off|status",
+        )
+        api.register_command(
+            "execute",
+            execute,
+            description="Confirm leaving Plan Mode before later execution.",
+            usage="/execute",
+        )
+        api.register_prompt_fragment(
+            "planning-guidance",
+            lambda context: (
+                "Plan Mode is enabled. Analyze and propose a plan only. "
+                "Do not claim that changes were executed."
+                if api.state.get("enabled", False)
+                else None
+            ),
+            priority=100,
+        )
+        api.register_policy(PlanModePolicy(api))

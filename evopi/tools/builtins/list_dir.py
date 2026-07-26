@@ -33,6 +33,7 @@ def create_list_dir_tool(workspace: str | Path) -> Tool:
             {"path": {"type": "string", "description": "Workspace-relative directory"}}
         ),
         handler=list_dir,
+        metadata={"effects": ["read"]},
     )
 
 

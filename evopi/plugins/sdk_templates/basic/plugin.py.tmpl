@@ -1,0 +1,24 @@
+from __future__ import annotations
+
+from evopi.plugins import Plugin, PluginAPI, PluginMetadata
+
+
+class {{CLASS_NAME}}(Plugin):
+    @property
+    def meta(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="{{PLUGIN_NAME}}",
+            version="0.1.0",
+            description="A PluginAPI v1 extension.",
+        )
+
+    def register(self, api: PluginAPI) -> None:
+        async def status(arguments: str, context) -> None:
+            await api.ui.notify("{{PLUGIN_NAME}} is active.")
+
+        api.register_command(
+            "{{PLUGIN_NAME}}",
+            status,
+            description="Show the Plugin status.",
+            usage="/{{PLUGIN_NAME}}",
+        )

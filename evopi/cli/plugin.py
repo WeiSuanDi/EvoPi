@@ -17,7 +17,9 @@ from evopi.plugins import (
     PluginArtifactStore,
     PluginCandidateError,
     PluginReviewReport,
+    available_plugin_templates,
     approved_plugin_entrypoints,
+    initialize_plugin_candidate,
     resolve_evopi_home,
     review_plugin,
 )
@@ -31,10 +33,21 @@ def plugin_main(action: str, argv: list[str]) -> int:
     parser.add_argument("--reason")
     parser.add_argument("--trust-workspace", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--template",
+        choices=sorted(available_plugin_templates()),
+        default="basic",
+    )
+    parser.add_argument("--path", type=Path)
     args = parser.parse_args(argv)
+    args._action = action
     try:
         if action == "review":
             return _review(args)
+        if action == "init":
+            return _init(args)
+        if action == "examples":
+            return _examples(args)
         if action in {"approve", "install"}:
             return _approve(args)
         if action == "deny":
@@ -52,6 +65,52 @@ def plugin_main(action: str, argv: list[str]) -> int:
     return 1
 
 
+def _init(args: argparse.Namespace) -> int:
+    name = args.target
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Plugin name is required")
+    target = (
+        args.path
+        if args.path is not None
+        else args.workspace / ".evopi" / "plugin-candidates" / name
+    )
+    candidate = initialize_plugin_candidate(
+        name,
+        template=args.template,
+        path=target,
+    )
+    report = review_plugin(candidate)
+    _print(
+        {
+            "status": "candidate",
+            "name": report.candidate.name,
+            "template": args.template,
+            "path": str(candidate),
+            "digest": report.candidate.artifact.digest,
+            "next": "review -> approve -> reload",
+        },
+        json_output=args.json,
+    )
+    return 0
+
+
+def _examples(args: argparse.Namespace) -> int:
+    templates = available_plugin_templates()
+    _print(
+        {
+            "templates": [
+                {
+                    "name": template.name,
+                    "description": template.description,
+                }
+                for template in templates.values()
+            ]
+        },
+        json_output=args.json,
+    )
+    return 0
+
+
 def _review(args: argparse.Namespace) -> int:
     path = _required_path(args.target)
     report = review_plugin(path)
@@ -61,6 +120,12 @@ def _review(args: argparse.Namespace) -> int:
 
 
 def _approve(args: argparse.Namespace) -> int:
+    if args._action == "install":
+        print(
+            "Warning: 'plugin install' is a deprecated alias; "
+            "use review then approve.",
+            file=sys.stderr,
+        )
     path = _required_path(args.target)
     report = review_plugin(path)
     if not report.passed:
@@ -230,6 +295,11 @@ def _print(payload: dict[str, object], *, json_output: bool) -> None:
                 f"{item['name']} {item['version']} "
                 f"[{item['status']}] {item['digest'][:12]}"
             )
+        return
+    if "templates" in payload:
+        items = cast(list[dict[str, Any]], payload["templates"])
+        for item in items:
+            print(f"{item['name']}: {item['description']}")
         return
     for key, value in payload.items():
         print(f"{key}: {value}")

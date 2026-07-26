@@ -11,6 +11,7 @@ from evopi.memory.store import MemoryStore
 from evopi.subagents.context_scope import SubAgentScope
 from evopi.subagents.manager import SubAgentManager
 from evopi.tools.builtins import (
+    create_edit_file_tool,
     create_list_dir_tool,
     create_read_file_tool,
     create_shell_command_tool,
@@ -28,6 +29,7 @@ def coding_tools(workspace: str | Path) -> list[Tool]:
     return [
         create_list_dir_tool(workspace),
         create_read_file_tool(workspace),
+        create_edit_file_tool(workspace),
         create_write_file_tool(workspace),
         create_shell_command_tool(workspace),
     ]
@@ -61,6 +63,7 @@ def create_remember_tool(service: MemoryService) -> Tool:
             required=["content"],
         ),
         handler=remember,
+        metadata={"effects": ["memory_write"]},
     )
 
 
@@ -84,6 +87,7 @@ def create_recall_tool(store: MemoryStore) -> Tool:
             required=["query"],
         ),
         handler=recall,
+        metadata={"effects": ["read"]},
     )
 
 
@@ -141,6 +145,7 @@ def create_spawn_subagent_tool(manager: SubAgentManager) -> Tool:
             required=["task"],
         ),
         handler=spawn_subagent,
+        metadata={"effects": ["delegate"]},
     )
 
 

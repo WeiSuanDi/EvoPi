@@ -388,6 +388,13 @@ ArtifactCandidate(kind, name, version, source, risk, sha256)
 Harness 注册 Policy 必须匹配当前实现摘要，同名同版本但源码或声明契约变化会失效。
 Plugin 额外复制到内容寻址不可变快照，批准不等于 OS 沙箱。
 
+PluginAPI 不建立第二条裁决链。Plugin Event Handler、Command、Prompt Fragment、
+Session State、Tool 活动覆盖和 UI 都不能直接产生 Policy 动作；需要治理 ToolCall
+的 Plugin 必须注册正常 Policy，并服从同一冲突优先级。Tool
+`metadata["effects"]` 提供 `read/write/execute/network/memory_write/delegate/unknown`
+分类。Plan Mode 样例通过 Tool 覆盖加防御性 `before_tool_call` Policy 实现，而不是
+Core 特例。
+
 ## Evo 边界
 
 EvoPi 的演进对象分层：

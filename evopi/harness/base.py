@@ -116,9 +116,10 @@ class _ObservedPluginUI:
         return str(result)
 
     async def set_status(self, key: str, text: str | None) -> None:
+        namespaced_key = f"{self._plugin_name}:{key}"
         await self._call(
             "set_status",
-            lambda: self._delegate.set_status(key, text),
+            lambda: self._delegate.set_status(namespaced_key, text),
             request={"key": key, "cleared": text is None},
         )
 
@@ -846,6 +847,14 @@ class BaseHarness:
                 for fragment in api.prompt_fragments
             )
 
+        clear_statuses = getattr(
+            self._plugin_ui,
+            "clear_plugin_statuses",
+            None,
+        )
+        if callable(clear_statuses):
+            for plugin_name in old_plugin_names:
+                clear_statuses(plugin_name)
         for unsubscribe in self._plugin_event_unsubscribers:
             unsubscribe()
         for provider in self._plugin_context_providers:

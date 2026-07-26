@@ -13,6 +13,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **Policy 运行时治理** — 可在 Hook 上允许、阻止、改写、验证或终止操作。
 - **可靠的 Provider 边界** — 内置 Anthropic Messages 与 OpenAI-compatible 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
 - **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
+- **通用 PluginAPI** — 通过单一受治理运行时协议扩展工具、Policy、命令、上下文、Prompt、Session 状态、Tool 视图和宿主 UI。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
 - **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
 
@@ -109,6 +110,7 @@ evopi --provider anthropic --workspace C:\path\to\project '运行测试并解释
 
 ```powershell
 evopi --max-retries 5 --model-timeout 90 '检查这个仓库。'
+evopi --max-output-tokens 8192 '用增量方式构建较大的候选。'
 evopi --no-retry '执行任务，但不要自动重试模型。'
 ```
 
@@ -146,6 +148,9 @@ Plugin 审查不会 import 候选 Python。批准记录绑定 SHA-256，运行�
 不可变快照：
 
 ```bash
+evopi plugin examples
+evopi plugin init my-helper --template basic
+evopi plugin init plan-mode --template plan-mode
 evopi plugin review ./my-plugin --json
 evopi plugin approve ./my-plugin --trust-workspace
 evopi plugin list --json
@@ -153,7 +158,18 @@ evopi plugin deny ./my-plugin
 ```
 
 项目 Plugin 同时需要摘要批准与 Workspace Trust。REPL `/reload` 会先在临时注册表
-校验依赖和注册冲突，全部成功后才原子替换活动能力集。
+校验依赖和注册冲突，全部成功后才原子替换活动能力集。生成的候选默认位于
+`.evopi/plugin-candidates/<name>/`，不会自行批准或激活。
+
+`PluginAPI v1` 是统一扩展面，可注册 Tool、Policy、异步 Command、Context Provider、
+动态 Prompt Fragment、分支感知的 Session 状态、所有者隔离的活动 Tool 限制、宿主
+无关 UI 和观察事件；它不会预先定义 Plan、Memory、Tool 等不同 Plugin 类型。批准后
+的 Python 代码以当前用户权限运行，API 与摘要门禁属于治理边界，不是 OS 沙箱。
+
+随包提供的 Plan Mode 是普通 Plugin 样例。显式 review、approve 并 `/reload` 后，
+`/plan on` 会持久化规划状态、贡献规划 Prompt、只暴露 `effects=["read"]` 的 Tool，
+并注册防御性 Policy 阻断直接构造的副作用调用。`/execute` 会先通过宿主 UI 确认再
+恢复 Tool，但不会自动执行计划。
 
 ## Python API
 
@@ -201,9 +217,10 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。
 
-Session Log 使用 schema v2。活动叶切换本身也是追加式事实，因此 Harness transcript、
+Session Log 使用 schema v3。活动叶切换和 Plugin 状态变更都是追加式事实，因此 Harness transcript、
 Agent Context、Checkpoint 投影与重启恢复保持一致。通过验证的 v1 日志会先备份再原子
-迁移；Checkpoint 消息与活动路径不一致时会被丢弃并从事实日志重建。
+迁移；v2 日志同样会原子升级。Checkpoint 消息或 Plugin 状态与活动路径不一致时会被
+丢弃并从事实日志重建。
 
 运行中的任务可以通过 `Agent.abort()` 或 `BaseHarness.abort()` 协作式中止。该调用是同步、线程安全、幂等的，空闲时调用不会产生影响。模型流与异步工具会被取消，运行中的 Shell 进程树会被终止；当前批次中每个已请求的兄弟工具仍会获得可关联的错误结果。已经产生的模型文本会保留，未完成的工具调用不会写入正式消息，而是保存在诊断元数据中。应用可以通过 `signal`、`is_running` 和 `wait_for_idle()` 接入自己的生命周期。
 
@@ -230,7 +247,10 @@ python -m pytest tests/core/test_agent_loop.py::test_mixed_tool_batch_continues_
 
 ## 运行时治理
 
-内置 `CodingHarness` 会注册限定在工作区内的目录查看、文件读取、文件写入和 Shell 命令工具。默认 Policy Pack 提供：
+内置 `CodingHarness` 会注册限定在工作区内的目录查看、文件读取、精确原子编辑、
+完整文件写入和 Shell 命令工具。每个 Tool 声明 effect，供 Policy 和 Plugin Tool
+视图使用。非法或截断的 Tool JSON 会转换成结构化、可恢复的 ToolResult，不进入
+Policy 或 Tool Handler。默认 Policy Pack 提供：
 
 - 危险 Shell 模式拦截；
 - 未被阻断的 Shell 命令执行前人工确认；

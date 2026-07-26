@@ -33,6 +33,7 @@ def create_write_file_tool(workspace: str | Path) -> Tool:
             required=["path", "content"],
         ),
         handler=write_file,
+        metadata={"effects": ["write"]},
     )
 
 

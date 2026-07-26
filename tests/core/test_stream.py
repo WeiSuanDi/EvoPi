@@ -31,4 +31,8 @@ def test_stream_builder_preserves_invalid_arguments_for_model_feedback() -> None
 
     message = builder.build(stop_reason="tool_use")
 
-    assert message.tool_calls[0].arguments == {"_raw": "{"}
+    call = message.tool_calls[0]
+    assert call.arguments == {}
+    assert call.argument_error is not None
+    assert call.argument_error.code == "invalid_json"
+    assert call.argument_error.raw_fragment == "{"

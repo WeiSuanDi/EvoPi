@@ -1,0 +1,7 @@
+from plugin import {{CLASS_NAME}}
+
+
+def test_plugin_identity() -> None:
+    plugin = {{CLASS_NAME}}()
+    assert plugin.meta.name == "{{PLUGIN_NAME}}"
+    assert plugin.meta.version == "0.1.0"

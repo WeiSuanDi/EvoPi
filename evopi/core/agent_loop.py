@@ -509,7 +509,7 @@ class AgentLoop:
                                 "role": "assistant",
                                 "kind": "tool_call",
                                 "index": model_event.index,
-                                "delta": model_event.arguments_delta,
+                                "delta_length": len(model_event.arguments_delta),
                                 "tool_call_id": model_event.tool_call_id,
                                 "tool_name": model_event.tool_name,
                             },
@@ -656,12 +656,22 @@ class AgentLoop:
                     "tool_call_id": tool_call.id,
                     "tool_name": tool_call.name,
                     "args": tool_call.arguments,
+                    "argument_error": (
+                        {
+                            "code": tool_call.argument_error.code,
+                            "message": tool_call.argument_error.message,
+                            "raw_fragment": tool_call.argument_error.raw_fragment,
+                        }
+                        if tool_call.argument_error is not None
+                        else None
+                    ),
                 },
             ),
             signal=signal,
         )
 
         skipped = signal is not None and signal.aborted
+        invalid_arguments = tool_call.argument_error is not None
         if skipped:
             assert signal is not None
             await signal._wait_until_notified()
@@ -669,6 +679,16 @@ class AgentLoop:
                 content="Tool skipped because the run was aborted",
                 is_error=True,
                 metadata={"aborted": True, "skipped": True},
+            )
+        elif invalid_arguments:
+            assert tool_call.argument_error is not None
+            result = ToolResult(
+                content=tool_call.argument_error.message,
+                is_error=True,
+                metadata={
+                    "argument_error": True,
+                    "argument_error_code": tool_call.argument_error.code,
+                },
             )
         else:
             result = await self._prepare_and_execute_tool(
@@ -684,7 +704,11 @@ class AgentLoop:
             for key, value in result.metadata.items()
             if key in {"aborted", "skipped", "completed_after_abort"}
         }
-        if after_tool_call is not None and (skipped or not result.metadata.get("blocked")):
+        if (
+            after_tool_call is not None
+            and not invalid_arguments
+            and (skipped or not result.metadata.get("blocked"))
+        ):
             replacement = call_with_optional_signal(
                 after_tool_call,
                 context,

@@ -121,6 +121,23 @@ def test_plugin_state_follows_active_session_branch() -> None:
     assert session.plugin_state("plan-mode") == {"mode": "plan"}
 
 
+def test_plugin_state_reads_cannot_mutate_projection_without_entry() -> None:
+    session = SessionManager.in_memory()
+    session.append_plugin_state(
+        plugin_name="sample",
+        plugin_version="1.0",
+        key="nested",
+        value={"items": ["original"]},
+    )
+
+    detached = session.plugin_state("sample")
+    detached["nested"]["items"].append("mutated")
+
+    assert session.plugin_state("sample") == {
+        "nested": {"items": ["original"]}
+    }
+
+
 def test_plugin_state_persists_in_checkpoint_and_restart(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
