@@ -39,6 +39,12 @@ CoreEventType: TypeAlias = Literal[
     "memory_write_error",
     "skills_selected",
     "plugin_reload",
+    "plugin_command_start",
+    "plugin_command_end",
+    "plugin_command_error",
+    "plugin_handler_error",
+    "plugin_prompt_applied",
+    "plugin_tools_changed",
     "error",
 ]
 
