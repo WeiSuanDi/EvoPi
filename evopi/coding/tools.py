@@ -6,7 +6,8 @@ from pathlib import Path
 
 from evopi.core.messages import UserMessage
 from evopi.core.tool import Tool
-from evopi.memory.store import MemoryEntry, MemoryStore
+from evopi.memory import MemoryService
+from evopi.memory.store import MemoryStore
 from evopi.subagents.context_scope import SubAgentScope
 from evopi.subagents.manager import SubAgentManager
 from evopi.tools.builtins import (
@@ -36,15 +37,14 @@ def coding_tools(workspace: str | Path) -> list[Tool]:
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def create_remember_tool(store: MemoryStore) -> Tool:
+def create_remember_tool(service: MemoryService) -> Tool:
     """Tool that lets the agent explicitly persist a fact to memory."""
 
-    def remember(content: str, tags: str = "") -> str:
-        entry = MemoryEntry(
+    async def remember(content: str, tags: str = "") -> str:
+        entry = await service.write(
             content=content,
             tags=[t.strip() for t in tags.split(",") if t.strip()],
         )
-        store.add(entry)
         return f"Stored memory {entry.id[:8]}"
 
     return Tool(
@@ -87,8 +87,12 @@ def create_recall_tool(store: MemoryStore) -> Tool:
     )
 
 
-def memory_tools(store: MemoryStore) -> list[Tool]:
-    return [create_remember_tool(store), create_recall_tool(store)]
+def memory_tools(
+    store: MemoryStore,
+    service: MemoryService | None = None,
+) -> list[Tool]:
+    resolved = service or MemoryService(store)
+    return [create_remember_tool(resolved), create_recall_tool(store)]
 
 
 # ---------------------------------------------------------------------------

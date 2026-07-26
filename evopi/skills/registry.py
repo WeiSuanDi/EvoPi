@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from evopi.skills.loader import discover_skill_paths, load_skill
+from pathlib import Path
+
+from evopi.skills.loader import SkillLoadError, load_skill_strict
 from evopi.skills.types import Skill
 
 
@@ -59,24 +61,62 @@ class SkillLoader:
         workspace: str,
         root: str | None = None,
         extra_paths: list[str] | None = None,
+        max_skill_chars: int = 12_000,
+        max_total_chars: int = 24_000,
     ) -> None:
         self._registry = SkillRegistry()
-        for path in discover_skill_paths(workspace, root):
-            if skill := load_skill(path):
-                try:
-                    self._registry.register(skill)
-                except ValueError:
-                    pass  # duplicate name, keep first
-        for ep in (extra_paths or []):
-            if skill := load_skill(ep):
-                try:
-                    self._registry.register(skill)
-                except ValueError:
-                    pass
+        self._errors: list[str] = []
+        self._max_skill_chars = max_skill_chars
+        self._max_total_chars = max_total_chars
+        self._total_chars = 0
+        paths: list[Path] = []
+        if root is not None:
+            skill_root = Path(root).expanduser().resolve()
+            if skill_root.is_dir():
+                paths.extend(_scan_skill_root(skill_root))
+            else:
+                self._errors.append(f"Skill root is not a directory: {skill_root}")
+        for ep in extra_paths or []:
+            paths.append(Path(ep).expanduser().resolve())
+        for path in paths:
+            self._load(path)
 
     @property
     def registry(self) -> SkillRegistry:
         return self._registry
+
+    @property
+    def errors(self) -> tuple[str, ...]:
+        return tuple(self._errors)
+
+    def _load(self, path: Path) -> None:
+        try:
+            skill = load_skill_strict(path)
+            size = len(skill.prompt_segment())
+            if size > self._max_skill_chars:
+                raise SkillLoadError(
+                    f"Skill '{skill.name}' exceeds {self._max_skill_chars} characters"
+                )
+            if self._total_chars + size > self._max_total_chars:
+                raise SkillLoadError(
+                    f"Skill total injection budget exceeds {self._max_total_chars} characters"
+                )
+            self._registry.register(skill)
+            self._total_chars += size
+        except (SkillLoadError, ValueError) as exc:
+            self._errors.append(str(exc))
+
+
+def _scan_skill_root(root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for entry in sorted(root.iterdir()):
+        if entry.name.startswith("_"):
+            continue
+        if entry.is_file() and entry.suffix == ".md":
+            paths.append(entry)
+        elif entry.is_dir() and (entry / "SKILL.md").is_file():
+            paths.append(entry / "SKILL.md")
+    return paths
 
 
 __all__ = ["SkillLoader", "SkillRegistry"]

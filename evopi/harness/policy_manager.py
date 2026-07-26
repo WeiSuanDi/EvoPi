@@ -11,7 +11,7 @@ class PolicyManager:
         self.approval_store = approval_store or ApprovalStore(None, mode="off")
 
     def register(self, policy: Policy, *, replace: bool = False) -> None:
-        loaded = self.approval_store.check(policy.name, policy.version)
+        loaded = self.approval_store.check_policy(policy)
         loaded.raise_if_required(policy.name, policy.version)
         self.registry.register(policy, replace=replace)
 
@@ -20,7 +20,7 @@ class PolicyManager:
 
     def load_pack(self, pack: PolicyPack) -> None:
         for policy in pack.policies:
-            loaded = self.approval_store.check(policy.name, policy.version)
+            loaded = self.approval_store.check_policy(policy)
             loaded.raise_if_required(policy.name, policy.version)
         self.registry.load_pack(pack)
 

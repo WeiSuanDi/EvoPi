@@ -170,14 +170,18 @@ class PluginLoader:
         workspace: str | Path,
         root: str | Path | None = None,
         extra_paths: list[str | Path] | None = None,
+        *,
+        discover_defaults: bool = True,
     ) -> None:
         self._workspace = Path(workspace)
         self._plugins: list[Plugin] = []
         self._source_paths: dict[str, Path] = {}
         self._errors: list[str] = []
+        self._invalid_plugins: set[str] = set()
 
-        for path in discover_plugin_paths(workspace, root):
-            self._try_load(path)
+        if discover_defaults:
+            for path in discover_plugin_paths(workspace, root):
+                self._try_load(path)
         for ep in (extra_paths or []):
             self._try_load(Path(ep).expanduser().resolve())
 
@@ -202,6 +206,7 @@ class PluginLoader:
         for plugin in self._plugins:
             for dep in plugin.meta.dependencies:
                 if dep not in names:
+                    self._invalid_plugins.add(plugin.meta.name)
                     self._errors.append(
                         f"Plugin '{plugin.meta.name}' requires '{dep}' which is not loaded"
                     )
@@ -229,6 +234,11 @@ class PluginLoader:
     def is_loaded(self, name: str) -> bool:
         """Return ``True`` if a plugin named *name* is loaded."""
         return any(p.meta.name == name for p in self._plugins)
+
+    def is_valid(self, name: str) -> bool:
+        """Return whether static dependency validation permits activation."""
+
+        return name not in self._invalid_plugins
 
 
 __all__ = ["PluginLoader", "discover_plugin_paths", "load_plugin"]

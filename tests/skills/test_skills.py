@@ -201,7 +201,7 @@ def test_loader_empty(workspace: Path) -> None:
 def test_loader_discovers_and_loads(workspace: Path) -> None:
     d = _make_skill_dir(workspace)
     (d / "pytest.md").write_text(SKILL_WITH_FM)
-    loader = SkillLoader(workspace=str(workspace), root=str(_root(workspace)))
+    loader = SkillLoader(workspace=str(workspace), root=str(d))
     assert len(loader.registry) == 1
     assert loader.registry.get("pytest-guide") is not None
 
@@ -216,6 +216,54 @@ def test_loader_extra_paths(workspace: Path, tmp_path: Path) -> None:
     )
     assert len(loader.registry) == 1
     assert loader.registry.get("pytest-guide") is not None
+
+
+def test_loader_root_is_the_actual_skills_directory(
+    workspace: Path,
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "custom-skills"
+    skills_dir.mkdir()
+    (skills_dir / "pytest.md").write_text(SKILL_WITH_FM, encoding="utf-8")
+
+    loader = SkillLoader(workspace=str(workspace), root=str(skills_dir))
+
+    assert loader.registry.get("pytest-guide") is not None
+
+
+def test_loader_reports_duplicate_and_invalid_risk(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    (skills_dir / "a.md").write_text(SKILL_WITH_FM, encoding="utf-8")
+    (skills_dir / "b.md").write_text(SKILL_WITH_FM, encoding="utf-8")
+    (skills_dir / "bad.md").write_text(
+        SKILL_WITH_FM.replace("risk_level: low", "risk_level: impossible"),
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(workspace=str(tmp_path), root=str(skills_dir))
+
+    assert len(loader.registry) == 1
+    assert any("already registered" in error for error in loader.errors)
+    assert any("invalid risk_level" in error for error in loader.errors)
+
+
+def test_loader_enforces_per_skill_injection_limit(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    (skills_dir / "large.md").write_text(
+        "# Large\n\n" + ("x" * 200),
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(
+        workspace=str(tmp_path),
+        root=str(skills_dir),
+        max_skill_chars=100,
+    )
+
+    assert len(loader.registry) == 0
+    assert "exceeds 100" in loader.errors[0]
 
 
 # ---------------------------------------------------------------------------

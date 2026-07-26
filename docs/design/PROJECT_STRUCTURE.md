@@ -107,7 +107,9 @@ Policy 负责具体怎么治理。
 
 职责：
 
-- 文件系统自动发现（~/.evopi/plugins/ + <project>/.evopi/plugins/）
+- 非执行式 Manifest / AST 候选发现
+- SHA-256 摘要绑定 Approval 与内容寻址不可变快照
+- Workspace Trust、依赖/冲突验证与事务式 Reload
 - Plugin ABC + PluginAPI 注册协议
 - PluginLoader：发现、加载、依赖校验
 - wire_plugins()：Harness 装配工具

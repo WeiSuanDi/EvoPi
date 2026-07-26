@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -11,7 +12,9 @@ from evopi.core.context import AgentContext
 from evopi.core.messages import UserMessage
 from evopi.memory import (
     MemoryEntry,
+    MemoryPersistenceError,
     MemoryRetriever,
+    MemoryService,
     MemoryStore,
     MemoryWritePolicy,
     TagFilteredRetriever,
@@ -106,6 +109,12 @@ def test_search_keyword(store: MemoryStore) -> None:
     assert len(store.search("javascript")) == 0
 
 
+def test_search_matches_chinese_query_without_whitespace(store: MemoryStore) -> None:
+    store.add(MemoryEntry(content="项目统一使用 pytest 作为测试框架"))
+
+    assert store.search("我们应该使用什么测试框架")
+
+
 def test_search_with_tags_filter(store: MemoryStore) -> None:
     store.add(MemoryEntry(content="use pytest", tags=["testing"]))
     store.add(MemoryEntry(content="use python 3.12", tags=["env"]))
@@ -131,6 +140,26 @@ def test_persistence() -> None:
         e = s2.all()[0]
         assert e.content == "persist me"
         assert e.tags == ["keep"]
+
+
+def test_corrupt_persistent_memory_is_not_silently_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "memory.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(MemoryPersistenceError, match="invalid"):
+        MemoryStore(path)
+
+
+def test_persistence_failure_rolls_back_in_memory_add(tmp_path: Path) -> None:
+    path = tmp_path / "memory.json"
+    path.mkdir()
+    store = MemoryStore()
+    store._path = path
+
+    with pytest.raises(MemoryPersistenceError):
+        store.add(MemoryEntry(content="must not survive"))
+
+    assert len(store) == 0
 
 
 def test_thread_safety(store: MemoryStore) -> None:
@@ -229,3 +258,10 @@ def test_policy_detects_sensitive_content() -> None:
     assert policy.is_sensitive(MemoryEntry(content="sk-ant-secret-key"))
     assert policy.is_sensitive(MemoryEntry(content="my_password = '123'"))
     assert not policy.is_sensitive(MemoryEntry(content="hello world"))
+
+
+def test_memory_service_blocks_sensitive_content() -> None:
+    service = MemoryService(MemoryStore())
+
+    with pytest.raises(ValueError, match="sensitive"):
+        asyncio.run(service.write(content="API_KEY=secret", tags=[]))

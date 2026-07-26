@@ -8,9 +8,11 @@ import pytest
 from evopi.session import (
     BranchEntry,
     CompactEntry,
+    LeafSelectedEntry,
     SessionError,
     SessionManager,
 )
+from evopi.core.messages import UserMessage
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +74,7 @@ def test_multiple_branches_create_multiple_leaves() -> None:
 
     # Switch back and create second branch
     session.switch_leaf(first_leaf)
-    session.branch(from_entry_id=first_leaf, branch_name="alt")
+    session.branch(from_entry_id=session.leaf_id, branch_name="alt")
 
     leaves = session.leaves()
     assert len(leaves) == 2
@@ -95,11 +97,12 @@ def test_switch_leaf_changes_active() -> None:
     session.branch(from_entry_id=leaf_a)
     leaf_b = session.leaf_id
 
-    session.switch_leaf(leaf_a)
-    assert session.leaf_id == leaf_a
+    selected_a = session.switch_leaf(leaf_a)
+    assert isinstance(selected_a, LeafSelectedEntry)
+    assert selected_a.parent_id == leaf_a
 
-    session.switch_leaf(leaf_b)
-    assert session.leaf_id == leaf_b
+    selected_b = session.switch_leaf(leaf_b)
+    assert selected_b.parent_id == leaf_b
 
 
 def test_switch_to_nonexistent_leaf_fails() -> None:
@@ -121,8 +124,58 @@ def test_switch_to_inner_node_is_allowed() -> None:
         reason="completed",
     )
     # inner_id is now an inner node (has child), but switching is allowed
-    session.switch_leaf(inner_id)
-    assert session.leaf_id == inner_id
+    selected = session.switch_leaf(inner_id)
+    assert selected.parent_id == inner_id
+
+
+def test_switch_leaf_rebuilds_messages_from_only_the_selected_path() -> None:
+    session = SessionManager.in_memory()
+    root_run = "00000000-0000-0000-0000-000000000001"
+    session.append_run_start(run_id=root_run, runtime_fingerprint=_dummy_fingerprint())
+    session.append_message(
+        run_id=root_run,
+        message=UserMessage(content="root"),
+    )
+    root_end = session.append_run_end(run_id=root_run, reason="completed")
+
+    session.branch(from_entry_id=session.leaf_id, branch_name="a")
+    run_a = "00000000-0000-0000-0000-000000000002"
+    session.append_run_start(run_id=run_a, runtime_fingerprint=_dummy_fingerprint())
+    session.append_message(run_id=run_a, message=UserMessage(content="branch-a"))
+    session.append_run_end(run_id=run_a, reason="completed")
+    leaf_a = session.leaf_id
+
+    session.switch_leaf(root_end.entry_id)
+    run_b = "00000000-0000-0000-0000-000000000003"
+    session.append_run_start(run_id=run_b, runtime_fingerprint=_dummy_fingerprint())
+    session.append_message(run_id=run_b, message=UserMessage(content="branch-b"))
+    session.append_run_end(run_id=run_b, reason="completed")
+
+    session.switch_leaf(leaf_a)
+
+    assert [message.content for message in session.messages] == ["root", "branch-a"]
+
+
+def test_selected_leaf_persists_without_appending_a_new_run(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    session = SessionManager.create(tmp_path, root=root)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    session.append_run_start(run_id=run_id, runtime_fingerprint=_dummy_fingerprint())
+    session.append_message(run_id=run_id, message=UserMessage(content="first"))
+    first_end = session.append_run_end(run_id=run_id, reason="completed")
+    session.branch(from_entry_id=session.leaf_id, branch_name="other")
+
+    selected = session.switch_leaf(first_end.entry_id)
+    path = session.session_path
+    session.close()
+
+    reopened = SessionManager.open(path, workspace=tmp_path, root=root)
+    try:
+        assert isinstance(reopened.get_entry(reopened.leaf_id), LeafSelectedEntry)
+        assert reopened.leaf_id == selected.entry_id
+        assert [message.content for message in reopened.messages] == ["first"]
+    finally:
+        reopened.close()
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +265,8 @@ def test_compact_creates_compact_entry() -> None:
     assert entry.summary == "This session created a project skeleton."
     assert session.leaf_id == entry.entry_id
     # Can still switch back to the original leaf
-    session.switch_leaf(leaf_before)
-    assert session.leaf_id == leaf_before
+    selected = session.switch_leaf(leaf_before)
+    assert selected.parent_id == leaf_before
 
 
 def test_compact_collects_message_ids() -> None:
@@ -236,6 +289,30 @@ def test_compact_collects_message_ids() -> None:
     # Compact adds one new entry; old entries preserved
     assert len(session.entries) == before_count + 1
     assert isinstance(entry, CompactEntry)
+
+
+def test_compact_replaces_only_selected_projection_prefix() -> None:
+    session = SessionManager.in_memory()
+    run_id = "00000000-0000-0000-0000-000000000001"
+    session.append_run_start(run_id=run_id, runtime_fingerprint=_dummy_fingerprint())
+    session.append_message(run_id=run_id, message=UserMessage(content="old"))
+    session.append_message(run_id=run_id, message=UserMessage(content="recent"))
+    session.append_run_end(run_id=run_id, reason="completed")
+
+    session.compact(
+        up_to_entry_id=session.leaf_id,
+        summary="old summary",
+        compacted_ids=[session.message_source_ids[0]],
+    )
+
+    assert [message.content for message in session.messages] == [
+        (
+            "<summary>\nold summary\n</summary>\n\n"
+            "The above is a summary of the earlier conversation. "
+            "Continue helping based on this context."
+        ),
+        "recent",
+    ]
 
 
 def test_compact_to_nonexistent_fails() -> None:

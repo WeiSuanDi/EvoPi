@@ -216,22 +216,26 @@ set_system_prompt
 add_context_provider
 ```
 
-## Base Harness 不负责什么
+## Base Harness 的治理边界
 
-第一版暂不放进 Base Harness 的能力：
+Base Harness 可以组织下列能力，但不包含其领域规则或持久化实现：
 
 ```text
-复杂记忆系统
-复杂 skill 检索
-session branch / fork / compact
-subagent tree
-自动 compact
-自动 evolution
-supervisor agent
-领域深规则
+Session / Trace 接线
+Context Provider
+阈值式 Compaction 调度
+Child Harness Factory
+Plugin 能力快照与事务式重装配
 ```
 
-这些能力可以后续作为模块或 Domain Harness 扩展。
+Memory 内容策略、Skill 选择、Coding 工具集合和安全 Policy Pack 仍属于 Domain
+Harness 或独立模块。Base Harness 不扫描任意项目源码、不保存长期 Memory，也不把
+Plugin、SubAgent 或 Session 语义塞回 Core。
+
+`HarnessCapabilities` 是一次装配后的只读公开快照。装配顺序固定为：解析信任与来源，
+收集内置和已授权扩展，校验冲突/依赖，生成最终 System Prompt，创建 Agent 并冻结
+本次 Run 的能力。运行期间禁止 Reload；空闲 Reload 必须先在临时注册表验证，成功后
+整体替换。
 
 ## Harness 和 Policy 的关系
 

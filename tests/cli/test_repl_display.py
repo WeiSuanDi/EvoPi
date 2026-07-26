@@ -41,3 +41,13 @@ def test_repl_display_uses_one_rich_output_region_for_streaming_and_final_markdo
 
     assert stdout.getvalue() == ""
     assert "标题" in stderr.getvalue()
+
+
+def test_repl_display_prints_submitted_user_message_once(monkeypatch) -> None:
+    stderr = io.StringIO()
+    monkeypatch.setattr("evopi.cli.display.sys.stderr", stderr)
+    display = ReplDisplay()
+
+    display.show_user_message("只显示一次")
+
+    assert stderr.getvalue().count("只显示一次") == 1

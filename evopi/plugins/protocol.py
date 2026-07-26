@@ -123,10 +123,15 @@ class PluginAPI:
 
     def register_policy(self, policy: Policy) -> None:
         """Register a Policy that this plugin provides."""
+        policy.metadata["plugin_source"] = self.plugin_name
+        policy.metadata["plugin_version"] = self.plugin_version
         self.policies.append(policy)
 
     def load_policy_pack(self, pack: PolicyPack) -> None:
         """Register a complete PolicyPack."""
+        for policy in pack.policies:
+            policy.metadata["plugin_source"] = self.plugin_name
+            policy.metadata["plugin_version"] = self.plugin_version
         self.policy_packs.append(pack)
 
     # -- dependencies ---------------------------------------------------------

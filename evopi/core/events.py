@@ -30,6 +30,15 @@ CoreEventType: TypeAlias = Literal[
     "session_start",
     "session_checkpoint",
     "session_error",
+    "session_leaf_selected",
+    "session_compaction_start",
+    "session_compaction_end",
+    "session_compaction_error",
+    "memory_write_start",
+    "memory_write_end",
+    "memory_write_error",
+    "skills_selected",
+    "plugin_reload",
     "error",
 ]
 

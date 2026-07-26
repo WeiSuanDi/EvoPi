@@ -5,18 +5,24 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from evopi.core.agent import Agent
 from evopi.core.agent_loop import BeforeToolCallResult
-from evopi.core.cancellation import AbortSignal, call_with_optional_signal
+from evopi.core.cancellation import (
+    AbortController,
+    AbortSignal,
+    call_with_optional_signal,
+)
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import (
     AssistantMessage,
     Message,
+    SystemMessage,
     ToolResultMessage,
     UserMessage,
 )
@@ -24,6 +30,7 @@ from evopi.core.model import Model
 from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool, ToolCall, ToolResult
 from evopi.harness.context_manager import ContextManager, ContextProvider
+from evopi.harness.capabilities import HarnessCapabilities
 from evopi.harness.confirmation import (
     ConfirmationHandler,
     ConfirmationRequest,
@@ -44,7 +51,6 @@ from evopi.session import (
 )
 from evopi.session.compact import (
     DEFAULT_COMPACTION_SETTINGS,
-    CompactionError,
     CompactionSettings,
     assemble_context,
     compact_session,
@@ -56,6 +62,36 @@ from evopi.trace.events import TraceRecord
 from evopi.trace.writer import JsonlTraceWriter
 
 _logger = logging.getLogger(__name__)
+
+
+def _plugin_candidate_root(entrypoint: Path) -> Path:
+    for directory in (entrypoint.parent, *entrypoint.parents):
+        if (directory / "evopi-plugin.json").is_file():
+            return directory
+    raise RuntimeError(f"Approved Plugin manifest not found for {entrypoint}")
+
+
+def _approved_plugin_override_capabilities(
+    workspace: Path,
+    paths: list[str | Path],
+) -> dict[str, frozenset[str]]:
+    from evopi.plugins import approved_plugin_entrypoints, review_plugin
+
+    approved = {
+        path.expanduser().resolve()
+        for path in approved_plugin_entrypoints(workspace)
+    }
+    capabilities: dict[str, frozenset[str]] = {}
+    for raw_path in paths:
+        entrypoint = Path(raw_path).expanduser().resolve()
+        if entrypoint not in approved:
+            continue
+        report = review_plugin(_plugin_candidate_root(entrypoint))
+        if report.passed:
+            capabilities[report.candidate.name] = frozenset(
+                report.candidate.manifest.requested_capabilities
+            )
+    return capabilities
 
 
 class PolicyBlockedError(RuntimeError):
@@ -80,10 +116,14 @@ class BaseHarness:
         compaction_settings: CompactionSettings | None = None,
         plugin_paths: list[str | Path] | None = None,
         enabled_plugins: set[str] | None = None,
+        memory_enabled: bool = False,
+        skills_enabled: bool = False,
+        assembly_warnings: tuple[str, ...] = (),
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
         self.tool_timeout = tool_timeout
+        self.deadline = deadline
         self.compaction_settings = compaction_settings or DEFAULT_COMPACTION_SETTINGS
         self.tools = ToolManager()
         self.policies = PolicyManager(
@@ -92,9 +132,14 @@ class BaseHarness:
         self.context = ContextManager()
         self.lifecycle = Lifecycle()
         self.session = session_manager or SessionManager.in_memory()
+        self._memory_enabled = memory_enabled
+        self._skills_enabled = skills_enabled
+        self._assembly_warnings = assembly_warnings
+        self._run_started_at: float | None = None
+        self._internal_abort_controller: AbortController | None = None
 
         # Plugin system
-        from evopi.plugins import PluginLoader, wire_plugins
+        from evopi.plugins import PluginLoader, filtered_event_listener, wire_plugins
 
         _ws = (
             getattr(session_manager, "workspace", Path.cwd())
@@ -104,22 +149,34 @@ class BaseHarness:
         self.plugin_loader = PluginLoader(
             workspace=_ws,
             extra_paths=list(plugin_paths) if plugin_paths else None,
+            discover_defaults=False,
+        )
+        self._workspace = Path(_ws).expanduser().resolve()
+        self._plugin_override_capabilities = _approved_plugin_override_capabilities(
+            self._workspace,
+            list(plugin_paths or ()),
         )
         apis = wire_plugins(self.plugin_loader, enabled=enabled_plugins)
         self._pending_plugin_events: list[tuple[str, Any]] = []
         for api in apis:
             for tool in api.tools:
-                self.tools.register(tool, replace=True)
+                self.tools.register(tool)
             for policy in api.policies:
-                self.policies.register(policy, replace=True)
+                self.policies.register(policy)
             for pack in api.policy_packs:
-                self.policies.load_pack(pack)
+                for policy in pack.policies:
+                    self.policies.register(policy)
             self._pending_plugin_events.extend(api.events)
         # Collect commands from all plugins for CLI dispatch
         self._plugin_commands: dict[str, object] = {}
         for api in apis:
             for name, handler in api.commands:
+                if name in self._plugin_commands:
+                    raise ValueError(
+                        f"Plugin command '{name}' is registered more than once"
+                    )
                 self._plugin_commands[name] = handler
+        self._plugin_names = tuple(sorted(api.plugin_name for api in apis))
         self.trace_path = Path(trace_path).resolve() if trace_path is not None else None
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
         self.confirmation_handler = confirmation_handler
@@ -143,12 +200,28 @@ class BaseHarness:
         self.agent.messages.extend(self.session.messages)
         self.agent.subscribe(self._on_core_event)
         # Subscribe plugin event handlers
-        for _event_type, handler in self._pending_plugin_events:
-            self.agent.subscribe(handler)  # type: ignore[arg-type]
+        self._plugin_event_unsubscribers = [
+            self.agent.subscribe(filtered_event_listener(event_type, handler))
+            for event_type, handler in self._pending_plugin_events
+        ]
 
     @property
     def state(self):
         return self.lifecycle.state
+
+    @property
+    def capabilities(self) -> HarnessCapabilities:
+        """Return a read-only snapshot of the currently assembled capabilities."""
+
+        return HarnessCapabilities(
+            tool_names=tuple(sorted(tool.name for tool in self.tools.all())),
+            policy_names=tuple(sorted(policy.name for policy in self.policies.all())),
+            plugin_names=self._plugin_names,
+            command_names=tuple(sorted(self._plugin_commands)),
+            memory_enabled=self._memory_enabled,
+            skills_enabled=self._skills_enabled,
+            warnings=tuple(self.plugin_loader.errors) + self._assembly_warnings,
+        )
 
     @property
     def messages(self):
@@ -156,18 +229,63 @@ class BaseHarness:
 
     @property
     def signal(self) -> AbortSignal | None:
-        return self.agent.signal
+        if self.agent.signal is not None:
+            return self.agent.signal
+        if self._internal_abort_controller is not None:
+            return self._internal_abort_controller.signal
+        return None
 
     @property
     def is_running(self) -> bool:
         return self.agent.is_running
 
+    def plugin_can_override_tool(self, plugin_name: str, tool_name: str) -> bool:
+        return (
+            f"override_tool:{tool_name}"
+            in self._plugin_override_capabilities.get(plugin_name, frozenset())
+        )
+
+    @property
+    def remaining_deadline(self) -> float | None:
+        if self.deadline is None:
+            return None
+        if self._run_started_at is None:
+            return self.deadline
+        return max(0.0, self.deadline - (time.monotonic() - self._run_started_at))
+
     def abort(self) -> None:
         self.lifecycle.request_abort()
         self.agent.abort()
+        if self._internal_abort_controller is not None:
+            self._internal_abort_controller.abort()
 
     async def wait_for_idle(self) -> None:
         await self.agent.wait_for_idle()
+
+    def switch_session_leaf(self, leaf_id: str):
+        """Persist tree navigation and atomically replace the Agent transcript."""
+
+        if self.is_running:
+            raise RuntimeError("Cannot switch Session leaf while the Harness is running")
+        selected = self.session.switch_leaf(leaf_id)
+        restored: list[Message] = []
+        if self.system_prompt:
+            restored.append(SystemMessage(content=self.system_prompt))
+        restored.extend(self.session.messages)
+        self.agent.messages[:] = restored
+        if self.trace_writer is not None:
+            self.trace_writer.write(
+                TraceRecord(
+                    type="session_leaf_selected",
+                    data={
+                        "session_id": self.session.session_id,
+                        "entry_id": selected.entry_id,
+                        "target_entry_id": selected.parent_id,
+                        "from_entry_id": selected.from_entry_id,
+                    },
+                )
+            )
+        return selected
 
     def register_tool(self, tool: Tool, *, replace: bool = False) -> None:
         self.tools.register(tool, replace=replace)
@@ -190,12 +308,14 @@ class BaseHarness:
         self._runtime_fingerprint = self._build_runtime_fingerprint()
         self.session.compare_runtime(self._runtime_fingerprint)
         self.lifecycle.start()
+        self._run_started_at = time.monotonic()
         try:
             answer = await self.agent.prompt(content)
         except asyncio.CancelledError:
             await self._emit_pending_session_events()
             error = self.agent.last_run.error if self.agent.last_run is not None else None
             self.lifecycle.abort(error)
+            self._run_started_at = None
             raise
         except Exception as exc:
             await self._emit_pending_session_events()
@@ -205,6 +325,7 @@ class BaseHarness:
                 else "error"
             )
             self.lifecycle.fail(exc, end_reason=end_reason)
+            self._run_started_at = None
             raise
         await self._emit_pending_session_events()
         end_reason = (
@@ -224,6 +345,7 @@ class BaseHarness:
                 await self._maybe_compact()
             except Exception:
                 _logger.warning("Compaction check failed", exc_info=True)
+        self._run_started_at = None
         return answer
 
     def reset(self) -> None:
@@ -243,35 +365,109 @@ class BaseHarness:
             raise RuntimeError("Cannot close a running Harness")
         self.session.close()
 
+    def reload_plugins(self) -> HarnessCapabilities:
+        """Transactionally replace Plugin contributions from approved snapshots."""
+
+        if self.is_running:
+            raise RuntimeError("Cannot reload Plugins while the Harness is running")
+        from evopi.plugins import (
+            PluginLoader,
+            approved_plugin_entrypoints,
+            filtered_event_listener,
+            wire_plugins,
+        )
+
+        paths: list[str | Path] = list(
+            approved_plugin_entrypoints(self._workspace)
+        )
+        loader = PluginLoader(
+            workspace=self._workspace,
+            extra_paths=paths,
+            discover_defaults=False,
+        )
+        apis = wire_plugins(loader)
+        if loader.errors:
+            raise RuntimeError(
+                "Plugin reload validation failed: " + "; ".join(loader.errors)
+            )
+
+        old_plugin_names = set(self._plugin_names)
+        next_tools = ToolManager()
+        for tool in self.tools.all():
+            if tool.metadata.get("plugin_source") not in old_plugin_names:
+                next_tools.register(tool)
+        next_policies = PolicyManager(self.policies.approval_store)
+        for policy in self.policies.all():
+            if policy.metadata.get("plugin_source") not in old_plugin_names:
+                next_policies.register(policy)
+
+        override_capabilities = _approved_plugin_override_capabilities(
+            self._workspace,
+            paths,
+        )
+        commands: dict[str, object] = {}
+        pending_events: list[tuple[str, Any]] = []
+        for api in apis:
+            for tool in api.tools:
+                capability = f"override_tool:{tool.name}"
+                next_tools.register(
+                    tool,
+                    replace=(
+                        capability
+                        in override_capabilities.get(api.plugin_name, set())
+                    ),
+                )
+            for policy in api.policies:
+                next_policies.register(policy)
+            for pack in api.policy_packs:
+                for policy in pack.policies:
+                    next_policies.register(policy)
+            for name, handler in api.commands:
+                if name in commands:
+                    raise RuntimeError(
+                        f"Plugin command '{name}' is registered more than once"
+                    )
+                commands[name] = handler
+            pending_events.extend(api.events)
+
+        for unsubscribe in self._plugin_event_unsubscribers:
+            unsubscribe()
+        self.tools = next_tools
+        self.policies = next_policies
+        self.plugin_loader = loader
+        self._plugin_commands = commands
+        self._plugin_names = tuple(sorted(api.plugin_name for api in apis))
+        self._plugin_override_capabilities = override_capabilities
+        self._pending_plugin_events = pending_events
+        self._plugin_event_unsubscribers = [
+            self.agent.subscribe(filtered_event_listener(event_type, handler))
+            for event_type, handler in pending_events
+        ]
+        self.agent.tools = self.tools.all()
+        self._refresh_system_prompt_after_capability_change()
+        if self.trace_writer is not None:
+            self.trace_writer.write(
+                TraceRecord(
+                    type="plugin_reload",
+                    data={
+                        "plugins": list(self._plugin_names),
+                        "tools": [
+                            tool.name for tool in self.tools.all()
+                        ],
+                    },
+                )
+            )
+        return self.capabilities
+
+    def _refresh_system_prompt_after_capability_change(self) -> None:
+        """Domain Harness hook for capability-derived prompts."""
+
     async def _prepare_context(
         self,
         context: AgentContext,
         *,
         signal: AbortSignal | None = None,
     ) -> AgentContext:
-        # Apply compaction: find any CompactEntry in the session tree and
-        # replace compacted history with the summary.
-        for entry in reversed(list(self.session.get_active_path())):
-            if isinstance(entry, CompactEntry):
-                compacted_ids = set(entry.compacted_entry_ids)
-                summary = entry.summary
-                # Find the first message after the compaction point
-                first_kept = 0
-                for i, msg in enumerate(context.messages):
-                    if getattr(msg, "id", None) in compacted_ids:
-                        first_kept = max(first_kept, i + 1)
-                if first_kept > 0:
-                    assembled = assemble_context(
-                        list(context.messages),
-                        compact_summary=summary,
-                        first_kept_index=first_kept,
-                    )
-                    context = AgentContext(
-                        messages=list(assembled),
-                        tools=context.tools,
-                    )
-                break  # only process the latest compaction
-
         prepared = await self.context.prepare(context, signal=signal)
         evaluation = await self._evaluate(
             PolicyContext(
@@ -751,6 +947,49 @@ class BaseHarness:
         if not should_compact(context_tokens, context_window, settings):
             return
 
+        evaluation = await self._evaluate(
+            PolicyContext(
+                hook="before_session_compact",
+                agent_context=AgentContext(
+                    messages=list(self.agent.messages),
+                    tools=self.tools.all(),
+                ),
+                arguments={
+                    "context_tokens": context_tokens,
+                    "context_window": context_window,
+                    "reserve_tokens": settings.reserve_tokens,
+                    "keep_recent_tokens": settings.keep_recent_tokens,
+                },
+            )
+        )
+        if evaluation.final.action == "block":
+            _logger.warning(
+                "Compaction skipped by Policy: %s",
+                evaluation.final.reason or evaluation.final.action,
+            )
+            return
+        if evaluation.final.action == "require_confirmation":
+            request = ConfirmationRequest(
+                hook="before_session_compact",
+                reason=(
+                    evaluation.final.reason
+                    or "Session compaction requires confirmation"
+                ),
+                risk_level=evaluation.final.risk_level,
+                arguments=evaluation.arguments,
+                metadata={"session_id": self.session.session_id},
+            )
+            response = await self._request_confirmation(
+                request,
+                signal=self.signal,
+            )
+            if not response.approved:
+                _logger.warning(
+                    "Compaction confirmation denied: %s",
+                    response.reason,
+                )
+                return
+
         _logger.info(
             "Compaction triggered: %d tokens > %d window - %d reserve",
             context_tokens,
@@ -765,27 +1004,81 @@ class BaseHarness:
                 previous_summary = entry.summary
                 break
 
-        try:
-            summary, cut = await compact_session(
-                messages,
-                self.model,
-                settings,
-                previous_summary=previous_summary,
+        from evopi.harness.model_operation import GovernedModelOperation
+
+        operation = GovernedModelOperation(
+            parent=self,
+            model=self.model,
+            kind="session_compaction",
+            signal_controller=AbortController(
+                loop=asyncio.get_running_loop()
+            ),
+        )
+        self._internal_abort_controller = operation.signal_controller
+        parent_run_id = (
+            self.agent.last_run.run_id if self.agent.last_run is not None else None
+        )
+        await self.agent.emit_event(
+            CoreEvent(
+                type="session_compaction_start",
+                run_id=parent_run_id,
+                data={
+                    "operation_id": operation.operation_id,
+                    "context_tokens": context_tokens,
+                    "context_window": context_window,
+                    "reason": "threshold",
+                },
             )
-        except CompactionError:
+        )
+        try:
+            async with asyncio.timeout(120):
+                summary, cut = await compact_session(
+                    messages,
+                    operation,
+                    settings,
+                    previous_summary=previous_summary,
+                )
+        except Exception as exc:
+            await self.agent.emit_event(
+                CoreEvent(
+                    type="session_compaction_error",
+                    run_id=parent_run_id,
+                    data={
+                        "operation_id": operation.operation_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
             _logger.warning("Compaction summary generation failed; skipping")
             return
+        finally:
+            operation.signal_controller.signal._mark_notified()
+            self._internal_abort_controller = None
 
         # Insert a CompactEntry into the session.
-        if self.session.is_persistent and self.session.leaf_id is not None:
+        if self.session.leaf_id is not None:
             try:
                 self.session.compact(
                     up_to_entry_id=self.session.leaf_id,
                     summary=summary,
+                    compacted_ids=list(
+                        self.session.message_source_ids[: cut.first_kept_index]
+                    ),
                 )
                 _logger.info("Compaction entry written, tokens before=%d", context_tokens)
             except Exception:
                 _logger.warning("Failed to persist compaction entry", exc_info=True)
+                await self.agent.emit_event(
+                    CoreEvent(
+                        type="session_compaction_error",
+                        run_id=parent_run_id,
+                        data={
+                            "operation_id": operation.operation_id,
+                            "error": "Compaction entry persistence failed",
+                        },
+                    )
+                )
+                return
 
         # Apply compaction to the Agent's in-memory context so future turns
         # use the compacted view.
@@ -797,6 +1090,17 @@ class BaseHarness:
         # Keep system message(s) and replace the rest
         system_msgs = [m for m in self.agent.messages if m.role == "system"]
         self.agent.messages = system_msgs + list(assembled)
+        await self.agent.emit_event(
+            CoreEvent(
+                type="session_compaction_end",
+                run_id=parent_run_id,
+                data={
+                    "operation_id": operation.operation_id,
+                    "context_tokens": context_tokens,
+                    "first_kept_index": cut.first_kept_index,
+                },
+            )
+        )
 
     @staticmethod
     def _policy_evaluation_data(

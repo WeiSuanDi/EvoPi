@@ -131,6 +131,33 @@ Use `--session-root PATH` or `EVOPI_SESSION_DIR` to override the default
 `~/.evopi/sessions/` location. Session notices and recovery warnings are written to stderr;
 model text remains on stdout.
 
+### Memory, skills, and sub-agents
+
+The Coding CLI enables workspace Memory at `.evopi/memory.json` by default. Use
+`--no-memory` for an ephemeral run or `--memory PATH` for an explicit store. Memory writes
+use strict versioned persistence, sensitive-content checks, Policy hooks, and Trace events.
+
+Skills are loaded from one explicit directory. Project Skills are considered only after
+Workspace Trust, malformed or duplicate documents are reported, and injection budgets prevent
+unbounded prompt growth. `--enable-subagent` exposes governed synchronous child runs; children
+inherit parent safety Policies, Confirmation, Abort/Deadline, and a non-expandable Tool ceiling.
+
+### Governed plugins
+
+Plugin review never imports candidate Python. Approval is bound to a SHA-256 digest, and active
+code is loaded from a content-addressed immutable snapshot:
+
+```bash
+evopi plugin review ./my-plugin --json
+evopi plugin approve ./my-plugin --trust-workspace
+evopi plugin list --json
+evopi plugin deny ./my-plugin
+```
+
+Project Plugins require both digest approval and Workspace Trust. REPL `/reload` validates
+dependencies and registration conflicts in temporary registries before atomically replacing the
+active Plugin capability set.
+
 ## Python API
 
 ```python
@@ -176,6 +203,11 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 `ToolResult.terminate` is a batch-level early-termination hint. EvoPi finishes every tool call requested by the current assistant message and skips the next model call only when every final result in the non-empty batch sets `terminate=True`. A blocked, denied, missing, or failed tool normally returns an error result and allows the model to explain it on the next turn.
 
 `Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
+
+Session logs use schema v2. Active-leaf changes are append-only facts, keeping the Harness
+transcript, Agent context, Checkpoint projection, and restart recovery aligned. Validated v1 logs
+are backed up and atomically migrated. Checkpoint messages are discarded whenever they disagree
+with the authoritative active path.
 
 Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
 

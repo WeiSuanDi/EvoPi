@@ -12,6 +12,7 @@ from evopi.policy.approval import (
     ApprovalRequiredError,
     ApprovalStore,
 )
+from evopi.policy.builtins import ToolConfirmationPolicy
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,39 @@ def test_strict_mode_allows_approved() -> None:
     )
     loaded = store.check("p", "1.0")
     loaded.raise_if_required("p", "1.0")  # does not raise
+
+
+def test_strict_policy_activation_requires_digest_bound_record() -> None:
+    policy = ToolConfirmationPolicy(tool_names={"shell_command"})
+    legacy = ApprovalStore(None, mode="strict")
+    legacy.add(
+        policy_name=policy.name,
+        policy_version=policy.version,
+        approved_by="tester",
+    )
+
+    with pytest.raises(ApprovalRequiredError):
+        legacy.check_policy(policy).raise_if_required(
+            policy.name,
+            policy.version,
+        )
+
+    bound = ApprovalStore(None, mode="strict")
+    bound.add_policy(policy, approved_by="tester")
+    bound.check_policy(policy).raise_if_required(policy.name, policy.version)
+
+
+def test_policy_digest_change_invalidates_same_version_approval() -> None:
+    policy = ToolConfirmationPolicy(tool_names={"shell_command"})
+    store = ApprovalStore(None, mode="strict")
+    store.add_policy(policy, approved_by="tester")
+    policy.description = "changed implementation contract"
+
+    with pytest.raises(ApprovalRequiredError):
+        store.check_policy(policy).raise_if_required(
+            policy.name,
+            policy.version,
+        )
 
 
 def test_warn_mode_does_not_raise_for_unapproved() -> None:
