@@ -95,6 +95,20 @@ class Agent:
         with self._active_guard:
             return self._active_run is not None
 
+    @property
+    def current_run_id(self) -> str | None:
+        """Run correlation ID while execution is active."""
+
+        return self._current_run_id if self.is_running else None
+
+    @property
+    def max_turns(self) -> int:
+        return self._loop.max_turns
+
+    @property
+    def retry_config(self) -> ModelRetryConfig:
+        return self._loop.retry_config
+
     def abort(self) -> None:
         """Request cancellation of the active run, if any."""
 

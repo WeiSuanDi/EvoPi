@@ -32,6 +32,7 @@ from evopi.session.tree import (
     BranchEntry,
     CheckpointEntry,
     CompactEntry,
+    LeafSelectedEntry,
     MessageEntry,
     RunEndEntry,
     RunStartEntry,
@@ -180,6 +181,7 @@ class SessionManager:
         self._entries: list[SessionEntry] = []
         self._entry_index: dict[str, SessionEntry] = {}
         self._messages: list[UserMessage | AssistantMessage | ToolResultMessage] = []
+        self._message_source_ids: list[str] = []
         self._last_checkpoint: SessionCheckpoint | None = None
         self._lock: _SessionFileLock | None = None
         self._closed = False
@@ -256,6 +258,11 @@ class SessionManager:
         manager._recovery = _RecoveryState(reason="open")
         try:
             header, entries, repaired = _read_session_file(path, repair=True)
+            if _session_file_version(path) == 1:
+                backup_path = _migrate_v1_session_file(path, header, entries)
+                manager._recovery.warnings.append(
+                    f"Session schema v1 was migrated to v2; backup: {backup_path}"
+                )
             manager.header = header
             manager._entries = entries
             manager._entry_index = {entry.entry_id: entry for entry in entries}
@@ -322,7 +329,7 @@ class SessionManager:
     def leaf_id(self) -> str | None:
         return self._active_leaf_id
 
-    def switch_leaf(self, leaf_id: str) -> None:
+    def switch_leaf(self, leaf_id: str) -> LeafSelectedEntry:
         """Switch the active position to any entry in the tree.
 
         The entry does not need to be a leaf — appending to an inner node
@@ -332,7 +339,23 @@ class SessionManager:
         normalized = _normalize_uuid(leaf_id, "leaf_id")
         if normalized not in self._entry_index:
             raise SessionError(f"Entry '{leaf_id}' does not exist")
+        previous = self._active_leaf_id
+        if previous is None:
+            raise SessionError("Cannot navigate an empty Session")
+        anchor = self._entry_index[normalized]
         self._active_leaf_id = normalized
+        entry = LeafSelectedEntry(
+            entry_id=new_id(),
+            parent_id=normalized,
+            run_id=getattr(anchor, "run_id", new_id()),
+            from_entry_id=previous,
+        )
+        try:
+            self._append_entry(entry)
+        except Exception:
+            self._active_leaf_id = previous
+            raise
+        return entry
 
     def leaves(self) -> tuple[str, ...]:
         """Return all leaf entry IDs (branch tips)."""
@@ -347,6 +370,12 @@ class SessionManager:
         self,
     ) -> tuple[UserMessage | AssistantMessage | ToolResultMessage, ...]:
         return tuple(self._messages)
+
+    @property
+    def message_source_ids(self) -> tuple[str, ...]:
+        """Tree Entry IDs backing the current projected messages."""
+
+        return tuple(self._message_source_ids)
 
     @property
     def last_checkpoint(self) -> SessionCheckpoint | None:
@@ -720,6 +749,7 @@ class SessionManager:
         self._entries.clear()
         self._entry_index.clear()
         self._messages.clear()
+        self._message_source_ids.clear()
         self._last_checkpoint = None
         self._recovery = _RecoveryState(reason="in_memory")
         self._broken = False
@@ -788,6 +818,9 @@ class SessionManager:
         self._active_leaf_id = entry.entry_id
         if isinstance(entry, MessageEntry):
             self._messages.append(entry.message)
+            self._message_source_ids.append(entry.entry_id)
+        elif isinstance(entry, (CompactEntry, LeafSelectedEntry)):
+            self._restore_messages()
 
     def _ensure_available(self) -> None:
         if self._closed:
@@ -819,9 +852,10 @@ class SessionManager:
 
     def _restore_messages(self) -> None:
         path = list(self.get_active_path())
-        messages: list[UserMessage | AssistantMessage | ToolResultMessage] = []
+        projected = _project_messages(path)
+        messages = [message for _, message in projected]
+        self._message_source_ids = [source_id for source_id, _ in projected]
         checkpoint: SessionCheckpoint | None = None
-        replay_start = 0
         checkpoint_entries = [
             (index, entry)
             for index, entry in enumerate(path)
@@ -861,34 +895,28 @@ class SessionManager:
                         raise SessionFormatError(
                             "Checkpoint active Entry is not an ancestor"
                         )
+                    expected = [
+                        message
+                        for _, message in _project_messages(
+                            path[: active_index + 1]
+                        )
+                    ]
+                    if not _checkpoint_messages_match(
+                        candidate.messages,
+                        expected,
+                    ):
+                        raise SessionFormatError(
+                            "Checkpoint messages do not match the active Session path"
+                        )
                     checkpoint = candidate
-                    messages = list(candidate.messages)
-                    replay_start = active_index + 1
                     break
                 except SessionFormatError as exc:
                     self._recovery.warnings.append(str(exc))
         if checkpoint is None:
             self._recovery.rebuilt_from_log = True
-            replay_start = 0
         else:
             self._last_checkpoint = checkpoint
             self._recovery.checkpoint_id = checkpoint.checkpoint_id
-        for replay_entry in path[replay_start:]:
-            if isinstance(replay_entry, MessageEntry):
-                messages.append(replay_entry.message)
-            elif isinstance(replay_entry, CompactEntry):
-                messages.append(
-                    UserMessage(
-                        content=(
-                            "<summary>\n"
-                            f"{replay_entry.summary}\n"
-                            "</summary>\n\n"
-                            "The above is a summary of the earlier conversation. "
-                            "Continue helping based on this context."
-                        ),
-                        metadata={"compaction_summary": True},
-                    )
-                )
         self._messages = messages
 
     def _recover_interrupted_run(self) -> None:
@@ -1131,6 +1159,72 @@ def _read_session_file(
     return header, entries, repaired
 
 
+def _session_file_version(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    version = value.get("schema_version")
+                    if isinstance(version, int) and not isinstance(version, bool):
+                        return version
+                break
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SessionFormatError(
+            f"Session schema version could not be read: {exc}"
+        ) from exc
+    raise SessionFormatError("Session header has no valid schema_version")
+
+
+def _migrate_v1_session_file(
+    path: Path,
+    header: SessionHeader,
+    entries: list[SessionEntry],
+) -> Path:
+    """Atomically rewrite one validated v1 log as v2 and preserve a backup."""
+
+    backup = path.with_name("session.v1.jsonl.bak")
+    temporary_backup = backup.with_name(f".{backup.name}.{new_id()}.tmp")
+    temporary_log = path.with_name(f".{path.name}.{new_id()}.tmp")
+    try:
+        original = path.read_bytes()
+        if not backup.exists():
+            with temporary_backup.open("xb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_backup, backup)
+            _make_private(backup, directory=False)
+        with temporary_log.open("xb") as handle:
+            handle.write(_json_line(header_to_dict(header)))
+            for entry in entries:
+                handle.write(_json_line(entry_to_dict(entry)))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_log, path)
+        _make_private(path, directory=False)
+        migrated_header, migrated_entries, _ = _read_session_file(
+            path,
+            repair=False,
+        )
+        if (
+            migrated_header.schema_version != 2
+            or any(entry.schema_version != 2 for entry in migrated_entries)
+        ):
+            raise SessionFormatError(
+                "migrated Session did not validate as schema v2"
+            )
+    except (OSError, SessionError) as exc:
+        temporary_backup.unlink(missing_ok=True)
+        temporary_log.unlink(missing_ok=True)
+        raise SessionPersistenceError(
+            f"Session v1 migration failed: {exc}"
+        ) from exc
+    return backup
+
+
 def _read_summary(path: Path) -> SessionSummary:
     try:
         header, entries, _ = _read_session_file(path, repair=False)
@@ -1167,6 +1261,81 @@ def _read_summary(path: Path) -> SessionSummary:
             last_run_reason=None,
             error=str(exc),
         )
+
+
+def _project_messages(
+    path: list[SessionEntry],
+) -> list[tuple[str, UserMessage | AssistantMessage | ToolResultMessage]]:
+    projected: list[
+        tuple[str, UserMessage | AssistantMessage | ToolResultMessage]
+    ] = []
+    for entry in path:
+        if isinstance(entry, MessageEntry):
+            projected.append((entry.entry_id, entry.message))
+            continue
+        if not isinstance(entry, CompactEntry):
+            continue
+        compacted = set(entry.compacted_entry_ids)
+        positions = [
+            index
+            for index, (source_id, _message) in enumerate(projected)
+            if source_id in compacted
+        ]
+        insert_at = min(positions) if positions else len(projected)
+        projected = [
+            item for item in projected if item[0] not in compacted
+        ]
+        projected.insert(
+            insert_at,
+            (
+                entry.entry_id,
+                UserMessage(
+                    content=(
+                        "<summary>\n"
+                        f"{entry.summary}\n"
+                        "</summary>\n\n"
+                        "The above is a summary of the earlier conversation. "
+                        "Continue helping based on this context."
+                    ),
+                    metadata={"compaction_summary": True},
+                ),
+            ),
+        )
+    return projected
+
+
+def _checkpoint_messages_match(
+    candidate: tuple[
+        UserMessage | AssistantMessage | ToolResultMessage,
+        ...,
+    ],
+    expected: list[UserMessage | AssistantMessage | ToolResultMessage],
+) -> bool:
+    if len(candidate) != len(expected):
+        return False
+    for cached, authoritative in zip(candidate, expected):
+        if cached.role != authoritative.role or cached.content != authoritative.content:
+            return False
+        if authoritative.metadata.get("compaction_summary"):
+            if not cached.metadata.get("compaction_summary"):
+                return False
+        elif cached.id != authoritative.id:
+            return False
+        if isinstance(authoritative, AssistantMessage):
+            if not isinstance(cached, AssistantMessage):
+                return False
+            if cached.tool_calls != authoritative.tool_calls:
+                return False
+        if isinstance(authoritative, ToolResultMessage):
+            if not isinstance(cached, ToolResultMessage):
+                return False
+            if (
+                cached.tool_call_id != authoritative.tool_call_id
+                or cached.tool_name != authoritative.tool_name
+                or cached.is_error != authoritative.is_error
+            ):
+                return False
+    return True
 
 
 def _resolve_session_reference(reference: str | Path, root: Path) -> Path:

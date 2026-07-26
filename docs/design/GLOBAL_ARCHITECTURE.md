@@ -280,3 +280,17 @@ Trace 驱动经验沉淀
 Supervisor Agent 隔离验证
 Human Confirmation 最终上车
 ```
+
+## 运行时资源治理
+
+可执行扩展与软性资源采用不同信任链：
+
+```text
+Policy / Plugin → Candidate → Review → digest-bound Activation → immutable snapshot
+Skill / Prompt  → Workspace Trust → protected write → Trace
+```
+
+Plugin 发现阶段不得 import 候选 Python。项目 Plugin 同时需要摘要批准和 Workspace
+Trust；源码变化只产生 stale 状态，运行时继续使用已批准快照。SubAgent 是父 Harness
+的受治理子运行，安全 Policy、Confirmation、Abort、Deadline 与 Tool capability
+ceiling 均不可弱化。

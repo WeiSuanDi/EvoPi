@@ -130,6 +130,31 @@ evopi session list --all --json
 `~/.evopi/sessions/`。Session 信息与恢复 warning 写入 stderr，模型文本继续写入
 stdout。
 
+### Memory、Skills 与 SubAgent
+
+Coding CLI 默认启用工作区 `.evopi/memory.json`。可用 `--no-memory` 临时关闭，或用
+`--memory PATH` 指定存储。Memory 写入经过版本化严格持久化、敏感信息检查、Policy
+Hook 与 Trace 事件，不会在写盘失败时谎报成功。
+
+Skills 只从一个明确目录加载。项目 Skill 必须先获得 Workspace Trust；损坏、重复或
+非法文档会明确报告，注入预算限制 Prompt 膨胀。`--enable-subagent` 开放受治理的
+同步子运行；子级继承父级安全 Policy、Confirmation、Abort/Deadline 和 Tool ceiling。
+
+### 受治理 Plugin
+
+Plugin 审查不会 import 候选 Python。批准记录绑定 SHA-256，运行时代码来自内容寻址的
+不可变快照：
+
+```bash
+evopi plugin review ./my-plugin --json
+evopi plugin approve ./my-plugin --trust-workspace
+evopi plugin list --json
+evopi plugin deny ./my-plugin
+```
+
+项目 Plugin 同时需要摘要批准与 Workspace Trust。REPL `/reload` 会先在临时注册表
+校验依赖和注册冲突，全部成功后才原子替换活动能力集。
+
 ## Python API
 
 ```python
@@ -175,6 +200,10 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 `ToolResult.terminate` 是工具批次级的早停提示。EvoPi 会完成当前 AssistantMessage 请求的所有工具；只有非空批次中的每个最终结果都设置 `terminate=True`，才跳过下一次模型调用。Policy 阻断、确认拒绝、工具缺失或执行失败通常会返回错误结果，并允许模型在下一轮作出解释。
 
 `Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。
+
+Session Log 使用 schema v2。活动叶切换本身也是追加式事实，因此 Harness transcript、
+Agent Context、Checkpoint 投影与重启恢复保持一致。通过验证的 v1 日志会先备份再原子
+迁移；Checkpoint 消息与活动路径不一致时会被丢弃并从事实日志重建。
 
 运行中的任务可以通过 `Agent.abort()` 或 `BaseHarness.abort()` 协作式中止。该调用是同步、线程安全、幂等的，空闲时调用不会产生影响。模型流与异步工具会被取消，运行中的 Shell 进程树会被终止；当前批次中每个已请求的兄弟工具仍会获得可关联的错误结果。已经产生的模型文本会保留，未完成的工具调用不会写入正式消息，而是保存在诊断元数据中。应用可以通过 `signal`、`is_running` 和 `wait_for_idle()` 接入自己的生命周期。
 

@@ -6,10 +6,12 @@ import asyncio
 
 import pytest
 
+from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage, UserMessage
 from evopi.core.stream import ModelComplete
 from evopi.core.tool import Tool
 from evopi.subagents import (
+    GovernanceEnvelope,
     SubAgentError,
     SubAgentManager,
     SubAgentResult,
@@ -140,10 +142,10 @@ def test_manager_resolves_allowed_tools() -> None:
     manager = SubAgentManager(_EchoModel(), tools=[tool])
     scope = SubAgentScope(
         messages=[UserMessage(content="read something")],
-        tool_names=["read", "nonexistent"],  # nonexistent is silently dropped
+        tool_names=["read", "nonexistent"],
     )
-    result = asyncio.run(manager.run(scope))
-    assert result.success
+    with pytest.raises(SubAgentError, match="not available"):
+        asyncio.run(manager.run(scope))
 
 
 def test_manager_sets_task_id() -> None:
@@ -164,3 +166,39 @@ def test_manager_counts_tool_calls() -> None:
     scope = SubAgentScope(messages=[UserMessage(content="hi")])
     result = asyncio.run(manager.run(scope))
     assert result.tool_calls_made == 0
+
+
+def test_manager_adds_the_task_user_message_only_once() -> None:
+    class RecordingModel(_EchoModel):
+        def __init__(self) -> None:
+            super().__init__("done")
+            self.contexts: list[AgentContext] = []
+
+        def stream(self, context):
+            self.contexts.append(context)
+            return super().stream(context)
+
+    model = RecordingModel()
+    manager = SubAgentManager(model)
+    scope = SubAgentScope(messages=[UserMessage(content="one task")])
+
+    asyncio.run(manager.run(scope))
+
+    users = [message for message in model.contexts[0].messages if message.role == "user"]
+    assert [message.content for message in users] == ["one task"]
+
+
+def test_governance_envelope_rejects_tools_above_parent_ceiling() -> None:
+    tool = Tool(name="shell_command", description="shell", parameters={}, handler=lambda: "ok")
+    manager = SubAgentManager(
+        _EchoModel(),
+        tools=[tool],
+        governance=GovernanceEnvelope(allowed_tool_names=frozenset({"read_file"})),
+    )
+    scope = SubAgentScope(
+        messages=[UserMessage(content="run")],
+        tool_names=["shell_command"],
+    )
+
+    with pytest.raises(SubAgentError, match="capability ceiling"):
+        asyncio.run(manager.run(scope))

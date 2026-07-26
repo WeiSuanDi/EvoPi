@@ -3,9 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from evopi.core.cancellation import AbortSignal
 from evopi.core.messages import Message
+from evopi.policy.types import Policy
+
+if TYPE_CHECKING:
+    from evopi.harness.confirmation import ConfirmationHandler
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class GovernanceEnvelope:
+    """Parent-owned safety ceiling inherited by a child Harness."""
+
+    allowed_tool_names: frozenset[str] | None = None
+    required_policies: tuple[Policy, ...] = ()
+    confirmation_handler: ConfirmationHandler | None = None
+    parent_signal: AbortSignal | None = None
+    parent_run_id: str | None = None
+    parent_tool_call_id: str | None = None
+    deadline: float | None = None
+    tool_timeout: float | None = None
+    max_turns: int | None = None
+    depth: int = 0
+    max_depth: int = 1
 
 
 @dataclass(slots=True, kw_only=True)
@@ -34,4 +56,4 @@ class SubAgentScope:
         )
 
 
-__all__ = ["SubAgentScope"]
+__all__ = ["GovernanceEnvelope", "SubAgentScope"]

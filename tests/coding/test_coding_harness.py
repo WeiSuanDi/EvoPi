@@ -28,6 +28,33 @@ def approve(request: ConfirmationRequest) -> ConfirmationResponse:
     return ConfirmationResponse(request_id=request.id, decision="approve")
 
 
+def test_coding_harness_prompt_describes_final_active_tools(tmp_path) -> None:
+    harness = CodingHarness(
+        model=ScriptedModel([AssistantMessage(content="done", stop_reason="stop")]),
+        workspace=tmp_path,
+    )
+
+    assert "## Available Tools" in harness.system_prompt
+    for tool_name in harness.capabilities.tool_names:
+        assert f"`{tool_name}`" in harness.system_prompt
+
+
+def test_corrupt_memory_disables_memory_without_blocking_harness(tmp_path) -> None:
+    memory_path = tmp_path / ".evopi" / "memory.json"
+    memory_path.parent.mkdir()
+    memory_path.write_text("{broken", encoding="utf-8")
+
+    harness = CodingHarness(
+        model=ScriptedModel([AssistantMessage(content="done", stop_reason="stop")]),
+        workspace=tmp_path,
+        memory_path=memory_path,
+    )
+
+    assert harness.capabilities.memory_enabled is False
+    assert "remember" not in harness.capabilities.tool_names
+    assert any("Memory disabled" in warning for warning in harness.capabilities.warnings)
+
+
 def test_coding_harness_writes_runs_and_traces_demo(tmp_path) -> None:
     command = f'"{sys.executable}" hello.py'
     model = ScriptedModel(

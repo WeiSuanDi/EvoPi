@@ -21,7 +21,8 @@ from evopi.core.model_errors import ModelErrorInfo, ModelErrorKind
 from evopi.core.tool import ToolCall
 from evopi.session.errors import SessionFormatError, SessionSerializationError
 
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 2
+LEGACY_SESSION_SCHEMA_VERSION = 1
 
 SessionRunEndReason: TypeAlias = Literal[
     "completed",
@@ -39,6 +40,7 @@ SessionEntryType: TypeAlias = Literal[
     "checkpoint",
     "branch",
     "compact",
+    "leaf_selected",
 ]
 
 
@@ -155,9 +157,20 @@ class CompactEntry:
     type: Literal["compact"] = field(default="compact", init=False)
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LeafSelectedEntry:
+    entry_id: str
+    parent_id: str | None
+    run_id: str
+    from_entry_id: str
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = SESSION_SCHEMA_VERSION
+    type: Literal["leaf_selected"] = field(default="leaf_selected", init=False)
+
+
 SessionEntry: TypeAlias = (
     RunStartEntry | MessageEntry | RunEndEntry | CheckpointEntry
-    | BranchEntry | CompactEntry
+    | BranchEntry | CompactEntry | LeafSelectedEntry
 )
 
 
@@ -225,6 +238,8 @@ def entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
     elif isinstance(entry, CompactEntry):
         base["summary"] = entry.summary
         base["compacted_entry_ids"] = list(entry.compacted_entry_ids)
+    elif isinstance(entry, LeafSelectedEntry):
+        base["from_entry_id"] = entry.from_entry_id
     return base
 
 
@@ -335,6 +350,16 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             run_id=run_id,
             summary=summary,
             compacted_entry_ids=tuple(compacted),
+        )
+    if entry_type == "leaf_selected":
+        return LeafSelectedEntry(
+            entry_id=entry_id,
+            parent_id=parent_id,
+            created_at=created_at,
+            run_id=run_id,
+            from_entry_id=_require_id(
+                value.get("from_entry_id"), "leaf_selected.from_entry_id"
+            ),
         )
     raise SessionFormatError(f"unsupported Session entry type: {entry_type!r}")
 
@@ -541,10 +566,10 @@ def json_value(value: Any, *, path: str = "metadata") -> Any:
 
 def _require_version(value: Mapping[str, Any]) -> None:
     version = value.get("schema_version")
-    if version != SESSION_SCHEMA_VERSION:
+    if version not in {LEGACY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
         raise SessionFormatError(
             f"unsupported Session schema_version {version!r}; "
-            f"expected {SESSION_SCHEMA_VERSION}"
+            f"expected {LEGACY_SESSION_SCHEMA_VERSION} or {SESSION_SCHEMA_VERSION}"
         )
 
 
@@ -621,6 +646,8 @@ __all__ = [
     "BranchEntry",
     "CheckpointEntry",
     "CompactEntry",
+    "LeafSelectedEntry",
+    "LEGACY_SESSION_SCHEMA_VERSION",
     "MessageEntry",
     "RunEndEntry",
     "RunStartEntry",

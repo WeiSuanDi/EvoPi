@@ -11,13 +11,22 @@ and can optionally persist to a JSON file.
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from collections.abc import Iterator
+from typing import Any, BinaryIO, Mapping
 from uuid import uuid4
 
+MEMORY_SCHEMA_VERSION = 1
+
+
+class MemoryPersistenceError(RuntimeError):
+    """Raised when Memory cannot be loaded or durably persisted."""
 
 # ---------------------------------------------------------------------------
 # MemoryEntry
@@ -46,12 +55,32 @@ class MemoryEntry:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MemoryEntry:
+        entry_id = data.get("id")
+        content = data.get("content")
+        tags = data.get("tags", [])
+        created_at = data.get("created_at")
+        metadata = data.get("metadata", {})
+        if not isinstance(entry_id, str) or not entry_id:
+            raise ValueError("Memory entry id must be a non-empty string")
+        if not isinstance(content, str):
+            raise ValueError("Memory entry content must be a string")
+        if not isinstance(tags, list) or any(
+            not isinstance(tag, str) for tag in tags
+        ):
+            raise ValueError("Memory entry tags must be an array of strings")
+        if not isinstance(created_at, str):
+            raise ValueError("Memory entry created_at must be a string")
+        if not isinstance(metadata, dict):
+            raise ValueError("Memory entry metadata must be an object")
+        parsed_at = datetime.fromisoformat(created_at)
+        if parsed_at.tzinfo is None:
+            raise ValueError("Memory entry created_at must include timezone")
         return cls(
-            id=data["id"],
-            content=data["content"],
-            tags=list(data.get("tags", [])),
-            created_at=datetime.fromisoformat(data["created_at"]),
-            metadata=dict(data.get("metadata", {})),
+            id=entry_id,
+            content=content,
+            tags=list(tags),
+            created_at=parsed_at,
+            metadata=dict(metadata),
         )
 
 
@@ -82,8 +111,16 @@ class MemoryStore:
 
     def add(self, entry: MemoryEntry) -> MemoryEntry:
         with self._lock:
+            previous = self._entries.get(entry.id)
             self._entries[entry.id] = entry
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                if previous is None:
+                    self._entries.pop(entry.id, None)
+                else:
+                    self._entries[entry.id] = previous
+                raise
         return entry
 
     def get(self, entry_id: str) -> MemoryEntry | None:
@@ -111,7 +148,7 @@ class MemoryStore:
         contain any query word (case-insensitive).  When *tags* is provided,
         only entries matching at least one tag are considered.
         """
-        words = [w.lower() for w in query.split() if len(w) >= 2]
+        words = _query_terms(query)
         results: list[MemoryEntry] = []
         with self._lock:
             candidates = list(self._entries.values())
@@ -155,14 +192,26 @@ class MemoryStore:
     def _save(self) -> None:
         if self._path is None:
             return
+        temporary = self._path.with_name(f".{self._path.name}.{uuid4().hex}.tmp")
         try:
-            data = [entry.to_dict() for entry in self._entries.values()]
+            data = {
+                "schema_version": MEMORY_SCHEMA_VERSION,
+                "entries": [entry.to_dict() for entry in self._entries.values()],
+            }
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self._path)
-        except OSError:
-            pass  # best-effort persistence
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            with _memory_file_lock(self._path.with_suffix(self._path.suffix + ".lock")):
+                os.replace(temporary, self._path)
+        except MemoryPersistenceError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            temporary.unlink(missing_ok=True)
+            raise MemoryPersistenceError(f"memory could not be persisted: {exc}") from exc
 
     def _load(self) -> None:
         if self._path is None or not self._path.exists():
@@ -170,11 +219,77 @@ class MemoryStore:
         try:
             text = self._path.read_text(encoding="utf-8")
             raw = json.loads(text)
-            for item in raw:
+            if isinstance(raw, list):
+                items = raw
+            elif (
+                isinstance(raw, dict)
+                and raw.get("schema_version") == MEMORY_SCHEMA_VERSION
+                and isinstance(raw.get("entries"), list)
+            ):
+                items = raw["entries"]
+            else:
+                raise MemoryPersistenceError("invalid memory file schema")
+            for item in items:
                 entry = MemoryEntry.from_dict(item)
                 self._entries[entry.id] = entry
-        except (json.JSONDecodeError, KeyError, OSError):
+        except MemoryPersistenceError:
+            raise
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
+            raise MemoryPersistenceError(f"invalid memory file: {exc}") from exc
+
+
+def _query_terms(query: str) -> list[str]:
+    lowered = query.casefold()
+    terms = [word for word in re.findall(r"[\w.-]+", lowered) if len(word) >= 2]
+    cjk_runs = re.findall(r"[\u3400-\u9fff]+", lowered)
+    for run in cjk_runs:
+        terms.extend(run[index : index + 2] for index in range(len(run) - 1))
+    return list(dict.fromkeys(terms))
+
+
+@contextmanager
+def _memory_file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle: BinaryIO = path.open("a+b")
+    try:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import importlib
+
+            fcntl: Any = importlib.import_module("fcntl")
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    except OSError as exc:
+        raise MemoryPersistenceError(
+            f"Memory is locked by another process: {path}"
+        ) from exc
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import importlib
+
+                fcntl = importlib.import_module("fcntl")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
             pass
+        handle.close()
 
 
-__all__ = ["MemoryEntry", "MemoryStore"]
+__all__ = [
+    "MEMORY_SCHEMA_VERSION",
+    "MemoryEntry",
+    "MemoryPersistenceError",
+    "MemoryStore",
+]

@@ -4,6 +4,7 @@ from evopi.policy.approval import (
     ApprovalRecord,
     ApprovalRequiredError,
     ApprovalStore,
+    policy_digest,
 )
 from evopi.policy.decisions import PolicyDecision, PolicyEvaluation
 from evopi.policy.engine import PolicyEngine
@@ -16,6 +17,7 @@ __all__ = [
     "ApprovalRecord",
     "ApprovalRequiredError",
     "ApprovalStore",
+    "policy_digest",
     "HookName",
     "Policy",
     "PolicyContext",

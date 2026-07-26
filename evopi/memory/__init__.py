@@ -7,11 +7,14 @@ keyword-based with optional tag filtering.
 
 from evopi.memory.policy import MemoryWritePolicy
 from evopi.memory.retriever import MemoryRetriever, TagFilteredRetriever
-from evopi.memory.store import MemoryEntry, MemoryStore
+from evopi.memory.service import MemoryService
+from evopi.memory.store import MemoryEntry, MemoryPersistenceError, MemoryStore
 
 __all__ = [
     "MemoryEntry",
+    "MemoryPersistenceError",
     "MemoryRetriever",
+    "MemoryService",
     "MemoryStore",
     "MemoryWritePolicy",
     "TagFilteredRetriever",

@@ -26,6 +26,17 @@ class ReplDisplay:
     def set_status(self, text: str) -> None:
         self._status_text = text
 
+    def show_user_message(self, text: str) -> None:
+        """Render one committed user message after PromptToolkit clears its edit line."""
+
+        self.console.print(
+            Panel(
+                Text(text),
+                border_style="grey50",
+                padding=(0, 1),
+            )
+        )
+
     def start_run(self) -> None:
         self._text = ""
         self._tool_status = []

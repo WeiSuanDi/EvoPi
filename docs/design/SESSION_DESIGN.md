@@ -1,4 +1,4 @@
-# Session / Checkpoint v1 设计
+# Session / Checkpoint v2 设计
 
 ## 角色与层级
 
@@ -20,14 +20,19 @@ Session → Run → Turn → Model Attempt
 ## 事实来源与 Tree-ready Entry
 
 每个持久 Session 使用追加式 `session.jsonl` 作为事实来源。第一条是
-`SessionHeader`，之后是带独立 `schema_version=1`、UUID 与 UTC 时间的 Entry：
+`SessionHeader`，之后是带独立 `schema_version=2`、UUID 与 UTC 时间的 Entry：
 
 ```text
 run_start → message* → run_end → checkpoint
+                         ├→ branch
+                         ├→ compact
+                         └→ leaf_selected
 ```
 
-Entry 通过 `entry_id / parent_id` 构成树。v1 只追加到单一活动叶子，不提供 branch、
-fork 或 active-leaf 切换，但数据协议不需要为这些能力重新定义父子关系。
+Entry 通过 `entry_id / parent_id` 构成树。`LeafSelectedEntry` 的 `parent_id` 指向
+目标叶，`from_entry_id` 记录切换前位置；选择事件本身不进入模型消息，但成为新的
+活动位置。`SessionManager.messages` 始终从当前活动叶沿父链重建，绝不返回全局累计
+消息。
 
 `message` Entry 只保存已经提交到 AgentContext 的 `UserMessage`、
 `AssistantMessage` 和 `ToolResultMessage`。System Prompt、模型、工具、Policy 和
@@ -72,7 +77,8 @@ Checkpoint 是每个 Run 结束后的不可变恢复投影，不是第二份事�
 - Harness、模型、System Prompt、工具定义和 Policy 描述的运行时指纹；
 - 快照校验信息。
 
-快照先原子写入临时文件、校验并替换到最终路径，再向 Session Log 追加
+快照中的消息只是缓存。加载时必须与活动路径的消息 ID、顺序、角色和工具关联一致；
+不一致就丢弃并从日志重建。快照先原子写入临时文件、校验并替换到最终路径，再向 Session Log 追加
 `checkpoint` Entry。快照缺失或校验失败时，加载器依次尝试更旧的 Checkpoint，
 最终从 Session Log 全量重建。
 
@@ -130,8 +136,22 @@ evopi session list --all --json
 Session 信息与 warning 写 stderr，模型文本继续写 stdout。`reset()` 创建并绑定新
 Session；`close()` 释放锁，运行中禁止关闭。
 
-## 隐私与 v1 边界
+## v1 迁移
+
+打开 v1 日志时先在持锁状态下做完整结构验证，再生成只读
+`session.v1.jsonl.bak`，将 Header 和 Entry 原子重写为 v2 并重新校验。旧 Checkpoint
+不作为 v2 上下文事实；恢复优先从日志重建，后续 Run 生成新的 v2 Checkpoint。
+
+## Compaction
+
+Compaction 只处理当前活动路径，并保持 ToolCall / ToolResult 关系完整。Run 成功或主动
+终止后先做轻量 token 阈值检查；低于阈值零模型调用。触发时同步执行
+`before_session_compact` Policy、可选 Confirmation、Provider Retry、Abort 与 120 秒
+墙钟上限，并记录 `session_compaction_start/end/error`。失败或阻断不会写
+`CompactEntry`，也不改变已完成 Run。
+
+## 隐私与 v2 边界
 
 Session 和 Checkpoint 是本地明文，可能包含 Prompt、模型回复与工具输出。用户应像
-保护 Trace 一样保护 Session 根目录。v1 不做自动脱敏、加密、远程存储、删除/重命名、
-Checkpoint GC、compact、branch/fork、运行中恢复或工具幂等重放。
+保护 Trace 一样保护 Session 根目录。v2 不做自动脱敏、加密、远程存储、删除/重命名、
+Checkpoint GC、branch merge、运行中继续执行或工具幂等重放。

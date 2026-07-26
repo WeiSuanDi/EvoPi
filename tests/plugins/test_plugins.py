@@ -14,6 +14,7 @@ from evopi.plugins import (
     PluginLoader,
     PluginMetadata,
     discover_plugin_paths,
+    filtered_event_listener,
     load_plugin,
     wire_plugins,
 )
@@ -122,6 +123,21 @@ def test_require_records_dependencies() -> None:
     api.require("other", ">=1.0")
     assert len(api._declared_deps) == 1
     assert api._declared_deps[0] == ("other", ">=1.0")
+
+
+def test_filtered_event_listener_ignores_other_event_types() -> None:
+    from evopi.core.events import CoreEvent
+
+    seen: list[str] = []
+    listener = filtered_event_listener(
+        "agent_start",
+        lambda event: seen.append(event.type),
+    )
+
+    listener(CoreEvent(type="turn_start"))
+    listener(CoreEvent(type="agent_start"))
+
+    assert seen == ["agent_start"]
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +272,25 @@ class DepPlugin(Plugin):
     assert len(loader.errors) == 1
     assert "missing" in loader.errors[0]
     assert len(loader.plugins) == 1  # still loaded
+    assert wire_plugins(loader) == []
+
+
+def test_runtime_dependency_must_be_satisfied(workspace: Path) -> None:
+    d = workspace / ".evopi" / "plugins"
+    _write_plugin(d, "dependent", """
+from evopi.plugins import Plugin, PluginAPI, PluginMetadata
+class DepPlugin(Plugin):
+    @property
+    def meta(self) -> PluginMetadata:
+        return PluginMetadata(name="dependent")
+    def register(self, api: PluginAPI) -> None:
+        api.require("missing")
+""")
+
+    loader = PluginLoader(workspace, root=_root(workspace))
+
+    assert wire_plugins(loader) == []
+    assert "runtime dependencies" in loader.errors[-1]
 
 
 def test_loader_extra_paths(workspace: Path, tmp_path: Path) -> None:

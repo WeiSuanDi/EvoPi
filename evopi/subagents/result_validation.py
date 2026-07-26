@@ -22,6 +22,7 @@ class SubAgentResult:
     end_reason: AgentEndReason = "completed"
     messages: list[Message] = field(default_factory=list)
     tool_calls_made: int = 0
+    used_tool_names: tuple[str, ...] = ()
     turns_used: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -46,6 +47,7 @@ def validate_subagent_result(
             end_reason=result.end_reason,
             messages=result.messages,
             tool_calls_made=result.tool_calls_made,
+            used_tool_names=result.used_tool_names,
             turns_used=result.turns_used,
             metadata=dict(result.metadata),
         )
@@ -58,10 +60,24 @@ def validate_subagent_result(
             end_reason=result.end_reason,
             messages=result.messages,
             tool_calls_made=result.tool_calls_made,
+            used_tool_names=result.used_tool_names,
             turns_used=result.turns_used,
             metadata=dict(result.metadata),
         )
 
+    if allowed_tools is not None:
+        unexpected = sorted(set(result.used_tool_names) - allowed_tools)
+        if unexpected:
+            return SubAgentResult(
+                content=f"Sub-agent used tools outside its capability ceiling: {unexpected}",
+                success=False,
+                end_reason="error",
+                messages=result.messages,
+                tool_calls_made=result.tool_calls_made,
+                used_tool_names=result.used_tool_names,
+                turns_used=result.turns_used,
+                metadata=dict(result.metadata),
+            )
     return result
 
 

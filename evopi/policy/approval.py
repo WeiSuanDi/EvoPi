@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import inspect
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
+
+from evopi.policy.types import Policy
 
 _logger = logging.getLogger(__name__)
 
@@ -26,9 +32,21 @@ class ApprovalRecord:
     evidence: list[str] = field(default_factory=list)
     decision: ApprovalDecision = "approved"
     reason: str | None = None
+    artifact_digest: str | None = None
 
-    def matches(self, policy_name: str, policy_version: str) -> bool:
-        return self.policy_name == policy_name and self.policy_version == policy_version
+    def matches(
+        self,
+        policy_name: str,
+        policy_version: str,
+        artifact_digest: str | None = None,
+    ) -> bool:
+        identity_matches = (
+            self.policy_name == policy_name
+            and self.policy_version == policy_version
+        )
+        if artifact_digest is None:
+            return identity_matches
+        return identity_matches and self.artifact_digest == artifact_digest
 
 
 class ApprovalLoaded:
@@ -38,13 +56,28 @@ class ApprovalLoaded:
         self,
         record: ApprovalRecord | None,
         mode: ApprovalMode,
+        *,
+        digest_required: bool = False,
+        digest_mismatch: bool = False,
     ) -> None:
         self._record = record
         self._mode = mode
+        self._digest_required = digest_required
+        self._digest_mismatch = digest_mismatch
 
     @property
     def approved(self) -> bool:
-        return self._record is not None and self._record.decision == "approved"
+        if self._record is None or self._record.decision != "approved":
+            return False
+        if self._digest_mismatch:
+            return False
+        if (
+            self._digest_required
+            and self._mode == "strict"
+            and self._record.artifact_digest is None
+        ):
+            return False
+        return True
 
     @property
     def record(self) -> ApprovalRecord | None:
@@ -79,6 +112,18 @@ class ApprovalLoaded:
                     policy_name,
                     policy_version,
                 )
+        if (
+            self._mode == "warn"
+            and self._digest_required
+            and self._record is not None
+            and self._record.artifact_digest is None
+        ):
+            _logger.warning(
+                "Policy '%s@%s' uses a legacy approval without a digest; "
+                "upgrade the record before strict activation",
+                policy_name,
+                policy_version,
+            )
 
 
 class ApprovalRequiredError(RuntimeError):
@@ -120,6 +165,7 @@ class ApprovalStore:
         evidence: list[str] | None = None,
         decision: ApprovalDecision = "approved",
         reason: str | None = None,
+        artifact_digest: str | None = None,
         approved_at: datetime | None = None,
     ) -> ApprovalRecord:
         record = ApprovalRecord(
@@ -130,6 +176,7 @@ class ApprovalStore:
             evidence=evidence or [],
             decision=decision,
             reason=reason,
+            artifact_digest=artifact_digest,
         )
         key = self._key(policy_name, policy_version)
         if key in self._by_key:
@@ -149,6 +196,40 @@ class ApprovalStore:
         key = self._key(policy_name, policy_version)
         record = self._by_key.get(key)
         return ApprovalLoaded(record, self._mode)
+
+    def check_policy(self, policy: Policy) -> ApprovalLoaded:
+        digest = policy_digest(policy)
+        record = self._by_key.get(self._key(policy.name, policy.version))
+        mismatch = (
+            record is not None
+            and record.artifact_digest is not None
+            and record.artifact_digest != digest
+        )
+        return ApprovalLoaded(
+            record,
+            self._mode,
+            digest_required=True,
+            digest_mismatch=mismatch,
+        )
+
+    def add_policy(
+        self,
+        policy: Policy,
+        *,
+        approved_by: str,
+        evidence: list[str] | None = None,
+        decision: ApprovalDecision = "approved",
+        reason: str | None = None,
+    ) -> ApprovalRecord:
+        return self.add(
+            policy_name=policy.name,
+            policy_version=policy.version,
+            approved_by=approved_by,
+            evidence=evidence,
+            decision=decision,
+            reason=reason,
+            artifact_digest=policy_digest(policy),
+        )
 
     # ------------------------------------------------------------------
     # Internal
@@ -204,6 +285,7 @@ class ApprovalStore:
                 evidence=item.get("evidence", []),
                 decision=item.get("decision", "approved"),
                 reason=item.get("reason"),
+                artifact_digest=item.get("artifact_digest"),
             )
         except KeyError as exc:
             raise ApprovalRequiredError(
@@ -227,13 +309,53 @@ class ApprovalStore:
                     "evidence": record.evidence,
                     "decision": record.decision,
                     "reason": record.reason,
+                    "artifact_digest": record.artifact_digest,
                 }
             )
-        payload = {"approvals": items}
+        payload = {"schema_version": 2, "approvals": items}
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        temporary = self._path.with_name(
+            f".{self._path.name}.{uuid4().hex}.tmp"
         )
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            raise
+
+
+def policy_digest(policy: Policy) -> str:
+    """Bind approval to executable class source plus declared Policy contract."""
+
+    try:
+        source = inspect.getsource(type(policy))
+    except (OSError, TypeError):
+        source = f"{type(policy).__module__}.{type(policy).__qualname__}"
+    payload = {
+        "class": f"{type(policy).__module__}.{type(policy).__qualname__}",
+        "source": source,
+        "name": policy.name,
+        "version": policy.version,
+        "description": policy.description,
+        "hooks": sorted(policy.hooks),
+        "priority": policy.priority,
+        "source_kind": policy.source,
+        "risk_level": policy.risk_level,
+        "metadata": policy.metadata,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 __all__ = [
@@ -242,4 +364,5 @@ __all__ = [
     "ApprovalRecord",
     "ApprovalRequiredError",
     "ApprovalStore",
+    "policy_digest",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from evopi.harness.runtime_state import LifecycleState
 from evopi.policy.builtins import ShellSafetyPolicy
 from evopi.policy.decisions import PolicyDecision
 from evopi.policy.types import PolicyContext
+from evopi.session import SessionManager
 from evopi.trace.reader import read_trace
 
 
@@ -29,6 +31,48 @@ class ScriptedModel:
     async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
         self.contexts.append(context)
         yield ModelComplete(message=next(self._messages))
+
+
+def test_harness_exposes_read_only_capability_snapshot() -> None:
+    harness = BaseHarness(
+        model=ScriptedModel([AssistantMessage(content="done", stop_reason="stop")])
+    )
+    tool = Tool(
+        name="echo",
+        description="Echo",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda: "ok",
+    )
+
+    harness.register_tool(tool)
+
+    assert harness.capabilities.tool_names == ("echo",)
+    assert harness.capabilities.policy_names == ()
+    assert harness.capabilities.plugin_names == ()
+    assert harness.capabilities.memory_enabled is False
+    assert harness.capabilities.skills_enabled is False
+
+
+def test_base_harness_does_not_implicitly_import_workspace_plugins(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "imported.txt"
+    plugin_dir = tmp_path / ".evopi" / "plugins"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "unsafe.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    session = SessionManager.in_memory(tmp_path)
+
+    harness = BaseHarness(
+        model=ScriptedModel([AssistantMessage(content="done", stop_reason="stop")]),
+        session_manager=session,
+    )
+
+    assert not marker.exists()
+    assert harness.capabilities.plugin_names == ()
 
 
 @dataclass

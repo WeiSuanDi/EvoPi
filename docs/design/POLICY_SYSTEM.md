@@ -374,6 +374,20 @@ Finding 只保存案例 ID、工具名、Trace 行号、历史/候选 action 和
 Supervisor 的 `passed` 仅表示当前技术证据没有待处理项，不等于人工批准或已经启用。
 Human Approval、ApprovalRecord 和 Activation Gate 属于后续独立边界。
 
+## 通用 Artifact Activation
+
+`evopi.evolution` 为 Policy 与 Plugin 提供统一的摘要绑定激活协议：
+
+```text
+ArtifactCandidate(kind, name, version, source, risk, sha256)
+→ ActivationRecord(approved|denied, operator, evidence, reason)
+→ ActivationGate
+```
+
+旧 `ApprovalRecord` 仍可读取。warn 模式允许迁移期加载并记录 warning；strict 模式下
+Harness 注册 Policy 必须匹配当前实现摘要，同名同版本但源码或声明契约变化会失效。
+Plugin 额外复制到内容寻址不可变快照，批准不等于 OS 沙箱。
+
 ## Evo 边界
 
 EvoPi 的演进对象分层：

@@ -93,43 +93,17 @@ def _cmd_clear(harness: CodingHarness, parts: list[str], raw: str) -> None:
 
 
 def _cmd_reload(harness: CodingHarness, parts: list[str], raw: str) -> None:
-    """Reload plugins from disk without restarting."""
-    from evopi.plugins.loader import discover_plugin_paths, load_plugin
-    from evopi.plugins.protocol import PluginAPI
+    """Reload only through the Harness capability boundary."""
 
-    plugin_paths = discover_plugin_paths(
-        harness.session.workspace,
-        root=getattr(harness.session, "root", None),
-    )
-    new_count = 0
-    for path in plugin_paths:
-        name = path.stem if path.suffix == ".py" else path.name
-        if harness.plugin_loader.is_loaded(name):
-            continue
-        if plugin := load_plugin(path):
-            try:
-                api = PluginAPI(plugin.meta.name, plugin.meta.version)
-                plugin.register(api)
-                for tool in api.tools:
-                    harness.tools.register(tool, replace=True)
-                    harness.agent.tools = harness.tools.all()
-                for policy in api.policies:
-                    harness.policies.register(policy, replace=True)
-                for pack in api.policy_packs:
-                    harness.policies.load_pack(pack)
-                for cmd_name, handler in api.commands:
-                    harness._plugin_commands[cmd_name] = handler
-                for _et, handler in api.events:
-                    harness.agent.subscribe(handler)  # type: ignore[arg-type]
-                harness.plugin_loader._plugins.append(plugin)
-                new_count += 1
-                _console.print(f"[green]Loaded: {plugin.meta.name} v{plugin.meta.version}[/]")
-            except Exception as exc:
-                _console.print(f"[red]Failed to load {path}: {exc}[/]")
-    if new_count == 0:
-        _console.print("[dim]No new plugins found.[/]")
+    try:
+        capabilities = harness.reload_plugins()
+    except RuntimeError as exc:
+        _console.print(f"[yellow]{exc}[/]")
     else:
-        _console.print(f"[green]{new_count} new plugin(s) loaded.[/]")
+        _console.print(
+            f"[green]Reloaded {len(capabilities.plugin_names)} approved "
+            "Plugin(s).[/]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +176,7 @@ def _cmd_switch(harness: CodingHarness, parts: list[str], raw: str) -> None:
         _console.print("[yellow]Usage: /switch <leaf_id>[/]")
         return
     try:
-        harness.session.switch_leaf(parts[1])
+        harness.switch_session_leaf(parts[1])
         _console.print(f"[green]Switched to {parts[1][:16]}...[/]")
     except Exception as exc:
         _console.print(f"[red]Error: {exc}[/]")

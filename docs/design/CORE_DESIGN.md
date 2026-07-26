@@ -388,6 +388,13 @@ terminate = True
 
 ## 设计取舍
 
+### ModelCallExecutor
+
+`ModelCallExecutor` 是 Core 内部可复用的 Provider-neutral 调用执行器，只负责一次模型
+调用的 Attempt、确定性 Retry、Abort、Deadline wait 和结构化错误事件。它不知道
+Policy、Session、Harness、Compaction 或工具。`AgentLoop` 使用它完成普通 Turn；
+Harness 的内部模型操作也通过同一 Core 可靠性路径运行。
+
 ### 为什么 ToolResult 也要是 Message？
 
 因为模型下一次调用需要看到工具结果。

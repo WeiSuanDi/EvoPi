@@ -20,6 +20,7 @@ from evopi.cli.commands import handle_slash_command, set_last_prompt
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
+from evopi.cli.plugin import plugin_main
 from evopi.cli.resume import pick_session
 from evopi.cli.session import print_session_opened, session_list_main
 from evopi.core.events import CoreEvent
@@ -112,11 +113,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--plugin", type=Path, action="append", metavar="PATH",
         help="Load a plugin from PATH (repeatable)",
     )
+    memory_group = parser.add_mutually_exclusive_group()
+    memory_group.add_argument(
+        "--memory", type=Path, metavar="PATH",
+        help="Enable persistent memory (JSON file path, e.g. .evopi/memory.json)",
+    )
+    memory_group.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Disable workspace Memory for this invocation",
+    )
+    parser.add_argument(
+        "--skills-root", type=Path, metavar="PATH",
+        help="Enable skill loading from PATH (e.g. ~/.evopi/skills)",
+    )
+    parser.add_argument(
+        "--enable-subagent", action="store_true",
+        help="Enable the spawn_subagent tool for delegated tasks",
+    )
     return parser
 
 
 def _build_harness(args: argparse.Namespace) -> CodingHarness:
-    """Build a CodingHarness from CLI args."""
+    """Build a CodingHarness from CLI args, auto-detecting available modules."""
     from evopi.session.compact import CompactionSettings
 
     session_manager = _session_manager_from_args(args)
@@ -126,6 +145,21 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         model=getattr(args, "model", None),
         context_window=getattr(args, "context_window", 0),
     )
+
+    # Auto-detect Memory — always on, stored in workspace
+    memory_path = getattr(args, "memory", None)
+    if getattr(args, "no_memory", False):
+        memory_path = None
+    elif memory_path is None:
+        default_memory = args.workspace / ".evopi" / "memory.json"
+        memory_path = default_memory
+
+    # Auto-detect Skills — on if skills directory exists
+    skills_root, resource_warnings = _skills_root_from_args(args)
+
+    # SubAgent — explicit opt-in only
+    enable_subagent = getattr(args, "enable_subagent", False)
+
     return CodingHarness(
         model=model,
         workspace=args.workspace,
@@ -144,8 +178,40 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         compaction_settings=CompactionSettings(
             enabled=(getattr(args, "compaction", "on") == "on"),
         ),
-        plugin_paths=getattr(args, "plugin", None),
+        plugin_paths=_plugin_paths_from_args(args),
+        memory_path=memory_path,
+        skills_root=skills_root,
+        enable_subagent=enable_subagent,
+        resource_warnings=resource_warnings,
     )
+
+
+def _skills_root_from_args(
+    args: argparse.Namespace,
+) -> tuple[Path | None, tuple[str, ...]]:
+    explicit = getattr(args, "skills_root", None)
+    if explicit is not None:
+        return explicit, ()
+    from evopi.evolution import WorkspaceTrustStore
+    from evopi.plugins import resolve_evopi_home
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    project = workspace / ".evopi" / "skills"
+    home = resolve_evopi_home()
+    trust_path = home / "workspace-trust.json"
+    trusted = (
+        trust_path.exists()
+        and WorkspaceTrustStore(trust_path).is_trusted(workspace)
+    )
+    if project.exists() and trusted:
+        return project, ()
+    warnings = (
+        ("Project Skills were skipped because the workspace is not trusted",)
+        if project.exists()
+        else ()
+    )
+    global_root = home / "skills"
+    return (global_root if global_root.exists() else None), warnings
 
 
 def _create_repl_prompt_session(
@@ -160,6 +226,15 @@ def _create_repl_prompt_session(
         input=input,
         output=output,
     )
+
+
+def _plugin_paths_from_args(args: argparse.Namespace) -> list[str | Path]:
+    from evopi.plugins import approved_plugin_entrypoints
+
+    approved = list(approved_plugin_entrypoints(args.workspace))
+    explicit = list(getattr(args, "plugin", None) or [])
+    paths: list[str | Path] = [*approved, *explicit]
+    return list(dict.fromkeys(paths))
 
 
 async def _run_one_shot(args: argparse.Namespace) -> int:
@@ -202,12 +277,22 @@ async def _run_repl(args: argparse.Namespace) -> int:
     try:
         harness = _build_harness(args)
 
-        # Welcome
+        # Welcome — auto-detect enabled modules
+        extras = []
+        if harness.capabilities.memory_enabled:
+            extras.append("Memory")
+        if harness.capabilities.skills_enabled:
+            extras.append("Skills")
+        if getattr(args, "enable_subagent", False):
+            extras.append("SubAgent")
+        extra_str = f" | [green]+{'/'.join(extras)}[/]" if extras else ""
+
         console.print(Panel(
             f"[bold]EvoPi[/] — Type your message, [bold]/help[/] for commands.\n"
             f"Model: [cyan]{harness.model.name}[/] | "
             f"Session: [dim]{harness.session.session_id[:12]}...[/] | "
-            f"Workspace: [dim]{harness.session.workspace[:40]}[/]",
+            f"Workspace: [dim]{harness.session.workspace[:40]}[/]"
+            f"{extra_str}",
             border_style="blue",
         ))
 
@@ -248,6 +333,7 @@ async def _run_repl(args: argparse.Namespace) -> int:
             set_last_prompt(user_input)
 
             try:
+                display.show_user_message(user_input)
                 display.start_run()
                 await harness.prompt(user_input)
                 display.end_run()
@@ -287,12 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
         return session_list_main(raw_args[2:])
-    if raw_args[:2] == ["plugin", "list"]:
-        return _plugin_list_main(raw_args[2:])
-    if raw_args[:2] == ["plugin", "install"]:
-        return _plugin_install_main(raw_args[2:])
-    if raw_args[:2] == ["plugin", "remove"]:
-        return _plugin_remove_main(raw_args[2:])
+    if len(raw_args) >= 2 and raw_args[0] == "plugin":
+        return plugin_main(raw_args[1], raw_args[2:])
 
     args = (
         build_parser().parse_args()
@@ -310,58 +392,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nEvoPi aborted.")
         return 130
-
-
-def _plugin_list_main(argv: list[str]) -> int:
-    """``evopi plugin list`` — print loaded plugins."""
-    from evopi.plugins.loader import discover_plugin_paths
-    workspace = Path.cwd()
-    plugins = discover_plugin_paths(workspace)
-    if not plugins:
-        print("No plugins found.")
-        print("  Global: ~/.evopi/plugins/")
-        print(f"  Local:  {workspace / '.evopi' / 'plugins'}")
-        return 0
-    print(f"{len(plugins)} plugin(s):")
-    for p in plugins:
-        print(f"  {p}")
-    return 0
-
-
-def _plugin_install_main(argv: list[str]) -> int:
-    """``evopi plugin install <path>`` — copy a plugin file into global plugins dir."""
-    import shutil
-    if len(argv) < 1:
-        print("Usage: evopi plugin install <path>", file=sys.stderr)
-        return 1
-    src = Path(argv[0]).expanduser().resolve()
-    if not src.exists():
-        print(f"Error: {src} does not exist", file=sys.stderr)
-        return 1
-    dst_dir = Path.home() / ".evopi" / "plugins"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / src.name
-    shutil.copy2(src, dst)
-    print(f"Installed: {dst}")
-    return 0
-
-
-def _plugin_remove_main(argv: list[str]) -> int:
-    """``evopi plugin remove <name>`` — remove a plugin file from global plugins dir."""
-    if len(argv) < 1:
-        print("Usage: evopi plugin remove <name>", file=sys.stderr)
-        return 1
-    dst_dir = Path.home() / ".evopi" / "plugins"
-    target = dst_dir / argv[0]
-    if not target.exists():
-        target = dst_dir / f"{argv[0]}.py"
-    if not target.exists():
-        print(f"Error: plugin '{argv[0]}' not found", file=sys.stderr)
-        return 1
-    target.unlink()
-    print(f"Removed: {target}")
-    return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

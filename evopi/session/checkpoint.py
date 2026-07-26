@@ -114,6 +114,7 @@ def checkpoint_from_dict(value: Mapping[str, Any]) -> SessionCheckpoint:
         "aborted",
         "error",
         "turn_limit",
+        "deadline_exceeded",
         "interrupted",
     }:
         raise SessionFormatError("Checkpoint contains an invalid Run reason")

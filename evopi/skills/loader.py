@@ -19,6 +19,11 @@ _SKILL_DIR_NAME = "skills"
 
 # Matches YAML frontmatter between --- delimiters
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+VALID_SKILL_RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
+
+
+class SkillLoadError(RuntimeError):
+    """Raised when a Skill document is malformed or unsafe to inject."""
 
 
 def discover_skill_paths(
@@ -42,8 +47,11 @@ def discover_skill_paths(
             seen.add(key)
             discovered.append(p)
 
-    global_root = Path(root).expanduser().resolve() if root else Path.home() / ".evopi"
-    global_dir = global_root / _SKILL_DIR_NAME
+    global_dir = (
+        Path(root).expanduser().resolve()
+        if root
+        else Path.home() / ".evopi" / _SKILL_DIR_NAME
+    )
     for p in _scan_dir(global_dir):
         key = p.name
         if key not in seen:
@@ -77,16 +85,26 @@ def load_skill(path: str | Path) -> Skill | None:
     ``# Heading`` is used as the skill name and the first paragraph as the
     description.
     """
+    try:
+        return load_skill_strict(path)
+    except SkillLoadError as exc:
+        _logger.warning("%s", exc)
+        return None
+
+
+def load_skill_strict(path: str | Path) -> Skill:
+    """Parse one Skill and preserve a structured failure reason."""
+
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists() or not resolved.is_file():
-        _logger.warning("Skill path does not exist: %s", resolved)
-        return None
+        raise SkillLoadError(f"Skill path does not exist: {resolved}")
 
     try:
         text = resolved.read_text(encoding="utf-8")
-    except OSError:
-        _logger.exception("Failed to read skill: %s", resolved)
-        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SkillLoadError(f"Failed to read Skill {resolved}: {exc}") from exc
+    if text.startswith("---") and _FRONTMATTER_RE.match(text) is None:
+        raise SkillLoadError(f"Skill frontmatter is not closed: {resolved}")
 
     frontmatter: dict[str, str] = {}
     body = text
@@ -100,6 +118,10 @@ def load_skill(path: str | Path) -> Skill | None:
     description = frontmatter.get("description") or _extract_description(body) or ""
     version = frontmatter.get("version", "0.1.0")
     risk_level = frontmatter.get("risk_level", "low")
+    if risk_level not in VALID_SKILL_RISK_LEVELS:
+        raise SkillLoadError(
+            f"Skill '{name}' has invalid risk_level '{risk_level}'"
+        )
     tools_raw = frontmatter.get("tools", "")
 
     return Skill(
@@ -153,4 +175,10 @@ def _extract_description(body: str) -> str | None:
     return None
 
 
-__all__ = ["discover_skill_paths", "load_skill"]
+__all__ = [
+    "SkillLoadError",
+    "VALID_SKILL_RISK_LEVELS",
+    "discover_skill_paths",
+    "load_skill",
+    "load_skill_strict",
+]

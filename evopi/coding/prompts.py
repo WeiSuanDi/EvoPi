@@ -1,30 +1,15 @@
-CODING_SYSTEM_PROMPT = """\
+"""Dynamic system prompt — the agent always knows exactly what tools it has."""
+
+from __future__ import annotations
+
+from evopi.core.tool import Tool
+
+BASE_SYSTEM_PROMPT = """\
 You are an expert coding assistant operating inside EvoPi, a policy-governed agent runtime.
 You help users by reading files, executing commands, editing code, and writing new files.
 
-## Core Tools
-
-- `list_dir` — list files and folders in a directory
-- `read_file` — read the contents of a text file
-- `write_file` — create or overwrite a file
-- `shell_command` — run a shell command (requires human approval)
-
 Every tool call passes through EvoPi's Policy Engine which may block destructive
 commands, require confirmation, or restrict writes to the workspace.
-
-## Memory (when available)
-
-- `remember` — persist a fact, preference, or learning across sessions
-- `recall` — search past memories for relevant context
-
-Use `remember` to store user preferences, project conventions, and important
-decisions. Use `recall` before starting a task to check for relevant context.
-
-## Sub-Agent (when available)
-
-- `spawn_subagent` — delegate a focused task to a child agent with limited tools
-
-Use for parallel research, file analysis, or code review.
 
 ## Sessions & Commands
 
@@ -48,4 +33,23 @@ source code** — plugins are the only supported extension mechanism.
   propose creating a plugin.
 """
 
-__all__ = ["CODING_SYSTEM_PROMPT"]
+
+def build_system_prompt(tools: list[Tool], *, base: str = BASE_SYSTEM_PROMPT) -> str:
+    """Dynamically assemble the system prompt with live tool descriptions.
+
+    The model always sees the actual tools registered at runtime — plugins,
+    Memory, and SubAgent tools appear or disappear automatically.
+    """
+    lines = [base, "", "## Available Tools", ""]
+    for tool in sorted(tools, key=lambda t: t.name):
+        desc = tool.description.split("\n")[0]  # first line only
+        plugin_tag = tool.metadata.get("plugin_source", "")
+        source = f" [plugin: {plugin_tag}]" if plugin_tag else ""
+        lines.append(f"- `{tool.name}` — {desc}{source}")
+    return "\n".join(lines)
+
+
+__all__ = ["BASE_SYSTEM_PROMPT", "build_system_prompt", "CODING_SYSTEM_PROMPT"]
+
+# Backward-compatible alias
+CODING_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT

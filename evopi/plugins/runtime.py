@@ -7,8 +7,10 @@ utilities that call ``register()`` and collect registrations.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 
 from evopi.core.tool import Tool
+from evopi.core.events import CoreEvent, EventListener
 from evopi.plugins.loader import PluginLoader, discover_plugin_paths, load_plugin
 from evopi.plugins.protocol import Plugin, PluginAPI
 from evopi.policy.registry import PolicyPack
@@ -24,8 +26,23 @@ __all__ = [
     "Tool",
     "discover_plugin_paths",
     "load_plugin",
+    "filtered_event_listener",
     "wire_plugins",
 ]
+
+
+def filtered_event_listener(
+    event_type: str,
+    handler: Callable[..., Awaitable[None] | None],
+) -> EventListener:
+    """Wrap a Plugin handler so it receives only its declared event type."""
+
+    def listener(event: CoreEvent) -> Awaitable[None] | None:
+        if event.type != event_type:
+            return None
+        return handler(event)
+
+    return listener
 
 
 def wire_plugins(
@@ -46,6 +63,8 @@ def wire_plugins(
         name = plugin.meta.name
         if enabled is not None and name not in enabled:
             continue
+        if not loader.is_valid(name):
+            continue
         api = PluginAPI(name, plugin.meta.version)
         try:
             plugin.register(api)
@@ -53,4 +72,39 @@ def wire_plugins(
             loader.add_error(f"Plugin '{name}' register() raised an exception")
             continue
         apis.append(api)
-    return apis
+
+    versions = {api.plugin_name: api.plugin_version for api in apis}
+    valid: list[PluginAPI] = []
+    for api in apis:
+        missing = [
+            dependency
+            for dependency, requirement in api._declared_deps
+            if dependency not in versions
+            or not _version_matches(versions[dependency], requirement)
+        ]
+        if missing:
+            loader.add_error(
+                f"Plugin '{api.plugin_name}' has unsatisfied runtime "
+                f"dependencies: {', '.join(missing)}"
+            )
+            continue
+        valid.append(api)
+    return valid
+
+
+def _version_matches(version: str, requirement: str | None) -> bool:
+    if requirement is None or not requirement.strip():
+        return True
+    requirement = requirement.strip()
+    if requirement.startswith(">="):
+        return _version_key(version) >= _version_key(requirement[2:])
+    if requirement.startswith("=="):
+        requirement = requirement[2:]
+    return version == requirement
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    return tuple(
+        int(part) if part.isdigit() else 0
+        for part in value.replace("-", ".").split(".")
+    )
