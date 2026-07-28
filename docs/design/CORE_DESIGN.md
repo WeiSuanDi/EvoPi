@@ -185,6 +185,29 @@ Abort 的优先级高于重试：活动请求、部分输出后的流和退避�
 `asyncio.CancelledError`。Adapter 的 `timeout` 是连接与流式 I/O 空闲超时，不是单次调用或
 整个 Run 的墙钟总时限。
 
+### 原生 OpenAI Responses Adapter
+
+`OpenAIResponsesModel` 通过既有 `Model.stream()` 接入上述执行器，不向 Agent Loop
+引入 Provider 特例。它与 OpenAI-compatible Chat Completions Adapter 是两个独立的
+显式 Provider：`openai` / `openai-compatible` 保持原行为，`openai-responses` 才调用
+`{base_url}/responses`。
+
+EvoPi 自己持有会话状态。Responses 请求固定使用 `store=false`，不发送
+`previous_response_id` 或 Conversation ID，并将当前 SystemMessage 合并为本次
+`instructions`。User、Assistant 和 ToolResult 历史会完整转换为 Responses `input`；
+Tool 使用扁平 function schema 且 `strict=false`，保持当前 Tool Schema 兼容边界。
+
+成功或 incomplete 的终端 Response 是正式 AssistantMessage 的权威来源。完整 JSON-safe
+`output`、response ID、状态和 incomplete details 写入 Provider metadata，并由现有
+Session v3 / Checkpoint 严格 Codec 原样保存；下一次请求优先重放该输出。旧 Session、
+缺少同名 Provider State 的消息和 Provider 切换通过规范化文本与 ToolCall 重建。若
+同名 Provider State 已存在但结构损坏，则在网络请求前产生不可重试 protocol 错误。
+
+流式 text / refusal / function-call delta 继续进入 Core Stream；终端 output 决定最终文本、
+ToolCall 与 stop reason。Reasoning 等非执行输出只保存在 Provider State 中，不生成新的
+Core Event。OpenAI 内置执行工具调用不映射成 EvoPi ToolCall，而是以
+`unsupported_response_item` fail closed，避免绕过 Policy 与 ToolExecutor。
+
 ## 模型调用边界
 
 EvoPi 第一版不只做 FakeModel。
@@ -215,7 +238,8 @@ evopi/ai/
 第一批可优先支持：
 
 ```text
-OpenAI-compatible API
+OpenAI-compatible Chat Completions API
+OpenAI Responses API
 Anthropic Messages API
 ```
 

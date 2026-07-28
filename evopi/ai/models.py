@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import os
 
 from dotenv import load_dotenv
 
 from evopi.ai.api.anthropic_messages import AnthropicMessagesModel
 from evopi.ai.api.openai_chat_completions import OpenAICompatibleModel
+from evopi.ai.api.openai_responses import OpenAIResponsesModel
 
 
 def model_from_environment(
@@ -38,7 +41,23 @@ def model_from_environment(
             context_window=context_window,
             max_tokens=max_tokens,
         )
+    if selected == "openai-responses":
+        resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("EVOPI_MODEL")
+        if not resolved_model:
+            raise ValueError("OPENAI_MODEL or EVOPI_MODEL is required")
+        return OpenAIResponsesModel(
+            model=resolved_model,
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            timeout=timeout,
+            context_window=context_window,
+            max_tokens=max_tokens,
+        )
     raise ValueError(f"Unknown provider: {selected}")
 
 
-__all__ = ["AnthropicMessagesModel", "OpenAICompatibleModel", "model_from_environment"]
+__all__ = [
+    "AnthropicMessagesModel",
+    "OpenAICompatibleModel",
+    "OpenAIResponsesModel",
+    "model_from_environment",
+]
