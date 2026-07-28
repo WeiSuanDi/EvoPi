@@ -11,7 +11,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Stable agent core** — typed messages, streaming events, tool calls, tool results, and bounded multi-turn execution.
 - **Pluggable harnesses** — compose prompts, tools, context, lifecycle behavior, and policies for a specific domain.
 - **Policy-governed actions** — allow, block, rewrite, validate, or terminate work at runtime hooks.
-- **Reliable provider boundary** — built-in Anthropic Messages and OpenAI-compatible adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
+- **Reliable provider boundary** — built-in Anthropic Messages, OpenAI-compatible Chat Completions, and native OpenAI Responses adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
 - **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
 - **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
@@ -90,6 +90,18 @@ OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=your-model-name
 ```
 
+To use the native OpenAI Responses API with the same OpenAI credentials:
+
+```dotenv
+EVOPI_PROVIDER=openai-responses
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=your-api-key
+OPENAI_MODEL=your-model-name
+```
+
+`openai` and `openai-compatible` continue to select the Chat Completions adapter.
+Only `openai-responses` selects the native Responses adapter.
+
 Credentials are loaded from the environment or a local `.env` file. EvoPi does not persist or print resolved API keys.
 
 ## Quick start
@@ -104,6 +116,7 @@ Choose a provider or workspace explicitly:
 
 ```powershell
 evopi --provider anthropic --workspace C:\path\to\project 'Run the tests and explain any failures.'
+evopi --provider openai-responses 'Inspect this project through the Responses API.'
 ```
 
 Harness-backed CLI runs retry transient model failures up to three additional times by default. Control this behavior explicitly when needed:
@@ -234,6 +247,13 @@ Cancelling the task that is awaiting `prompt()` performs the same cleanup and th
 ## Provider reliability
 
 Model adapters translate provider HTTP responses, stream errors, timeouts, connection failures, premature EOF, and protocol failures into `ModelErrorInfo`. The normalized kinds distinguish authentication, permission, invalid requests, missing resources, context overflow, exhausted quota, rate limits, overload, timeout, connection, server, protocol, and unknown failures. Structured details are available on `ModelError.info`, `Agent.last_run.error_info`, lifecycle events, Policy error contexts, and JSONL Trace records.
+
+The native Responses adapter keeps EvoPi as the conversation-state authority: requests use
+`store=false` and resend the complete committed context. Successful and incomplete responses
+persist their JSON-safe provider output in `AssistantMessage.metadata`, so reasoning and other
+non-executable output items can be replayed through Session and Checkpoint recovery. Older
+messages and provider switches remain compatible through normalized message reconstruction.
+Malformed same-provider state fails closed before any network request.
 
 Bare `Agent` instances do not retry unless given a `ModelRetryConfig`. `BaseHarness` and `CodingHarness` enable deterministic retries by default: up to three additional full model attempts with 2/4/8-second backoff. Only transient `rate_limited`, `overloaded`, `timeout`, `connection`, and `server` errors retry. A longer valid `Retry-After` takes precedence; values above the 60-second wait ceiling fail immediately.
 

@@ -170,6 +170,80 @@ def test_persistent_session_round_trip_and_tree_contract(tmp_path: Path) -> None
     restored.close()
 
 
+def test_session_checkpoint_preserves_openai_responses_provider_state(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = SessionManager.create(workspace, root=tmp_path / "sessions")
+    session_path = manager.session_path
+    assert session_path is not None
+    run_id = uuid4().hex
+    start = manager.append_run_start(
+        run_id=run_id,
+        runtime_fingerprint=fingerprint(model="openai-responses"),
+    )
+    provider_state = {
+        "schema_version": 1,
+        "response_id": "resp-1",
+        "status": "completed",
+        "output": [
+            {
+                "id": "reasoning-1",
+                "type": "reasoning",
+                "encrypted_content": "opaque",
+                "summary": [],
+            },
+            {
+                "id": "message-1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "answer",
+                        "annotations": [],
+                    }
+                ],
+            },
+        ],
+        "incomplete_details": None,
+    }
+    manager.append_message(
+        run_id=run_id,
+        message=AssistantMessage(
+            content="answer",
+            stop_reason="stop",
+            metadata={
+                "provider": "openai-responses",
+                "model": "test-model",
+                "openai_responses": provider_state,
+            },
+        ),
+    )
+    end = manager.append_run_end(run_id=run_id, reason="completed")
+    manager.create_checkpoint(
+        run_end=end,
+        runtime_fingerprint=start.runtime_fingerprint,
+    )
+    manager.close()
+
+    restored = SessionManager.open(
+        session_path,
+        workspace=workspace,
+        root=tmp_path / "sessions",
+    )
+
+    assert isinstance(restored.messages[0], AssistantMessage)
+    assert restored.messages[0].metadata["openai_responses"] == provider_state
+    assert restored.last_checkpoint is not None
+    assert (
+        restored.last_checkpoint.messages[0].metadata["openai_responses"]
+        == provider_state
+    )
+    restored.close()
+
+
 def test_session_lock_rejects_concurrent_open(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

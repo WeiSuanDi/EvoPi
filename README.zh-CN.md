@@ -11,7 +11,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **稳定的 Agent Core** — 提供类型化消息、流式事件、工具调用、工具结果和有界多轮执行。
 - **可插拔 Harness** — 为具体领域组合 Prompt、工具、上下文、生命周期行为和 Policy。
 - **Policy 运行时治理** — 可在 Hook 上允许、阻止、改写、验证或终止操作。
-- **可靠的 Provider 边界** — 内置 Anthropic Messages 与 OpenAI-compatible 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
+- **可靠的 Provider 边界** — 内置 Anthropic Messages、OpenAI-compatible Chat Completions 与原生 OpenAI Responses 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
 - **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
 - **通用 PluginAPI** — 通过单一受治理运行时协议扩展工具、Policy、命令、上下文、Prompt、Session 状态、Tool 视图和宿主 UI。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
@@ -90,6 +90,18 @@ OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=your-model-name
 ```
 
+使用相同 OpenAI 凭据调用原生 Responses API：
+
+```dotenv
+EVOPI_PROVIDER=openai-responses
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=your-api-key
+OPENAI_MODEL=your-model-name
+```
+
+`openai` 与 `openai-compatible` 继续选择 Chat Completions Adapter；只有
+`openai-responses` 会选择原生 Responses Adapter。
+
 凭据从系统环境变量或本地 `.env` 文件加载。EvoPi 不会持久化或打印解析后的 API 密钥。
 
 ## 快速开始
@@ -104,6 +116,7 @@ evopi '检查这个项目并总结它的架构。'
 
 ```powershell
 evopi --provider anthropic --workspace C:\path\to\project '运行测试并解释所有失败。'
+evopi --provider openai-responses '通过 Responses API 检查这个项目。'
 ```
 
 基于 Harness 的 CLI 默认会对瞬态模型错误额外重试最多三次，也可以显式调整：
@@ -229,6 +242,12 @@ Agent Context、Checkpoint 投影与重启恢复保持一致。通过验证的 v
 ## Provider 可靠性
 
 模型 Adapter 会把 Provider HTTP 响应、流内错误、超时、连接失败、提前 EOF 和协议错误统一转换为 `ModelErrorInfo`。标准分类覆盖认证、权限、无效请求、资源不存在、上下文溢出、配额耗尽、限流、过载、超时、连接、服务端、协议和未知错误。结构化信息可通过 `ModelError.info`、`Agent.last_run.error_info`、生命周期事件、Policy 错误上下文和 JSONL Trace 获取。
+
+原生 Responses Adapter 继续以 EvoPi 作为对话状态的唯一事实来源：请求固定使用
+`store=false` 并重发完整的已提交上下文。成功或 incomplete 响应会把 JSON-safe Provider
+输出保存在 `AssistantMessage.metadata` 中，使 reasoning 等非执行输出项能够随 Session 与
+Checkpoint 恢复后原样续传。旧消息和 Provider 切换通过归一化消息重建保持兼容；同名
+Provider State 损坏时会在网络请求前 fail closed。
 
 裸 `Agent` 只有显式传入 `ModelRetryConfig` 才会自动重试；`BaseHarness` 与 `CodingHarness` 默认启用确定性重试：初次调用之外最多三次，退避为 2/4/8 秒。只有 `rate_limited`、`overloaded`、`timeout`、`connection` 和 `server` 会重试。合法且更长的 `Retry-After` 优先；若超过 60 秒等待上限则立即失败。
 

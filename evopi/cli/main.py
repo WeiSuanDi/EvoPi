@@ -53,7 +53,10 @@ def _positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evopi", description="Run the EvoPi coding agent")
     parser.add_argument("prompt", nargs="?", help="Task for the agent")
-    parser.add_argument("--provider", choices=["anthropic", "openai-compatible"])
+    parser.add_argument(
+        "--provider",
+        choices=["anthropic", "openai-compatible", "openai-responses"],
+    )
     parser.add_argument("--model", help="Override the model name from .env")
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))

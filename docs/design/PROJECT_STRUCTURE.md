@@ -39,8 +39,8 @@ EvoPi/
 - 管理认证和 credential
 - 将厂商协议转成 EvoPi 内部 Model 接口
 
-当前已实现 OpenAI-compatible Chat Completions 与 Anthropic Messages 流式适配器；
-测试中使用脚本化 Model 作为替身，真实模型调用仍是产品主路径。
+当前已实现 OpenAI-compatible Chat Completions、原生 OpenAI Responses 与 Anthropic
+Messages 流式适配器；测试中使用脚本化 Model 作为替身，真实模型调用仍是产品主路径。
 
 ## evopi/core
 
