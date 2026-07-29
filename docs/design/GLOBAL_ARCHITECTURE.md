@@ -235,7 +235,9 @@ flowchart LR
     Schema --> DryRun["Dry-run / Replay"]
     DryRun --> Supervisor["Supervisor Agent Review"]
     Supervisor --> Human["Human Confirmation"]
-    Human --> Registry["Registry Enable / Rollback"]
+    Human --> Approval["Digest-bound Approval"]
+    Approval --> Active["Explicit Active Selection"]
+    Active --> Registry["Transactional Harness Reload / Rollback"]
 ```
 
 原则：
@@ -245,6 +247,11 @@ flowchart LR
 ```
 
 因此需要隔离的 Supervisor Agent。
+
+Policy Evolution v1 已把这条闭环落实为目录候选、非执行式静态检查、隔离 Worker、
+不可变 Evidence、人工批准/拒绝、独立活动指针、Harness 事务装配和回滚。批准不等于
+启用，技术 `passed` 也不等于人工授权。Coding CLI 默认读取当前用户活动集；裸
+BaseHarness 不隐式读取用户目录。
 
 ## 两种演进形态
 

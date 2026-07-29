@@ -367,7 +367,26 @@ evopi policy review my_project.policies:candidate \
 
 添加 `--json` 可输出稳定的 JSON-ready 报告。命令退出码为：`0` 表示 `passed`，`2` 表示 `review_required`，`1` 表示 `failed` 或加载错误。缺失 Dry Run、缺失适用的 Replay、Validator warning 或 `changed/new` 回放案例会要求审查；无效或相互矛盾的证据会使报告失败。
 
-Supervisor Report 是离线技术证据工件。它不会调用模型、执行工具、注册候选 Policy 或授权启用；Human Approval 与 Activation Gate 仍是独立控制层。
+Supervisor Report 是离线技术证据工件。它不会调用模型、执行工具、注册候选 Policy
+或授权启用。正式的目录候选可以继续进入完整受控生命周期：
+
+```bash
+evopi policy init safe-shell
+evopi policy review .evopi/policy-candidates/safe-shell --trace .evopi/trace.jsonl
+evopi policy approve REVIEW_ID
+evopi policy activate APPROVAL_ID
+evopi policy status --json
+```
+
+`review_required` 证据必须同时提供 `--accept-findings` 和非空 `--reason`；失败证据不能
+批准。批准只会把已审查快照复制到不可变、内容寻址的 Artifact Store，不改变运行时。
+启用是独立的用户级全局选择；`policy deactivate NAME` 和
+`policy rollback NAME [--to APPROVAL_ID]` 显式改变该选择。
+
+Coding CLI 默认加载活动的演进 Policy，单次运行可用 `--no-evolved-policies` 关闭。
+REPL `/policies` 展示最终装配结果，`/reload` 在同一事务中刷新已批准 Plugin 与活动
+Policy。同名替换内置或 Plugin Policy 时必须绑定目标名称和当前摘要。裸
+`BaseHarness` 仍保持中立，只有宿主显式提供 `PolicyActivationService` 才接入。
 
 > [!IMPORTANT]
 > Policy 检查能够降低意外操作风险，但不能替代操作系统级沙箱。在处理不可信 Prompt、仓库或命令之前，请审查并强化相应策略。

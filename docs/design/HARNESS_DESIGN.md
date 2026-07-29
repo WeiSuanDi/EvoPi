@@ -269,6 +269,15 @@ Plugin 的所有注册先进入暂存装配，完成依赖、重复命令/Tool�
 绑定校验后整体提交。运行中禁止 Reload。活动 Tool 集是基础集合与所有插件限制的
 交集，只能收窄；session 作用域覆盖通过 Session schema v3+ 恢复。
 
+活动演进 Policy 使用同一事务装配：Harness 先暂存内置能力、批准 Plugin 和用户显式
+活动的 Policy Artifact，重新验证摘要、Manifest、实例契约、同名替换目标及预期摘要，
+全部成功后才一次替换运行时。失败启动时 fail closed；空闲 `/reload` 失败时保留旧
+Tool、Policy、Command、Prompt 和 Handler 快照。Run 开始时复制 Policy Registry，
+本轮结束前禁止注册或 Reload，SubAgent 因而继承父 Run 的同一治理下界。
+
+裸 BaseHarness 只有显式收到 `PolicyActivationService` 才读取活动工件；Coding CLI
+是默认接入该用户级配置的产品宿主，并提供 `--no-evolved-policies`。
+
 Event Handler 只观察订阅事件，返回值不能修改执行。`allow/block/confirmation/rewrite`
 必须由注册到 Policy Engine 的 Policy 给出。UI 只提供交互，不替代 Tool Confirmation
 Handler；非交互宿主的 Plugin 确认默认拒绝。

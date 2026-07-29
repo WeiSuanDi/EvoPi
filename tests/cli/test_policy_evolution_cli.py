@@ -3,11 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from evopi.cli.main import main
+from evopi.cli.main import (
+    _policy_activation_service_from_args,
+    build_parser,
+    main,
+)
 from evopi.evolution import PolicyEvidenceStore, PolicyReviewService
 
 from tests.evolution.test_policy_review_evidence import add_cases, write_trace
 from tests.evolution.test_policy_candidates import write_candidate
+
+
+def test_coding_cli_loads_global_active_policies_unless_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EVOPI_HOME", str(tmp_path / "home"))
+    enabled = build_parser().parse_args([])
+    disabled = build_parser().parse_args(["--no-evolved-policies"])
+
+    assert _policy_activation_service_from_args(enabled) is not None
+    assert _policy_activation_service_from_args(disabled) is None
 
 
 def test_policy_init_creates_inactive_candidate_directory(

@@ -22,7 +22,7 @@ from evopi.core.cancellation import (
     call_with_optional_signal,
 )
 from evopi.core.context import AgentContext
-from evopi.core.events import CoreEvent, EventListener
+from evopi.core.events import CoreEvent, CoreEventType, EventListener
 from evopi.core.messages import (
     AssistantMessage,
     Message,
@@ -34,8 +34,13 @@ from evopi.core.model import Model
 from evopi.core.model_attempts import ModelAttemptInfo
 from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool, ToolCall, ToolResult
+from evopi.evolution import (
+    LoadedPolicyArtifact,
+    PolicyActivationService,
+    PolicyArtifactLoader,
+)
 from evopi.harness.context_manager import ContextManager, ContextProvider
-from evopi.harness.capabilities import HarnessCapabilities
+from evopi.harness.capabilities import HarnessCapabilities, PolicyCapability
 from evopi.harness.confirmation import (
     ConfirmationHandler,
     ConfirmationRequest,
@@ -46,9 +51,10 @@ from evopi.harness.model_routing import HarnessModelAttemptRouter
 from evopi.harness.policy_manager import PolicyManager
 from evopi.harness.runtime_state import LifecycleState
 from evopi.harness.tool_manager import ToolManager
-from evopi.policy.approval import ApprovalMode, ApprovalStore
+from evopi.policy.approval import ApprovalMode, ApprovalStore, policy_digest
 from evopi.policy.decisions import PolicyEvaluation
-from evopi.policy.registry import PolicyPack
+from evopi.policy.engine import PolicyEngine
+from evopi.policy.registry import PolicyPack, PolicyRegistry
 from evopi.policy.types import Policy, PolicyContext
 from evopi.session import (
     DEFAULT_MERGE_SETTINGS,
@@ -201,6 +207,8 @@ class BaseHarness:
         memory_enabled: bool = False,
         skills_enabled: bool = False,
         assembly_warnings: tuple[str, ...] = (),
+        policy_activation_service: PolicyActivationService | None = None,
+        defer_policy_activation: bool = False,
     ) -> None:
         if model_route is not None and model_route.primary.model is not model:
             raise ValueError("model must be the primary ModelRoute candidate")
@@ -221,6 +229,12 @@ class BaseHarness:
         self._memory_enabled = memory_enabled
         self._skills_enabled = skills_enabled
         self._assembly_warnings = assembly_warnings
+        self._policy_activation_service = policy_activation_service
+        self._policy_artifact_loader = PolicyArtifactLoader()
+        self._evolved_policies: tuple[LoadedPolicyArtifact, ...] = ()
+        self._run_policy_engine: PolicyEngine | None = None
+        self._pending_policy_runtime_events: list[CoreEvent] = []
+        self._pretraced_policy_event_ids: set[int] = set()
         self._run_started_at: float | None = None
         self._internal_abort_controller: AbortController | None = None
         self._reserved_plugin_commands = frozenset(
@@ -241,9 +255,12 @@ class BaseHarness:
             if session_manager
             else Path.cwd()
         )
+        self._configured_plugin_paths = tuple(
+            Path(path).expanduser().resolve() for path in (plugin_paths or ())
+        )
         self.plugin_loader = PluginLoader(
             workspace=_ws,
-            extra_paths=list(plugin_paths) if plugin_paths else None,
+            extra_paths=list(self._configured_plugin_paths) or None,
             discover_defaults=False,
         )
         self._workspace = Path(_ws).expanduser().resolve()
@@ -344,6 +361,8 @@ class BaseHarness:
             )
             for plugin_name, event_type, handler in self._pending_plugin_events
         ]
+        if policy_activation_service is not None and not defer_policy_activation:
+            self._install_active_policies()
 
     @property
     def state(self):
@@ -353,9 +372,38 @@ class BaseHarness:
     def capabilities(self) -> HarnessCapabilities:
         """Return a read-only snapshot of the currently assembled capabilities."""
 
+        evolved = {
+            item.policy.name: item
+            for item in self._evolved_policies
+        }
+        policy_capabilities: list[PolicyCapability] = []
+        for policy in self.policies.all():
+            artifact = evolved.get(policy.name)
+            replacement = artifact.replacement if artifact is not None else None
+            policy_capabilities.append(
+                PolicyCapability(
+                name=policy.name,
+                version=policy.version,
+                source=policy.source,
+                digest=policy_digest(policy),
+                artifact_digest=artifact.digest if artifact is not None else None,
+                activation_id=(
+                    artifact.approval_record_id
+                    if artifact is not None
+                    else None
+                ),
+                selection_id=(
+                    artifact.selection_record_id
+                    if artifact is not None
+                    else None
+                ),
+                replaces=replacement.policy_name if replacement is not None else None,
+                )
+            )
         return HarnessCapabilities(
             tool_names=tuple(sorted(tool.name for tool in self.tools.all())),
             policy_names=tuple(sorted(policy.name for policy in self.policies.all())),
+            policies=tuple(policy_capabilities),
             plugin_names=self._plugin_names,
             command_names=tuple(sorted(self._plugin_commands)),
             memory_enabled=self._memory_enabled,
@@ -886,15 +934,21 @@ class BaseHarness:
             await self.agent.emit_event(event)
 
     def register_tool(self, tool: Tool, *, replace: bool = False) -> None:
+        if self.is_running:
+            raise RuntimeError("Cannot register Tools while the Harness is running")
         if "effects" not in tool.metadata:
             tool.metadata["effects"] = ["unknown"]
         self.tools.register(tool, replace=replace)
         self.agent.tools = self._active_tools()
 
     def register_policy(self, policy: Policy, *, replace: bool = False) -> None:
+        if self.is_running:
+            raise RuntimeError("Cannot register Policies while the Harness is running")
         self.policies.register(policy, replace=replace)
 
     def load_policy_pack(self, pack: PolicyPack) -> None:
+        if self.is_running:
+            raise RuntimeError("Cannot load Policy Packs while the Harness is running")
         self.policies.load_pack(pack)
 
     def add_context_provider(self, provider: ContextProvider) -> None:
@@ -906,8 +960,10 @@ class BaseHarness:
     async def prompt(self, content: str) -> AssistantMessage:
         self.agent.tools = self._active_tools()
         await self._emit_pending_plugin_runtime_events()
+        await self._emit_pending_policy_runtime_events()
         self._runtime_fingerprint = self._build_runtime_fingerprint()
         self.session.compare_runtime(self._runtime_fingerprint)
+        self._run_policy_engine = PolicyEngine(PolicyRegistry(self.policies.all()))
         self.lifecycle.start()
         self._run_started_at = time.monotonic()
         try:
@@ -918,6 +974,7 @@ class BaseHarness:
             self.lifecycle.abort(error)
             self._run_started_at = None
             self._clear_run_plugin_overrides()
+            self._run_policy_engine = None
             raise
         except Exception as exc:
             await self._emit_pending_session_events()
@@ -929,6 +986,7 @@ class BaseHarness:
             self.lifecycle.fail(exc, end_reason=end_reason)
             self._run_started_at = None
             self._clear_run_plugin_overrides()
+            self._run_policy_engine = None
             raise
         await self._emit_pending_session_events()
         end_reason = (
@@ -950,6 +1008,7 @@ class BaseHarness:
                 _logger.warning("Compaction check failed", exc_info=True)
         self._run_started_at = None
         self._clear_run_plugin_overrides()
+        self._run_policy_engine = None
         return answer
 
     def reset(self) -> None:
@@ -964,6 +1023,9 @@ class BaseHarness:
         self._session_failure = None
         self._pending_session_events.clear()
         self._pending_plugin_runtime_events.clear()
+        self._pending_policy_runtime_events.clear()
+        self._pretraced_policy_event_ids.clear()
+        self._run_policy_engine = None
         self._plugin_active_overrides.clear()
         for api in self._plugin_apis.values():
             self._bind_plugin_api(api)
@@ -973,11 +1035,137 @@ class BaseHarness:
             raise RuntimeError("Cannot close a running Harness")
         self.session.close()
 
+    def _install_active_policies(self) -> None:
+        next_policies = PolicyManager(self.policies.approval_store)
+        for policy in self.policies.all():
+            if "evolution_artifact_digest" not in policy.metadata:
+                next_policies.register_governed(policy)
+        loaded = self._stage_active_policies(next_policies)
+        self.policies = next_policies
+        self._evolved_policies = loaded
+        for artifact in loaded:
+            self._record_policy_runtime_event(
+                "policy_artifact_loaded",
+                {
+                    "policy_name": artifact.policy.name,
+                    "policy_version": artifact.policy.version,
+                    "artifact_digest": artifact.digest,
+                    "activation_id": artifact.approval_record_id,
+                    "selection_id": artifact.selection_record_id,
+                    "replacement": (
+                        artifact.replacement.policy_name
+                        if artifact.replacement is not None
+                        else None
+                    ),
+                },
+            )
+
+    def _stage_active_policies(
+        self,
+        manager: PolicyManager,
+    ) -> tuple[LoadedPolicyArtifact, ...]:
+        service = self._policy_activation_service
+        if service is None:
+            return ()
+        loaded = self._policy_artifact_loader.load_active(service)
+        for artifact in loaded:
+            policy = artifact.policy
+            existing = next(
+                (
+                    current
+                    for current in manager.all()
+                    if current.name == policy.name
+                ),
+                None,
+            )
+            replacement = artifact.replacement
+            if existing is None:
+                if replacement is not None:
+                    raise RuntimeError(
+                        f"Evolved Policy '{policy.name}' replacement target is missing"
+                    )
+                manager.register_governed(policy)
+                continue
+            if replacement is None:
+                raise RuntimeError(
+                    f"Evolved Policy '{policy.name}' conflicts with an existing Policy; "
+                    "activate it with an explicit replacement binding"
+                )
+            if replacement.policy_name != policy.name:
+                raise RuntimeError(
+                    f"Evolved Policy '{policy.name}' cannot replace "
+                    f"'{replacement.policy_name}' because registry names differ"
+                )
+            actual_digest = policy_digest(existing)
+            if actual_digest != replacement.expected_digest:
+                raise RuntimeError(
+                    f"Evolved Policy '{policy.name}' replacement target digest drifted"
+                )
+            manager.register_governed(policy, replace=True)
+        return loaded
+
+    def _record_policy_runtime_event(
+        self,
+        event_type: CoreEventType,
+        data: dict[str, Any],
+    ) -> None:
+        event = CoreEvent(type=event_type, data=data)
+        if self.trace_writer is not None:
+            self.trace_writer(event)
+            self._pretraced_policy_event_ids.add(id(event))
+        self._pending_policy_runtime_events.append(event)
+
+    async def _emit_pending_policy_runtime_events(self) -> None:
+        events = self._pending_policy_runtime_events
+        self._pending_policy_runtime_events = []
+        for event in events:
+            await self.agent.emit_event(event)
+
+    def reload_runtime(self) -> HarnessCapabilities:
+        """Atomically refresh approved Plugins and explicitly active Policies."""
+
+        self._record_policy_runtime_event(
+            "policy_runtime_reload_start",
+            {
+                "active_policy_count": len(self._evolved_policies),
+                "plugin_count": len(self._plugin_names),
+            },
+        )
+        try:
+            capabilities = self._reload_runtime_transaction()
+        except Exception as exc:
+            self._record_policy_runtime_event(
+                "policy_runtime_reload_error",
+                {"error": f"{type(exc).__name__}: {exc}"},
+            )
+            raise
+        self._record_policy_runtime_event(
+            "policy_runtime_reload_end",
+            {
+                "policies": [
+                    {
+                        "name": artifact.policy.name,
+                        "version": artifact.policy.version,
+                        "artifact_digest": artifact.digest,
+                        "activation_id": artifact.approval_record_id,
+                    }
+                    for artifact in self._evolved_policies
+                ],
+                "plugins": list(self._plugin_names),
+            },
+        )
+        return capabilities
+
     def reload_plugins(self) -> HarnessCapabilities:
-        """Transactionally replace Plugin contributions from approved snapshots."""
+        """Compatibility alias for the unified transactional runtime reload."""
+
+        return self.reload_runtime()
+
+    def _reload_runtime_transaction(self) -> HarnessCapabilities:
+        """Stage the complete Plugin/Policy runtime before replacing live state."""
 
         if self.is_running:
-            raise RuntimeError("Cannot reload Plugins while the Harness is running")
+            raise RuntimeError("Cannot reload runtime while the Harness is running")
         from evopi.plugins import (
             PluginLoader,
             approved_plugin_entrypoints,
@@ -985,9 +1173,10 @@ class BaseHarness:
             wire_plugins,
         )
 
-        paths: list[str | Path] = list(
-            approved_plugin_entrypoints(self._workspace)
-        )
+        paths: list[str | Path] = list(self._configured_plugin_paths)
+        for path in approved_plugin_entrypoints(self._workspace):
+            if path not in paths:
+                paths.append(path)
         loader = PluginLoader(
             workspace=self._workspace,
             extra_paths=paths,
@@ -1006,7 +1195,10 @@ class BaseHarness:
                 next_tools.register(tool)
         next_policies = PolicyManager(self.policies.approval_store)
         for policy in self.policies.all():
-            if policy.metadata.get("plugin_source") not in old_plugin_names:
+            if (
+                policy.metadata.get("plugin_source") not in old_plugin_names
+                and "evolution_artifact_digest" not in policy.metadata
+            ):
                 next_policies.register(policy)
 
         commands: dict[str, Any] = {}
@@ -1047,6 +1239,7 @@ class BaseHarness:
                 (api.plugin_name, fragment)
                 for fragment in api.prompt_fragments
             )
+        evolved_policies = self._stage_active_policies(next_policies)
 
         clear_statuses = getattr(
             self._plugin_ui,
@@ -1062,6 +1255,7 @@ class BaseHarness:
             self.context.remove(provider)
         self.tools = next_tools
         self.policies = next_policies
+        self._evolved_policies = evolved_policies
         self.plugin_loader = loader
         self._plugin_commands = commands
         self._plugin_names = tuple(sorted(api.plugin_name for api in apis))
@@ -1092,6 +1286,22 @@ class BaseHarness:
         ]
         self.agent.tools = self._active_tools()
         self._refresh_system_prompt_after_capability_change()
+        for artifact in evolved_policies:
+            self._record_policy_runtime_event(
+                "policy_artifact_loaded",
+                {
+                    "policy_name": artifact.policy.name,
+                    "policy_version": artifact.policy.version,
+                    "artifact_digest": artifact.digest,
+                    "activation_id": artifact.approval_record_id,
+                    "selection_id": artifact.selection_record_id,
+                    "replacement": (
+                        artifact.replacement.policy_name
+                        if artifact.replacement is not None
+                        else None
+                    ),
+                },
+            )
         if self.trace_writer is not None:
             self.trace_writer.write(
                 TraceRecord(
@@ -1492,7 +1702,8 @@ class BaseHarness:
         return evaluation.final.action == "terminate"
 
     async def _evaluate(self, context: PolicyContext) -> PolicyEvaluation:
-        evaluation = await self.policies.engine.evaluate(context)
+        engine = self._run_policy_engine or self.policies.engine
+        evaluation = await engine.evaluate(context)
         for decision in evaluation.decisions:
             event = CoreEvent(
                 type="policy_decision",
@@ -1508,6 +1719,9 @@ class BaseHarness:
         return evaluation
 
     async def _on_core_event(self, event: CoreEvent) -> None:
+        trace_pre_recorded = id(event) in self._pretraced_policy_event_ids
+        if trace_pre_recorded:
+            self._pretraced_policy_event_ids.remove(id(event))
         if event.type == "agent_start" and not self._session_started_emitted:
             self._session_started_emitted = True
             await self.agent.emit_event(
@@ -1528,10 +1742,10 @@ class BaseHarness:
         if event.type == "agent_end" and self._session_failure is None:
             await self._persist_session_event_checked(event)
             await self._emit_pending_session_events()
-            if self.trace_writer is not None:
+            if self.trace_writer is not None and not trace_pre_recorded:
                 self.trace_writer(event)
         else:
-            if self.trace_writer is not None:
+            if self.trace_writer is not None and not trace_pre_recorded:
                 self.trace_writer(event)
             if self._session_failure is None:
                 await self._persist_session_event_checked(event)
@@ -1554,7 +1768,8 @@ class BaseHarness:
                 ),
                 aborted=bool(self.agent.signal and self.agent.signal.aborted),
             )
-            evaluation = await self.policies.engine.evaluate(context)
+            engine = self._run_policy_engine or self.policies.engine
+            evaluation = await engine.evaluate(context)
             if self.trace_writer is not None:
                 for decision in evaluation.decisions:
                     self.trace_writer.write(
@@ -1687,6 +1902,10 @@ class BaseHarness:
                 "enabled": policy.enabled,
                 "source": policy.source,
                 "risk_level": policy.risk_level,
+                "artifact_digest": policy.metadata.get(
+                    "evolution_artifact_digest"
+                ),
+                "activation_id": policy.metadata.get("evolution_activation_id"),
             }
             for policy in self.policies.all()
         ]

@@ -50,6 +50,7 @@ from evopi.evolution.policy_activation import (
     PolicyReplacement,
     PolicySelectionStore,
 )
+from evopi.evolution.policy_runtime import LoadedPolicyArtifact, PolicyArtifactLoader
 
 __all__ = [
     "ACTIVATION_SCHEMA_VERSION",
@@ -77,6 +78,7 @@ __all__ = [
     "PolicyActivationService",
     "PolicyApprovalService",
     "PolicyArtifactStore",
+    "PolicyArtifactLoader",
     "PolicyManifest",
     "PolicyEvidenceError",
     "PolicyEvidenceStore",
@@ -85,6 +87,7 @@ __all__ = [
     "PolicyReviewWorkerInfo",
     "PolicyReplacement",
     "PolicySelectionStore",
+    "LoadedPolicyArtifact",
     "initialize_policy_candidate",
     "WORKSPACE_TRUST_SCHEMA_VERSION",
     "WorkspaceTrustRecord",

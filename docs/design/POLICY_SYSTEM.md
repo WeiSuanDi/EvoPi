@@ -391,6 +391,27 @@ Finding 只保存案例 ID、工具名、Trace 行号、历史/候选 action 和
 Supervisor 的 `passed` 仅表示当前技术证据没有待处理项，不等于人工批准或已经启用。
 Human Approval、ApprovalRecord 和 Activation Gate 属于后续独立边界。
 
+## Policy Evolution Pipeline v1
+
+正式候选是带 `evopi-policy.json` 的目录工件。生命周期固定为：
+
+```text
+candidate → static inspection → immutable review snapshot
+→ isolated Schema / Dry Run / Replay → Supervisor Evidence
+→ human approve or deny → explicit active selection
+→ Harness transactional reload → deactivate or rollback
+```
+
+Evidence、Approval 和 Active Selection 是三个独立事实。`review_required` 只有在人工
+接受 Findings 并填写原因后才能批准，`failed` 永远不能批准。批准绑定候选摘要与报告
+摘要，并复制审查快照；不会自动启用。每个名称最多一个活动摘要，回滚只能选择仍然
+获批且快照完整的历史版本。
+
+运行时 Loader 会在 import 前重新校验目录摘要和 Manifest，import 后校验实例契约，
+再标注 Artifact digest、Activation ID 与 Selection ID。同名覆盖必须显式绑定替换
+名称和被替换 Policy 的当前摘要；缺失或漂移均 fail closed。Coding CLI 默认装配活动
+集，裸 BaseHarness 保持中立。模型自动生成候选与自动 Promotion 不属于 v1。
+
 ## 通用 Artifact Activation
 
 `evopi.evolution` 为 Policy 与 Plugin 提供统一的摘要绑定激活协议：
