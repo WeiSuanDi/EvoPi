@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from evopi.policy.types import Policy, PolicyContext
+from evopi.evolution import (
+    PolicyEvidenceStore,
+    PolicyReviewEvidence,
+    PolicyReviewService,
+    resolve_evolution_home,
+)
 from evopi.validators import (
     PolicySchemaValidator,
     ReplayReport,
@@ -52,6 +58,13 @@ def build_policy_review_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="json_output",
         help="Write the stable JSON report to stdout",
+    )
+    parser.add_argument(
+        "--review-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Formal candidate worker timeout (default: 30)",
     )
     return parser
 
@@ -97,6 +110,23 @@ async def review_policy_from_args(args: argparse.Namespace) -> SupervisorReport:
 def policy_review_main(argv: Sequence[str]) -> int:
     args = build_policy_review_parser().parse_args(list(argv))
     try:
+        candidate_path = Path(args.policy).expanduser()
+        if candidate_path.is_dir():
+            if args.dry_run_cases is not None:
+                raise ValueError(
+                    "Formal candidate Dry Run must be declared in its manifest"
+                )
+            if args.review_timeout <= 0:
+                raise ValueError("--review-timeout must be greater than zero")
+            store = PolicyEvidenceStore(
+                resolve_evolution_home() / "reviews" / "policies"
+            )
+            evidence = PolicyReviewService(
+                store,
+                timeout=args.review_timeout,
+            ).review(candidate_path, trace_path=args.trace)
+            _print_formal_evidence(evidence, json_output=args.json_output)
+            return _EXIT_CODES[evidence.status]
         report = asyncio.run(review_policy_from_args(args))
     except Exception as exc:
         print(f"EvoPi policy review error: {exc}", file=sys.stderr)
@@ -110,6 +140,21 @@ def policy_review_main(argv: Sequence[str]) -> int:
     else:
         print(render_policy_review(report))
     return _EXIT_CODES[report.status]
+
+
+def _print_formal_evidence(
+    evidence: PolicyReviewEvidence,
+    *,
+    json_output: bool,
+) -> None:
+    payload = evidence.to_dict()
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return
+    print(render_policy_review(evidence.supervisor_report))
+    print(f"Review evidence: {evidence.review_id}")
+    print(f"Candidate digest: {evidence.candidate.digest}")
+    print("The evidence is immutable and has not approved or activated the Policy.")
 
 
 def load_policy_reference(spec: str) -> Policy:

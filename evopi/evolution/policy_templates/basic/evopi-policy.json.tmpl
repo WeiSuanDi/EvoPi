@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "{{POLICY_NAME}}",
+  "version": "0.1.0",
+  "description": "A governed EvoPi Policy candidate",
+  "entrypoint": "policy.py:POLICY",
+  "dry_run_entrypoint": "cases.py:CASES",
+  "hooks": ["before_tool_call"],
+  "priority": 100,
+  "source": "project",
+  "risk_level": "medium",
+  "metadata": {}
+}
