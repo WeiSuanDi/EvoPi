@@ -13,6 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from evopi.ai.routing import CircuitStateSnapshot, ModelRoute
 from evopi.core.agent import Agent
 from evopi.core.agent_loop import BeforeToolCallResult
 from evopi.core.cancellation import (
@@ -30,6 +31,7 @@ from evopi.core.messages import (
     UserMessage,
 )
 from evopi.core.model import Model
+from evopi.core.model_attempts import ModelAttemptInfo
 from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool, ToolCall, ToolResult
 from evopi.harness.context_manager import ContextManager, ContextProvider
@@ -40,6 +42,7 @@ from evopi.harness.confirmation import (
     ConfirmationResponse,
 )
 from evopi.harness.lifecycle import Lifecycle
+from evopi.harness.model_routing import HarnessModelAttemptRouter
 from evopi.harness.policy_manager import PolicyManager
 from evopi.harness.tool_manager import ToolManager
 from evopi.policy.approval import ApprovalMode, ApprovalStore
@@ -171,6 +174,7 @@ class BaseHarness:
         self,
         *,
         model: Model,
+        model_route: ModelRoute | None = None,
         system_prompt: str = "",
         trace_path: str | Path | None = None,
         max_turns: int = 20,
@@ -190,7 +194,10 @@ class BaseHarness:
         skills_enabled: bool = False,
         assembly_warnings: tuple[str, ...] = (),
     ) -> None:
+        if model_route is not None and model_route.primary.model is not model:
+            raise ValueError("model must be the primary ModelRoute candidate")
         self.model = model
+        self.model_route = model_route
         self.system_prompt = system_prompt
         self.tool_timeout = tool_timeout
         self.deadline = deadline
@@ -284,11 +291,12 @@ class BaseHarness:
         self._session_started_emitted = False
         self._session_failure: SessionError | None = None
         self._pending_session_events: list[CoreEvent] = []
+        resolved_retry_config = retry_config or ModelRetryConfig(enabled=True)
         self.agent = Agent(
             model=model,
             system_prompt=system_prompt,
             max_turns=max_turns,
-            retry_config=retry_config or ModelRetryConfig(enabled=True),
+            retry_config=resolved_retry_config,
             deadline=deadline,
             tool_timeout=tool_timeout,
             before_tool_call=self._before_tool_call,
@@ -296,6 +304,20 @@ class BaseHarness:
             prepare_context=self._prepare_context,
             after_model_call=self._after_model_call,
             should_stop_after_turn=self._should_stop_after_turn,
+            model_attempt_router_factory=(
+                (
+                    lambda run_id: HarnessModelAttemptRouter(
+                        route=model_route,
+                        retry_config=resolved_retry_config,
+                        run_id=run_id,
+                        system_prompt=self.system_prompt,
+                        authorize_failover=self._authorize_model_failover,
+                        emit=self.agent.emit_event,
+                    )
+                )
+                if model_route is not None
+                else None
+            ),
         )
         self.agent.messages.extend(self.session.messages)
         self.agent.subscribe(self._on_core_event)
@@ -912,6 +934,7 @@ class BaseHarness:
         self,
         context: AgentContext,
         *,
+        attempt_info: ModelAttemptInfo | None = None,
         signal: AbortSignal | None = None,
     ) -> AgentContext:
         prepared = await self.context.prepare(context, signal=signal)
@@ -952,12 +975,100 @@ class BaseHarness:
             PolicyContext(
                 hook="before_model_call",
                 agent_context=prepared,
+                model_attempt=attempt_info,
                 aborted=bool(signal and signal.aborted),
             )
         )
         if not (signal and signal.aborted):
             self._raise_if_blocked(evaluation, "Model call")
         return prepared
+
+    async def _authorize_model_failover(
+        self,
+        source: ModelAttemptInfo | None,
+        target: ModelAttemptInfo,
+        error_info: ModelErrorInfo | None,
+        remaining_attempts: int,
+        circuit_snapshots: tuple[CircuitStateSnapshot, ...],
+        selection_reason: str,
+        context: AgentContext,
+        signal: AbortSignal | None,
+    ) -> None:
+        evaluation = await self._evaluate(
+            PolicyContext(
+                hook="before_model_failover",
+                agent_context=context,
+                error=(error_info.message if error_info is not None else None),
+                error_info=error_info,
+                source_model_attempt=source,
+                target_model_attempt=target,
+                remaining_model_attempts=remaining_attempts,
+                circuit_snapshots=circuit_snapshots,
+                aborted=bool(signal and signal.aborted),
+                metadata={
+                    "route_id": target.route_id,
+                    "selection_reason": selection_reason,
+                    "target_candidate_id": target.candidate_id,
+                    **(
+                        {"source_candidate_id": source.candidate_id}
+                        if source is not None
+                        else {}
+                    ),
+                },
+            )
+        )
+        if signal is not None and signal.aborted:
+            await signal._wait_until_notified()
+            raise PolicyBlockedError("Model failover aborted")
+        if evaluation.final.action == "block":
+            raise PolicyBlockedError(
+                evaluation.final.reason or "Model failover blocked by Policy"
+            )
+        if evaluation.final.action not in {"allow", "require_confirmation"}:
+            raise PolicyBlockedError(
+                "before_model_failover does not support Policy action "
+                f"'{evaluation.final.action}'"
+            )
+        if evaluation.final.action != "require_confirmation":
+            return
+        request = ConfirmationRequest(
+            hook="before_model_failover",
+            reason=(
+                evaluation.final.reason
+                or "Human confirmation is required for model failover"
+            ),
+            risk_level=evaluation.final.risk_level,
+            policy_names=tuple(
+                decision.policy_name
+                for decision in evaluation.decisions
+                if decision.action == "require_confirmation"
+                and decision.policy_name is not None
+            ),
+            arguments={
+                "target_candidate_id": target.candidate_id,
+                "target_provider": target.provider,
+                "remaining_attempts": remaining_attempts,
+                "selection_reason": selection_reason,
+                **(
+                    {
+                        "source_candidate_id": source.candidate_id,
+                        "source_provider": source.provider,
+                    }
+                    if source is not None
+                    else {}
+                ),
+            },
+            metadata={
+                "session_id": self.session.session_id,
+                "route_id": target.route_id,
+                "failure_domain_id": target.failure_domain_id,
+            },
+        )
+        response = await self._request_confirmation(request, signal=signal)
+        if not response.approved:
+            raise PolicyBlockedError(
+                response.reason or "Model failover confirmation denied"
+            )
 
     async def _after_model_call(
         self,
@@ -1397,7 +1508,11 @@ class BaseHarness:
         ]
         return build_runtime_fingerprint(
             harness=f"{type(self).__module__}.{type(self).__qualname__}",
-            model=self.model.name,
+            model=(
+                f"route:{self.model_route.fingerprint}"
+                if self.model_route is not None
+                else self.model.name
+            ),
             system_prompt=self.system_prompt,
             tools=[tool.definition() for tool in self.tools.all()],
             policies=policies,
@@ -1594,6 +1709,11 @@ class BaseHarness:
                 "tool_result": context.tool_result,
                 "error": context.error,
                 "error_info": context.error_info,
+                "model_attempt": context.model_attempt,
+                "source_model_attempt": context.source_model_attempt,
+                "target_model_attempt": context.target_model_attempt,
+                "remaining_model_attempts": context.remaining_model_attempts,
+                "circuit_snapshots": context.circuit_snapshots,
                 "aborted": context.aborted,
                 "metadata": context.metadata,
             },

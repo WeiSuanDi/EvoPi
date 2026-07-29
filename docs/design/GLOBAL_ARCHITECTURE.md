@@ -24,6 +24,8 @@ flowchart TD
     User["用户 / 产品入口"] --> Harness["Harness<br/>运行治理框架"]
     Harness --> Core["Core<br/>稳定 Agent Loop"]
     Core --> Model["Model / API<br/>统一模型接入"]
+    Harness --> Routing["Model Route / Circuit<br/>候选与健康状态"]
+    Routing --> Model
     Core --> Tools["Tools<br/>具体动作能力"]
     Harness --> Policy["Policy<br/>可热插拔代码规则"]
     Harness --> Memory["Memory / Skills<br/>软性经验沉淀"]
@@ -152,7 +154,12 @@ Trace 记录执行过程：
 policy decision
 验证结果
 错误和重试
+候选切换和 circuit 状态
 ```
+
+多 Provider 可靠性仍遵循同一分层：AI 层提供无 Policy 的候选与健康原语，Core 只执行
+provider-neutral Attempt，Harness 在任何跨候选请求前运行 Policy / Confirmation。原始
+failure domain 不进入 Trace；Session 只保存 route fingerprint，不持久化短期 Circuit 状态。
 
 Trace 是后续演进的原材料。
 

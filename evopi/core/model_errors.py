@@ -19,6 +19,7 @@ ModelErrorKind: TypeAlias = Literal[
     "connection",
     "server",
     "protocol",
+    "route_unavailable",
     "unknown",
 ]
 

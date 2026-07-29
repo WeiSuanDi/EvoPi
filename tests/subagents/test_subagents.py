@@ -6,10 +6,13 @@ import asyncio
 
 import pytest
 
+from evopi.ai import ModelCandidate, ModelRoute
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage, UserMessage
 from evopi.core.stream import ModelComplete
+from evopi.core.model_errors import ModelError, ModelErrorInfo, ModelRetryConfig
 from evopi.core.tool import Tool
+from evopi.harness.base import BaseHarness
 from evopi.subagents import (
     GovernanceEnvelope,
     SubAgentError,
@@ -27,6 +30,7 @@ from evopi.subagents import (
 class _EchoModel:
     """Returns a fixed assistant message — never calls tools."""
     name = "echo"
+    context_window = 0
 
     def __init__(self, content: str = "done") -> None:
         self._content = content
@@ -186,6 +190,55 @@ def test_manager_adds_the_task_user_message_only_once() -> None:
 
     users = [message for message in model.contexts[0].messages if message.role == "user"]
     assert [message.content for message in users] == ["one task"]
+
+
+def test_manager_inherits_parent_model_route() -> None:
+    class FailingModel(_EchoModel):
+        name = "primary"
+
+        async def stream(self, context):
+            if False:
+                yield
+            raise ModelError(
+                ModelErrorInfo(
+                    kind="connection",
+                    message="primary unavailable",
+                    provider="test-primary",
+                    retryable=True,
+                )
+            )
+
+    class FallbackModel(_EchoModel):
+        name = "fallback"
+
+    primary = FailingModel()
+    fallback = FallbackModel("fallback result")
+    route = ModelRoute(
+        candidates=(
+            ModelCandidate(
+                candidate_id="primary",
+                provider="test-primary",
+                model=primary,
+            ),
+            ModelCandidate(
+                candidate_id="fallback",
+                provider="test-fallback",
+                model=fallback,
+            ),
+        )
+    )
+    parent = BaseHarness(
+        model=primary,
+        model_route=route,
+        retry_config=ModelRetryConfig(enabled=True, max_retries=1, base_delay=0),
+    )
+    manager = SubAgentManager(primary, parent_harness=parent)
+    scope = SubAgentScope(messages=[UserMessage(content="do it")])
+
+    result = asyncio.run(manager.run(scope))
+
+    assert result.success is True
+    assert result.content == "fallback result"
 
 
 def test_governance_envelope_rejects_tools_above_parent_ceiling() -> None:

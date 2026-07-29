@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -64,6 +65,10 @@ class OpenAIResponsesModel:
         self.headers = dict(headers or {})
         self._client = client
         self._context_window = context_window
+        self._state_compatibility_id = _provider_compatibility_id(
+            model=self.model,
+            base_url=self.base_url,
+        )
 
     @property
     def name(self) -> str:
@@ -82,7 +87,10 @@ class OpenAIResponsesModel:
         system = "\n\n".join(message.content for message in context.system_messages)
         payload: dict[str, Any] = {
             "model": self.model,
-            "input": _convert_input(context),
+            "input": _convert_input(
+                context,
+                compatibility_id=self._state_compatibility_id,
+            ),
             "stream": True,
             "store": False,
             "max_output_tokens": self.max_tokens,
@@ -222,12 +230,22 @@ class OpenAIResponsesModel:
             message=_message_from_terminal(
                 terminal,
                 model=self.model,
+                compatibility_id=self._state_compatibility_id,
                 incomplete=terminal_type == "response.incomplete",
             )
         )
 
 
-def _convert_input(context: AgentContext) -> list[dict[str, Any]]:
+def _provider_compatibility_id(*, model: str, base_url: str) -> str:
+    value = f"{base_url.rstrip('/')}\n{model}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _convert_input(
+    context: AgentContext,
+    *,
+    compatibility_id: str,
+) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for message in context.messages:
         if isinstance(message, SystemMessage):
@@ -236,7 +254,10 @@ def _convert_input(context: AgentContext) -> list[dict[str, Any]]:
             converted.append({"role": "user", "content": message.content})
             continue
         if isinstance(message, AssistantMessage):
-            provider_output = _provider_output(message)
+            provider_output = _provider_output(
+                message,
+                compatibility_id=compatibility_id,
+            )
             if provider_output is not None:
                 converted.extend(provider_output)
                 continue
@@ -271,7 +292,11 @@ def _convert_input(context: AgentContext) -> list[dict[str, Any]]:
     return converted
 
 
-def _provider_output(message: AssistantMessage) -> list[dict[str, Any]] | None:
+def _provider_output(
+    message: AssistantMessage,
+    *,
+    compatibility_id: str,
+) -> list[dict[str, Any]] | None:
     state = message.metadata.get("openai_responses")
     if state is None or message.metadata.get("provider") != _PROVIDER:
         return None
@@ -284,6 +309,7 @@ def _provider_output(message: AssistantMessage) -> list[dict[str, Any]] | None:
     status = state.get("status")
     output = state.get("output")
     incomplete_details = state.get("incomplete_details")
+    stored_compatibility_id = state.get("compatibility_id")
     if (
         not isinstance(response_id, str)
         or not response_id
@@ -304,6 +330,15 @@ def _provider_output(message: AssistantMessage) -> list[dict[str, Any]] | None:
         message="Stored OpenAI Responses provider state is not JSON-safe",
         code="invalid_provider_state",
     )
+    if stored_compatibility_id is None:
+        return None
+    if not isinstance(stored_compatibility_id, str):
+        raise _protocol_error(
+            "Stored OpenAI Responses compatibility identity is malformed",
+            code="invalid_provider_state",
+        )
+    if stored_compatibility_id != compatibility_id:
+        return None
     return [dict(item) for item in output]
 
 
@@ -311,6 +346,7 @@ def _message_from_terminal(
     response: dict[str, Any],
     *,
     model: str,
+    compatibility_id: str,
     incomplete: bool,
 ) -> AssistantMessage:
     response_id = response.get("id")
@@ -388,6 +424,7 @@ def _message_from_terminal(
         "status": status,
         "output": output_items,
         "incomplete_details": incomplete_details,
+        "compatibility_id": compatibility_id,
     }
     _ensure_json_safe(
         provider_state,

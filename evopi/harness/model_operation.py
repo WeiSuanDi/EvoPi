@@ -54,6 +54,7 @@ class GovernedModelOperation:
         )
         child = BaseHarness(
             model=self.model,
+            model_route=self.parent.model_route,
             system_prompt=system_prompt,
             approval_mode="off",
             confirmation_handler=self.parent.confirmation_handler,
@@ -70,6 +71,14 @@ class GovernedModelOperation:
                 "model_start",
                 "model_retry_start",
                 "model_retry_end",
+                "model_failover_start",
+                "model_failover_end",
+                "model_circuit_state_changed",
+                "model_candidate_skipped",
+                "policy_decision",
+                "policy_evaluation",
+                "confirmation_request",
+                "confirmation_response",
                 "message_start",
                 "message_update",
                 "message_end",

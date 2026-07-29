@@ -28,6 +28,7 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
 from evopi.core.messages import AssistantMessage, Message, SystemMessage, UserMessage
 from evopi.core.model import Model
+from evopi.core.model_attempts import ModelAttemptRouter
 from evopi.core.model_errors import ModelRetryConfig, error_info_from_exception
 from evopi.core.run import AgentEndReason, AgentLoopResult, AgentRunState
 from evopi.core.tool import Tool
@@ -59,6 +60,7 @@ class Agent:
         after_model_call: AfterModelCall | None = None,
         after_turn: AfterTurn | None = None,
         should_stop_after_turn: ShouldStopAfterTurn | None = None,
+        model_attempt_router_factory: Callable[[str], ModelAttemptRouter] | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
@@ -74,6 +76,7 @@ class Agent:
         self._after_model_call = after_model_call
         self._after_turn = after_turn
         self._should_stop_after_turn = should_stop_after_turn
+        self._model_attempt_router_factory = model_attempt_router_factory
         self._run_lock = asyncio.Lock()
         self._active_guard = Lock()
         self._active_run: _ActiveRun | None = None
@@ -153,6 +156,11 @@ class Agent:
             run_start = len(self.messages)
             user_message = UserMessage(content=content)
             self.messages.append(user_message)
+            model_attempt_router = (
+                self._model_attempt_router_factory(run_id)
+                if self._model_attempt_router_factory is not None
+                else None
+            )
             caller_cancelled = False
             result: AgentLoopResult | None = None
             failure: Exception | None = None
@@ -190,6 +198,7 @@ class Agent:
                             should_stop_after_turn=self._should_stop_after_turn,
                             run_id=run_id,
                             signal=active.controller.signal,
+                            model_attempt_router=model_attempt_router,
                         )
                     )
                     try:
@@ -269,6 +278,11 @@ class Agent:
                     raise asyncio.CancelledError
                 return result.message
             finally:
+                if model_attempt_router is not None:
+                    try:
+                        await model_attempt_router.close()
+                    except Exception:
+                        pass
                 await self._stop_abort_monitor(active)
                 self._current_run_id = None
                 with self._active_guard:

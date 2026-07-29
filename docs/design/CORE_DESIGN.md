@@ -164,7 +164,7 @@ Core：根据结构化 retryable、预算和 Retry-After 重试完整模型调�
 
 `ModelErrorKind` 固定覆盖 `authentication / permission / invalid_request / not_found /
 context_overflow / quota_exhausted / rate_limited / overloaded / timeout / connection /
-server / protocol / unknown`。`ModelErrorInfo` 同时携带安全截断消息、Provider、HTTP 状态、
+server / protocol / route_unavailable / unknown`。`ModelErrorInfo` 同时携带安全截断消息、Provider、HTTP 状态、
 Provider code、`retry_after`、request ID 和元数据；通过 `ModelError.info`、
 `AgentRunState.error_info`、`error` / `agent_end` 事件和 Trace 暴露。字符串 `error` 保留兼容。
 
@@ -185,6 +185,18 @@ Abort 的优先级高于重试：活动请求、部分输出后的流和退避�
 `asyncio.CancelledError`。Adapter 的 `timeout` 是连接与流式 I/O 空闲超时，不是单次调用或
 整个 Run 的墙钟总时限。
 
+### Model Route 与 Circuit Breaker v1
+
+Core 不决定 Provider 顺序，也不持有 Circuit。`ModelCallExecutor` 只接受可选的
+provider-neutral `ModelAttemptRouter`，并把每个实际请求的 `ModelAttemptInfo` 写入模型、
+消息与 Retry 事件。Router 可以在共享的 attempt 预算内选择不同 Model；没有 Router 时
+原有单模型 Retry 行为保持不变。
+
+失败 attempt 无论是否还有 Retry 预算，都会先通过 Router 记入健康状态。只有非
+`aborted` 的完整响应才记为成功；Abort、确认拒绝、Listener 异常或 Run 清理必须释放未
+结算的 half-open probe，不能把取消误报为健康恢复。Router 选择和 Circuit 状态属于
+Harness/AI 基础层，Core 不依赖具体 Provider、Policy 或 Session。
+
 ### 原生 OpenAI Responses Adapter
 
 `OpenAIResponsesModel` 通过既有 `Model.stream()` 接入上述执行器，不向 Agent Loop
@@ -200,8 +212,10 @@ Tool 使用扁平 function schema 且 `strict=false`，保持当前 Tool Schema 
 成功或 incomplete 的终端 Response 是正式 AssistantMessage 的权威来源。完整 JSON-safe
 `output`、response ID、状态和 incomplete details 写入 Provider metadata，并由现有
 Session v3 / Checkpoint 严格 Codec 原样保存；下一次请求优先重放该输出。旧 Session、
-缺少同名 Provider State 的消息和 Provider 切换通过规范化文本与 ToolCall 重建。若
-同名 Provider State 已存在但结构损坏，则在网络请求前产生不可重试 protocol 错误。
+缺少兼容 Provider State 的消息和 Provider 切换通过规范化文本与 ToolCall 重建。状态
+额外绑定哈希后的模型与 Base URL 兼容身份；同 Provider 的不同模型或端点也不会互相
+重放私有 output。若同名 Provider State 已存在但结构损坏，则在网络请求前产生不可重试
+protocol 错误。
 
 流式 text / refusal / function-call delta 继续进入 Core Stream；终端 output 决定最终文本、
 ToolCall 与 stop reason。Reasoning 等非执行输出只保存在 Provider State 中，不生成新的

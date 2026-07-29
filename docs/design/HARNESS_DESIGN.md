@@ -79,6 +79,21 @@ Harness 将最终 `error` 事件中的 `ModelErrorInfo` 放入 `PolicyContext.er
 字符串 `error` 兼容。`on_error` 只在重试耗尽或错误不可重试时执行一次，不观察每个瞬态
 attempt；每次尝试的细节由 `model_start`、`model_retry_*`、消息事件和 Trace 提供。
 
+Provider Failover v1 由 Harness 组织，但继续复用同一个 Core `ModelCallExecutor`。
+`ModelRoute` 声明有序候选、稳定 route fingerprint、失败域和进程内 Circuit；
+`HarnessModelAttemptRouter` 负责候选选择、Run affinity、上下文窗口预检和
+`before_model_failover` 治理。默认 Circuit 连续两次健康类失败后开启，30 秒后只允许一个
+half-open probe；合法 `Retry-After` 会立即暂停共享失败域。明确的模型不存在和
+`context_overflow` 只暂停对应候选，避免错误隔离同一端点上的其他模型。
+
+任何从一个候选切到另一个候选的行为都先执行 Policy/Confirmation，包括新 Run 的主
+候选已经开路或基础上下文已知不兼容时的初始 fallback。成功候选只在当前 Run 内保持
+亲和性；Circuit 跨 Run 共享但不持久化、无后台探测，也不跨进程同步。动态 Context
+Provider 与 Plugin Prompt 在实际 attempt 前仍会重新执行；跨候选授权发生在最终目标
+Context 形成之后、网络请求之前，因此 `before_model_failover` 看到的快照与实际发送内容
+一致。若动态注入导致基础预检后溢出，Adapter 的结构化 `context_overflow` 会把该候选
+标记不可用并进入同一受治理切换链。关闭 Failover 时，初始选择也不会绕到备用候选。
+
 ### 2. Hook 点治理
 
 Harness 要提供 Policy 可以插入的治理节点。
@@ -87,6 +102,7 @@ Harness 要提供 Policy 可以插入的治理节点。
 
 ```text
 before_model_call
+before_model_failover
 after_model_call
 before_tool_call
 after_tool_call

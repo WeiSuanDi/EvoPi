@@ -113,6 +113,10 @@ Entry ID、断裂 parent、非法消息和不支持的新 schema version 都拒�
 
 恢复始终使用当前 Harness 的可执行配置。每个新 Run 前比较上次 Checkpoint 的
 Harness、模型、System Prompt、工具和 Policy 指纹；变化产生 warning，但不阻止运行。
+使用 Model Route 时，“模型”指纹保存稳定 route fingerprint，其中包含候选顺序、Provider、
+模型名、哈希后的失败域、上下文预算、Failover 开关和 Circuit 配置。进程内 Circuit 状态与
+Run affinity 不写入 Session 或 Checkpoint；恢复后由当前进程从 closed 状态重新建立健康
+事实，避免把过期的端点故障当作持久会话事实。
 
 显式打开另一个工作区创建的 Session 也允许继续。Session 保留原始工作区，工具绑定
 当前 Harness 工作区，并通过 `SessionRecoveryInfo`、CLI stderr 与 `session_start`

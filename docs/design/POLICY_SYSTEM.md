@@ -50,6 +50,20 @@ Policy 直接改变 Core 已确定的重试预算或错误可重试性：Adapter
 重试，Harness 负责配置。每个 attempt 都重新运行 `before_model_call`，所以 Policy 仍可在
 重试前根据最新上下文阻断调用；最终失败时 `on_error` 只执行一次。
 
+`before_model_failover` 是跨候选数据发送前的独立治理 Hook。`PolicyContext` 提供安全的
+source/target `ModelAttemptInfo`、结构化错误、剩余总 attempt 预算、Circuit 快照和
+`selection_reason`。当主候选在首次请求前因开路或上下文不兼容被跳过时，source 与
+error 可以为空，但 target 必须完整。该 Hook 只接受 `allow / block /
+require_confirmation`；rewrite、terminate 和 validation 没有路由语义，必须 fail closed。
+
+该 Hook 在目标候选的 Context Provider、动态 Plugin Prompt 与 `before_model_call` 完成
+之后执行，读取即将发送的同一 Context 快照；授权完成后不会再次改写该快照。这样跨
+Provider 的数据边界不会遗漏运行时注入内容。
+
+Provider Failover v1 不增加 Policy Retry Hook，也不允许 Policy 扩大 Retry 预算、重开
+Circuit 或绕过其他限制。现有离线 Trace Replay 第一版仍只重建 `before_tool_call`；
+failover 事件和 Policy evaluation 已进入 Trace，但专用 Replay Case 留给后续协议扩展。
+
 ## 三类核心 Policy
 
 ### BeforeToolPolicy

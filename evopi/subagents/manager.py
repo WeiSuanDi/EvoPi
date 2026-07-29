@@ -94,6 +94,11 @@ class SubAgentManager:
             )
         child = BaseHarness(
             model=self._model,
+            model_route=(
+                self._parent_harness.model_route
+                if self._parent_harness is not None
+                else None
+            ),
             system_prompt=scope.system_prompt,
             max_turns=min(
                 scope.max_turns,
@@ -102,6 +107,11 @@ class SubAgentManager:
             deadline=governance.deadline,
             tool_timeout=governance.tool_timeout,
             confirmation_handler=governance.confirmation_handler,
+            retry_config=(
+                self._parent_harness.agent.retry_config
+                if self._parent_harness is not None
+                else None
+            ),
             approval_mode="off",
             trace_path=child_trace,
         )

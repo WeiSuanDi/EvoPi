@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from evopi.ai.routing import ModelRoute
 from evopi.coding.policies import coding_policy_pack
 from evopi.coding.prompts import build_system_prompt
 from evopi.coding.tools import (
@@ -44,6 +45,7 @@ class CodingHarness(BaseHarness):
         self,
         *,
         model: Model,
+        model_route: ModelRoute | None = None,
         workspace: str | Path,
         trace_path: str | Path | None = None,
         max_turns: int = 20,
@@ -124,6 +126,7 @@ class CodingHarness(BaseHarness):
         # ------------------------------------------------------------------ #
         super().__init__(
             model=model,
+            model_route=model_route,
             system_prompt=resolved_prompt,
             trace_path=trace_path,
             max_turns=max_turns,

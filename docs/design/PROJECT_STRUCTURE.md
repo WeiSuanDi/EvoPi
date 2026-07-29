@@ -40,7 +40,9 @@ EvoPi/
 - 将厂商协议转成 EvoPi 内部 Model 接口
 
 当前已实现 OpenAI-compatible Chat Completions、原生 OpenAI Responses 与 Anthropic
-Messages 流式适配器；测试中使用脚本化 Model 作为替身，真实模型调用仍是产品主路径。
+Messages 流式适配器，以及无 Policy 的 `ModelRoute` / Circuit 健康原语；测试中使用脚本化
+Model 作为替身，真实模型调用仍是产品主路径。候选切换治理不在 AI Adapter 中执行，
+由 Harness 的 `HarnessModelAttemptRouter` 接入 Policy、Confirmation 和 Trace。
 
 ## evopi/core
 
@@ -77,6 +79,7 @@ Core 负责 Agent 能跑。
 - 管理 lifecycle
 - 组织 session / context / tools
 - 把 Core 包装成可长期运行的系统
+- 组织 Model Route、Run affinity 与 `before_model_failover` 治理
 
 一句话：
 

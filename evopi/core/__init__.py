@@ -13,6 +13,11 @@ from evopi.core.messages import (
     UserMessage,
 )
 from evopi.core.model import Model
+from evopi.core.model_attempts import (
+    ModelAttemptInfo,
+    ModelAttemptRouter,
+    ModelAttemptSelection,
+)
 from evopi.core.model_executor import ModelCallExecutor, ModelCallOutcome
 from evopi.core.model_errors import (
     ModelError,
@@ -35,6 +40,9 @@ __all__ = [
     "CoreEvent",
     "Message",
     "Model",
+    "ModelAttemptInfo",
+    "ModelAttemptRouter",
+    "ModelAttemptSelection",
     "ModelCallExecutor",
     "ModelCallOutcome",
     "ModelError",

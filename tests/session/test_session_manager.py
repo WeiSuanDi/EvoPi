@@ -208,6 +208,7 @@ def test_session_checkpoint_preserves_openai_responses_provider_state(
             },
         ],
         "incomplete_details": None,
+        "compatibility_id": "a" * 64,
     }
     manager.append_message(
         run_id=run_id,

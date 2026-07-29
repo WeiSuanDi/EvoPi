@@ -81,10 +81,11 @@ def call_with_optional_signal(
     callback: Callable[..., Any],
     *args: Any,
     signal: AbortSignal | None,
+    **kwargs: Any,
 ) -> Any:
     if accepts_signal(callback):
-        return callback(*args, signal=signal)
-    return callback(*args)
+        return callback(*args, signal=signal, **kwargs)
+    return callback(*args, **kwargs)
 
 
 __all__ = ["AbortSignal"]
