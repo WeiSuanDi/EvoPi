@@ -23,7 +23,11 @@ from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
 from evopi.cli.plugin import plugin_main
 from evopi.cli.resume import pick_session
-from evopi.cli.session import print_session_opened, session_list_main
+from evopi.cli.session import (
+    print_session_opened,
+    session_gc_main,
+    session_list_main,
+)
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.session import SessionManager
@@ -405,6 +409,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
         return session_list_main(raw_args[2:])
+    if raw_args[:2] == ["session", "gc"]:
+        return session_gc_main(raw_args[2:])
     if len(raw_args) >= 2 and raw_args[0] == "plugin":
         return plugin_main(raw_args[1], raw_args[2:])
 

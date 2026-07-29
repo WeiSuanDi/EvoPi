@@ -6,6 +6,16 @@ from evopi.session.errors import (
     SessionPersistenceError,
     SessionSerializationError,
 )
+from evopi.session.gc import (
+    DEFAULT_CHECKPOINT_GC_SETTINGS,
+    CheckpointGCCategory,
+    CheckpointGCError,
+    CheckpointGCFailure,
+    CheckpointGCItem,
+    CheckpointGCPlan,
+    CheckpointGCReport,
+    CheckpointGCSettings,
+)
 from evopi.session.merge import (
     DEFAULT_MERGE_SETTINGS,
     MergeSettings,
@@ -47,6 +57,13 @@ from evopi.session.tree import (
 __all__ = [
     "BranchEntry",
     "CheckpointEntry",
+    "CheckpointGCCategory",
+    "CheckpointGCError",
+    "CheckpointGCFailure",
+    "CheckpointGCItem",
+    "CheckpointGCPlan",
+    "CheckpointGCReport",
+    "CheckpointGCSettings",
     "CompactEntry",
     "LeafSelectedEntry",
     "MessageEntry",
@@ -75,6 +92,7 @@ __all__ = [
     "SessionSummary",
     "build_runtime_fingerprint",
     "DEFAULT_MERGE_SETTINGS",
+    "DEFAULT_CHECKPOINT_GC_SETTINGS",
     "entry_from_dict",
     "entry_to_dict",
     "message_from_dict",
