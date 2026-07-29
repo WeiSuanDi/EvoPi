@@ -19,6 +19,7 @@ from rich.console import Console
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
+from evopi.cli.diagnostics import config_show_main, doctor_main
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
 from evopi.cli.policy import policy_init_main, policy_lifecycle_main
@@ -245,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--system-prompt", metavar="TEXT",
         help="Override the default system prompt",
     )
+    advanced_group.add_argument(
+        "--append-system-prompt",
+        metavar="TEXT",
+        help="Append instructions after the generated or replacement system prompt",
+    )
     return parser
 
 
@@ -292,7 +298,8 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         model_route=model_route,
         workspace=args.workspace,
         trace_path=args.trace,
-        system_prompt=getattr(args, "system_prompt", "") or "",
+        system_prompt=getattr(args, "system_prompt", None),
+        append_system_prompt=getattr(args, "append_system_prompt", None),
         retry_config=ModelRetryConfig(
             enabled=not getattr(args, "no_retry", False),
             max_retries=getattr(args, "max_retries", 3),
@@ -589,6 +596,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return session_gc_main(raw_args[2:])
     if len(raw_args) >= 2 and raw_args[0] == "plugin":
         return plugin_main(raw_args[1], raw_args[2:])
+    if raw_args[:2] == ["config", "show"]:
+        return config_show_main(raw_args[2:])
+    if raw_args[:1] == ["config"]:
+        print(format_management_help("config"))
+        return 0 if raw_args[1:] in (["--help"], ["-h"]) else 2
+    if raw_args[:1] == ["doctor"]:
+        return doctor_main(raw_args[1:])
 
     try:
         if raw_args[:1] == ["chat"]:

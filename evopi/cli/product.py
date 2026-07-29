@@ -11,6 +11,9 @@ from evopi.core.model_errors import ModelErrorInfo
 
 
 _MANAGEMENT_ACTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "config": (
+        ("show", "Show effective configuration without exposing credentials"),
+    ),
     "session": (
         ("list", "List persisted sessions"),
         ("gc", "Plan or apply checkpoint garbage collection"),

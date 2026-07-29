@@ -466,3 +466,9 @@ Partial / Delta 属于 Event / Stream；
 流式过程通过 Event 暴露；
 上下文保存最终完整消息。
 ```
+
+## CLI 产品化边界
+
+`chat`、`run`、REPL Command、配置诊断、Tool ceiling 和动态 Coding Prompt 都在
+Harness/Domain/CLI 层实现。Core 的 Model、Message、ToolResult、Event 和结束原因协议
+保持不变；`run --json` 只是对 `AgentRunState` 与最终 AssistantMessage 的安全投影。

@@ -219,3 +219,10 @@ GC 不追加维护 Entry，也不修改 Session Tree。`session.jsonl`、版本�
 Session 和 Checkpoint 是本地明文，可能包含 Prompt、模型回复与工具输出。用户应像
 保护 Trace 一样保护 Session 根目录。v4 不做自动脱敏、加密、远程存储、删除/重命名、
 Session Log GC、跨 Session Merge、双父 DAG、运行中继续执行或工具幂等重放。
+
+## 产品入口
+
+交互工作台通过公共 Harness API 执行 `/new`、`/branch`、`/switch`、`/merge` 与
+`/compact`，不直接修改 SessionManager 私有状态。`evopi run --json` 只输出 Session/
+Run 标识与最终结果，不复制 Prompt 或 Provider State。`config show` 展示有效 Session
+Root；`doctor` 仅做可清理的写入探测，不打开或修改既有 Session Log。

@@ -335,3 +335,14 @@ trace replay
 supervisor review
 human confirmation
 ```
+
+## 活动能力与动态 Prompt
+
+Harness 公开注册 Tool 与最终活动 Tool 的只读快照。CLI include/exclude 是不可扩张的
+上限；Plugin 的 run/session 覆盖与其取交集，SubAgent 继承同一上限。Tool 注册、Reload、
+Plan Mode 覆盖清理及 Session leaf 恢复后，Domain Harness 根据最终活动视图刷新
+System Prompt。
+
+CodingHarness 支持生成 Prompt、完整替换和追加三种组合语义。Plugin Prompt Fragment
+与 Skill Context 仍在每次模型调用前装配，不被固化进基础 Prompt。裸 BaseHarness
+不读取 CLI 环境、用户活动 Policy 或 Coding 资源。

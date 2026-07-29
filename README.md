@@ -106,11 +106,20 @@ Credentials are loaded from the environment or a local `.env` file. EvoPi does n
 
 ## Quick start
 
-Run the coding agent in the current directory:
+Start the interactive workbench, or run a single task:
 
 ```powershell
+evopi
+evopi chat 'Inspect this project, then keep the conversation open.'
 evopi 'Inspect this project and summarize its architecture.'
+evopi run 'Inspect this project and summarize its architecture.'
+Get-Content task.md | evopi run --json
 ```
+
+The first two forms are interactive. `evopi "PROMPT"` remains the compatible one-shot form;
+`evopi run` is the explicit automation entry and supports a stable, privacy-minimal JSON result.
+Use `evopi --help` to discover the full `session`, `policy`, `plugin`, `config`, and `doctor`
+command tree.
 
 Choose a provider or workspace explicitly:
 
@@ -118,6 +127,23 @@ Choose a provider or workspace explicitly:
 evopi --provider anthropic --workspace C:\path\to\project 'Run the tests and explain any failures.'
 evopi --provider openai-responses 'Inspect this project through the Responses API.'
 ```
+
+Inspect effective configuration or run offline diagnostics without exposing credential values:
+
+```powershell
+evopi config show --json
+evopi doctor
+```
+
+Explicit fallback routes and Tool ceilings are Harness controls:
+
+```powershell
+evopi chat --fallback openai-responses:gpt-5 --exclude-tools shell_command
+evopi run --tools read_file,list_dir 'Summarize the repository without changing it.'
+```
+
+Fallback candidates are validated before the Session starts. Tool ceilings can be narrowed by
+Plugins, Plan Mode, or SubAgents, but never widened by them.
 
 Harness-backed CLI runs retry transient model failures up to three additional times by default. Control this behavior explicitly when needed:
 

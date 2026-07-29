@@ -59,6 +59,7 @@ class CodingHarness(BaseHarness):
         retry_config: ModelRetryConfig | None = None,
         max_output_chars: int = 20_000,
         system_prompt: str | None = None,
+        append_system_prompt: str | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
         session_manager: SessionManager | None = None,
         approvals_path: str | Path | None = None,
@@ -79,7 +80,8 @@ class CodingHarness(BaseHarness):
         policy_activation_service: PolicyActivationService | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
-        self._dynamic_system_prompt = not bool(system_prompt)
+        self._dynamic_system_prompt = system_prompt is None
+        self._append_system_prompt = append_system_prompt
         if tool_names is not None and excluded_tool_names is not None:
             raise ValueError(
                 "Tool include and exclude ceilings are mutually exclusive"
@@ -158,7 +160,15 @@ class CodingHarness(BaseHarness):
                 or tool.name not in excluded_tool_names
             )
         ]
-        resolved_prompt = system_prompt or build_system_prompt(prompt_tools)
+        resolved_prompt = (
+            build_system_prompt(
+                prompt_tools,
+                workspace=self.workspace,
+                append=append_system_prompt,
+            )
+            if system_prompt is None
+            else _append_prompt(system_prompt, append_system_prompt)
+        )
 
         # ------------------------------------------------------------------ #
         #  Base harness (Plugin loading + Agent creation with dynamic prompt)
@@ -305,7 +315,11 @@ class CodingHarness(BaseHarness):
     def _refresh_system_prompt_after_capability_change(self) -> None:
         if not self._dynamic_system_prompt:
             return
-        prompt = build_system_prompt(list(self.active_tools()))
+        prompt = build_system_prompt(
+            list(self.active_tools()),
+            workspace=self.workspace,
+            append=self._append_system_prompt,
+        )
         self.system_prompt = prompt
         self.agent.system_prompt = prompt
         for index, message in enumerate(self.agent.messages):
@@ -314,6 +328,14 @@ class CodingHarness(BaseHarness):
                 break
         else:
             self.agent.messages.insert(0, SystemMessage(content=prompt))
+
+
+def _append_prompt(base: str, appendix: str | None) -> str:
+    if appendix is None or not appendix.strip():
+        return base
+    if not base:
+        return appendix.strip()
+    return f"{base}\n\n{appendix.strip()}"
 
 
 __all__ = ["CodingHarness"]

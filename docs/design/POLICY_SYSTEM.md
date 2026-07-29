@@ -557,3 +557,10 @@ human confirmation
   ↓
 enable / reject
 ```
+
+## CLI 治理表面
+
+REPL `/policies` 与管理 CLI 只展示公开快照；`config show` 和 `doctor` 不批准、不激活、
+不 Reload Policy。Doctor 只校验活动选择、批准记录和不可变工件摘要，损坏时报告
+`failed`。动态 Prompt 会告诉模型 Policy 可以 block、confirm、rewrite 或 validate，
+但模型不能绕过 Policy、伪造批准，或把 Reload 描述为授权。
