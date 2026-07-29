@@ -21,9 +21,10 @@ from evopi.core.model_errors import ModelErrorInfo, ModelErrorKind
 from evopi.core.tool import ToolArgumentError, ToolCall
 from evopi.session.errors import SessionFormatError, SessionSerializationError
 
-SESSION_SCHEMA_VERSION = 3
+SESSION_SCHEMA_VERSION = 4
 LEGACY_SESSION_SCHEMA_VERSION = 1
-SUPPORTED_SESSION_SCHEMA_VERSIONS = (1, 2, SESSION_SCHEMA_VERSION)
+SUPPORTED_SESSION_SCHEMA_VERSIONS = (1, 2, 3, SESSION_SCHEMA_VERSION)
+MERGE_SUMMARY_LIMIT_BYTES = 64 * 1024
 
 SessionRunEndReason: TypeAlias = Literal[
     "completed",
@@ -43,8 +44,10 @@ SessionEntryType: TypeAlias = Literal[
     "compact",
     "leaf_selected",
     "plugin_state",
+    "merge",
 ]
 PluginStateOperation: TypeAlias = Literal["set", "delete"]
+MergeSummaryOrigin: TypeAlias = Literal["manual", "model"]
 
 
 def new_id() -> str:
@@ -186,9 +189,27 @@ class PluginStateEntry:
     type: Literal["plugin_state"] = field(default="plugin_state", init=False)
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class MergeEntry:
+    entry_id: str
+    parent_id: str | None
+    operation_id: str
+    source_entry_id: str
+    common_ancestor_id: str
+    source_path_sha256: str
+    source_entry_count: int
+    summary: str
+    summary_origin: MergeSummaryOrigin
+    run_id: None = field(default=None, init=False)
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = SESSION_SCHEMA_VERSION
+    type: Literal["merge"] = field(default="merge", init=False)
+
+
 SessionEntry: TypeAlias = (
     RunStartEntry | MessageEntry | RunEndEntry | CheckpointEntry
     | BranchEntry | CompactEntry | LeafSelectedEntry | PluginStateEntry
+    | MergeEntry
 )
 
 
@@ -268,6 +289,18 @@ def entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
                 "value": json_value(entry.value, path="plugin_state.value"),
             }
         )
+    elif isinstance(entry, MergeEntry):
+        base.update(
+            {
+                "operation_id": entry.operation_id,
+                "source_entry_id": entry.source_entry_id,
+                "common_ancestor_id": entry.common_ancestor_id,
+                "source_path_sha256": entry.source_path_sha256,
+                "source_entry_count": entry.source_entry_count,
+                "summary": entry.summary,
+                "summary_origin": entry.summary_origin,
+            }
+        )
     return base
 
 
@@ -279,7 +312,7 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
     created_at = _require_datetime(value.get("created_at"), "created_at")
     run_id = (
         _optional_id(value.get("run_id"), "run_id")
-        if entry_type == "plugin_state"
+        if entry_type in {"plugin_state", "merge"}
         else _require_id(value.get("run_id"), "run_id")
     )
     if entry_type == "run_start":
@@ -426,6 +459,40 @@ def entry_from_dict(value: Mapping[str, Any]) -> SessionEntry:
             key=key,
             operation=cast(PluginStateOperation, operation),
             value=raw_value,
+        )
+    if entry_type == "merge":
+        summary = _require_string(value.get("summary"), "merge.summary").strip()
+        if not summary:
+            raise SessionFormatError("merge.summary cannot be empty")
+        if len(summary.encode("utf-8")) > MERGE_SUMMARY_LIMIT_BYTES:
+            raise SessionFormatError("merge.summary exceeds 64 KiB")
+        origin = value.get("summary_origin")
+        if origin not in {"manual", "model"}:
+            raise SessionFormatError("merge.summary_origin must be manual or model")
+        count = value.get("source_entry_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise SessionFormatError(
+                "merge.source_entry_count must be a positive integer"
+            )
+        return MergeEntry(
+            entry_id=entry_id,
+            parent_id=parent_id,
+            created_at=created_at,
+            operation_id=_require_id(
+                value.get("operation_id"), "merge.operation_id"
+            ),
+            source_entry_id=_require_id(
+                value.get("source_entry_id"), "merge.source_entry_id"
+            ),
+            common_ancestor_id=_require_id(
+                value.get("common_ancestor_id"), "merge.common_ancestor_id"
+            ),
+            source_path_sha256=_require_sha256(
+                value.get("source_path_sha256")
+            ),
+            source_entry_count=count,
+            summary=summary,
+            summary_origin=cast(MergeSummaryOrigin, origin),
         )
     raise SessionFormatError(f"unsupported Session entry type: {entry_type!r}")
 
@@ -740,7 +807,10 @@ __all__ = [
     "CompactEntry",
     "LeafSelectedEntry",
     "LEGACY_SESSION_SCHEMA_VERSION",
+    "MERGE_SUMMARY_LIMIT_BYTES",
     "MessageEntry",
+    "MergeEntry",
+    "MergeSummaryOrigin",
     "PluginStateEntry",
     "PluginStateOperation",
     "RunEndEntry",

@@ -230,10 +230,16 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。
 
-Session Log 使用 schema v3。活动叶切换和 Plugin 状态变更都是追加式事实，因此 Harness transcript、
-Agent Context、Checkpoint 投影与重启恢复保持一致。通过验证的 v1 日志会先备份再原子
-迁移；v2 日志同样会原子升级。Checkpoint 消息或 Plugin 状态与活动路径不一致时会被
-丢弃并从事实日志重建。
+Session Log 使用 schema v4。活动叶切换、Plugin 状态和证据绑定的分支合并都是追加式
+事实，因此 Harness transcript、Agent Context、Checkpoint 投影与重启恢复保持一致。
+通过验证的 v1、v2 或 v3 日志会先备份再原子迁移。Checkpoint 消息或 Plugin 状态与
+活动路径不一致时会被丢弃并从事实日志重建。
+
+交互 Session 可通过 `/merge <来源叶前缀> [手工摘要]` 把另一条分支的认知结论带回
+当前活动叶。提供摘要时零模型调用；省略时，EvoPi 会对来源分歧路径运行受治理、无工具
+的模型操作。目标分支只增加一条与来源路径摘要绑定的上下文消息，不复制来源消息、
+不重放工具，也不合并 Plugin State。`/switch` 同样接受唯一 Entry 前缀，`/leaves`
+会显示分支名、消息预览和活动标记。
 
 运行中的任务可以通过 `Agent.abort()` 或 `BaseHarness.abort()` 协作式中止。该调用是同步、线程安全、幂等的，空闲时调用不会产生影响。模型流与异步工具会被取消，运行中的 Shell 进程树会被终止；当前批次中每个已请求的兄弟工具仍会获得可关联的错误结果。已经产生的模型文本会保留，未完成的工具调用不会写入正式消息，而是保存在诊断元数据中。应用可以通过 `signal`、`is_running` 和 `wait_for_idle()` 接入自己的生命周期。
 

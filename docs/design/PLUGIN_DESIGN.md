@@ -78,7 +78,7 @@ read / write / execute / network / memory_write / delegate / unknown
 
 ## Session State 与 UI
 
-Session schema v3 的 `PluginStateEntry` 保存 `set/delete` 事实。状态沿活动叶投影，
+Session schema v3+ 的 `PluginStateEntry` 保存 `set/delete` 事实。状态沿活动叶投影，
 Checkpoint 只缓存投影；不一致时从日志重建。单值上限 64 KiB，单插件活动投影上限
 1 MiB，所有值必须严格 JSON-safe。
 
