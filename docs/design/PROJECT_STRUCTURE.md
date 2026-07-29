@@ -237,6 +237,11 @@ SubAgent 也必须受 Harness / Policy 管理。
 或候选状态；报告也不是 ApprovalRecord。候选 Policy 必须在独立的 Human /
 Activation Gate 授权后才能启用。
 
+`evopi/evolution` 进一步承载正式 Policy 候选、内容寻址 Review/Evidence、人工
+Activation、全局活动选择、运行时 Artifact Loader 与回滚。它不进入 Core；Coding
+CLI 通过 Harness 显式接入。`evopi policy init/review/approve/deny/activate/
+deactivate/rollback/list/status` 构成第一版完整人工治理链。
+
 ## evopi/coding
 
 Coding 场景示范层。
@@ -260,6 +265,8 @@ Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 
 默认继续当前工作区最近 Session，并支持 `--new-session / --session / --no-session /
 --session-root`；`evopi session list` 提供只读列表，`evopi session gc` 对一个显式
 Session 预览或执行 Checkpoint 缓存回收。
+Coding CLI 默认装配用户全局活动 Policy，可用 `--no-evolved-policies` 临时关闭；
+REPL `/policies` 展示装配快照，`/reload` 联合刷新 Plugin 与 Policy。
 
 ## docs
 

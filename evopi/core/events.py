@@ -55,6 +55,10 @@ CoreEventType: TypeAlias = Literal[
     "plugin_state_changed",
     "plugin_ui_request",
     "plugin_ui_response",
+    "policy_runtime_reload_start",
+    "policy_runtime_reload_end",
+    "policy_runtime_reload_error",
+    "policy_artifact_loaded",
     "error",
 ]
 

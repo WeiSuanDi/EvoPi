@@ -380,7 +380,29 @@ evopi policy review my_project.policies:candidate \
 
 Use `--json` for a stable JSON-ready report. The command exits with `0` for `passed`, `2` for `review_required`, and `1` for `failed` or a loading error. A missing dry run, a missing applicable replay, validator warnings, or changed/new replay cases require review; invalid or contradictory evidence fails the report.
 
-The Supervisor report is an offline evidence artifact. It does not call a model, execute tools, register the candidate, or authorize activation. Human approval and the Activation Gate remain separate controls.
+The Supervisor report is an offline evidence artifact. It does not call a model, execute tools,
+register the candidate, or authorize activation. Formal directory candidates can continue through
+the complete governed lifecycle:
+
+```bash
+evopi policy init safe-shell
+evopi policy review .evopi/policy-candidates/safe-shell --trace .evopi/trace.jsonl
+evopi policy approve REVIEW_ID
+evopi policy activate APPROVAL_ID
+evopi policy status --json
+```
+
+`review_required` evidence needs both `--accept-findings` and a non-empty `--reason`; failed
+evidence cannot be approved. Approval copies the reviewed snapshot into an immutable,
+content-addressed artifact store but does not change the runtime. Activation is a separate global
+user selection. `policy deactivate NAME` and `policy rollback NAME [--to APPROVAL_ID]` change that
+selection explicitly.
+
+The Coding CLI loads active evolved Policies by default; `--no-evolved-policies` disables this for
+one invocation. REPL `/policies` shows the assembled policy set and `/reload` transactionally
+refreshes approved Plugins and active Policies. A collision with a built-in or Plugin Policy
+requires an explicit replacement name and expected target digest. Bare `BaseHarness` remains
+neutral unless a `PolicyActivationService` is supplied by its host.
 
 > [!IMPORTANT]
 > Policy checks reduce accidental risk but are not an operating-system sandbox. Review and strengthen policies before running EvoPi against untrusted prompts, repositories, or commands.

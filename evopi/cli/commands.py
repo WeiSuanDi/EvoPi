@@ -32,6 +32,7 @@ async def handle_slash_command(harness: CodingHarness, text: str) -> None:
         "/fork": _cmd_fork,
         "/compact": _cmd_compact,
         "/merge": _cmd_merge,
+        "/policies": _cmd_policies,
     }
     handler = handlers.get(cmd)
     if handler is not None:
@@ -69,7 +70,8 @@ def _cmd_help(harness: CodingHarness, parts: list[str], raw: str) -> None:
         ("/status", "Session info: model, turns, tokens"),
         ("/clear", "Clear the screen"),
         ("/retry", "Re-run the last prompt"),
-        ("/reload", "Reload plugins from disk"),
+        ("/reload", "Reload approved Plugins and active Policies"),
+        ("/policies", "Show the assembled Policy runtime"),
         ("/branch [name]", "Create a branch from current leaf"),
         ("/switch <id>", "Switch active leaf"),
         ("/fork", "Fork session into a new file"),
@@ -105,14 +107,35 @@ def _cmd_reload(harness: CodingHarness, parts: list[str], raw: str) -> None:
     """Reload only through the Harness capability boundary."""
 
     try:
-        capabilities = harness.reload_plugins()
+        capabilities = harness.reload_runtime()
     except RuntimeError as exc:
         _console.print(f"[yellow]{exc}[/]")
     else:
         _console.print(
-            f"[green]Reloaded {len(capabilities.plugin_names)} approved "
-            "Plugin(s).[/]"
+            f"[green]Reloaded {len(capabilities.plugin_names)} approved Plugin(s) "
+            f"and {sum(item.artifact_digest is not None for item in capabilities.policies)} "
+            "active evolved Policy(s).[/]"
         )
+
+
+def _cmd_policies(harness: CodingHarness, parts: list[str], raw: str) -> None:
+    table = Table(border_style="blue", title="Policy Runtime")
+    table.add_column("Name", style="bold")
+    table.add_column("Version")
+    table.add_column("Source")
+    table.add_column("Digest")
+    table.add_column("Activation")
+    table.add_column("Replaces")
+    for policy in harness.capabilities.policies:
+        table.add_row(
+            policy.name,
+            policy.version,
+            policy.source,
+            (policy.artifact_digest or policy.digest)[:12],
+            (policy.activation_id or "-")[:12],
+            policy.replaces or "-",
+        )
+    _console.print(table)
 
 
 # ---------------------------------------------------------------------------

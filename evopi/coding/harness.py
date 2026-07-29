@@ -21,6 +21,7 @@ from evopi.core.context import AgentContext
 from evopi.core.messages import SystemMessage
 from evopi.core.model import Model
 from evopi.core.model_errors import ModelRetryConfig
+from evopi.evolution import PolicyActivationService
 from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
 from evopi.memory import (
@@ -67,6 +68,7 @@ class CodingHarness(BaseHarness):
         skills_root: str | Path | None = None,
         enable_subagent: bool = False,
         resource_warnings: tuple[str, ...] = (),
+        policy_activation_service: PolicyActivationService | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self._dynamic_system_prompt = not bool(system_prompt)
@@ -157,11 +159,14 @@ class CodingHarness(BaseHarness):
                     "/fork",
                     "/compact",
                     "/merge",
+                    "/policies",
                 }
             ),
             memory_enabled=self._memory_store is not None,
             skills_enabled=self._skill_loader is not None,
             assembly_warnings=tuple(assembly_warnings),
+            policy_activation_service=policy_activation_service,
+            defer_policy_activation=True,
         )
 
         # ------------------------------------------------------------------ #
@@ -183,6 +188,8 @@ class CodingHarness(BaseHarness):
         self.load_policy_pack(
             coding_policy_pack(self.workspace, max_output_chars=max_output_chars)
         )
+        if policy_activation_service is not None:
+            self._install_active_policies()
         if self._subagent_manager is not None:
             self._subagent_manager.bind_parent(self)
 

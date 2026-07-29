@@ -15,6 +15,11 @@ class PolicyManager:
         loaded.raise_if_required(policy.name, policy.version)
         self.registry.register(policy, replace=replace)
 
+    def register_governed(self, policy: Policy, *, replace: bool = False) -> None:
+        """Register an artifact already validated by the Evolution activation gate."""
+
+        self.registry.register(policy, replace=replace)
+
     def all(self) -> list[Policy]:
         return self.registry.all()
 

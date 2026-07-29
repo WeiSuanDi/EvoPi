@@ -7,7 +7,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.input import Input
@@ -32,6 +32,9 @@ from evopi.cli.session import (
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.session import SessionManager
+
+if TYPE_CHECKING:
+    from evopi.evolution import PolicyActivationService
 
 
 def _non_negative_int(value: str) -> int:
@@ -154,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-subagent", action="store_true",
         help="Enable the spawn_subagent tool for delegated tasks",
     )
+    parser.add_argument(
+        "--no-evolved-policies",
+        action="store_true",
+        help="Do not load the current user's explicitly active evolved Policies",
+    )
     return parser
 
 
@@ -211,6 +219,28 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         skills_root=skills_root,
         enable_subagent=enable_subagent,
         resource_warnings=resource_warnings,
+        policy_activation_service=_policy_activation_service_from_args(args),
+    )
+
+
+def _policy_activation_service_from_args(
+    args: argparse.Namespace,
+) -> PolicyActivationService | None:
+    if getattr(args, "no_evolved_policies", False):
+        return None
+    from evopi.evolution import (
+        ActivationStore,
+        PolicyActivationService,
+        PolicyArtifactStore,
+        PolicySelectionStore,
+        resolve_evolution_home,
+    )
+
+    home = resolve_evolution_home()
+    return PolicyActivationService(
+        ActivationStore(home / "activations.json"),
+        PolicyArtifactStore(home / "artifacts" / "policies"),
+        PolicySelectionStore(home / "policy-selections.json"),
     )
 
 
