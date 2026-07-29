@@ -74,6 +74,7 @@ class CodingHarness(BaseHarness):
         enable_subagent: bool = False,
         tool_names: set[str] | frozenset[str] | None = None,
         excluded_tool_names: set[str] | frozenset[str] | None = None,
+        reserved_plugin_commands: frozenset[str] = frozenset(),
         resource_warnings: tuple[str, ...] = (),
         policy_activation_service: PolicyActivationService | None = None,
     ) -> None:
@@ -180,22 +181,7 @@ class CodingHarness(BaseHarness):
             compaction_settings=compaction_settings,
             merge_settings=merge_settings,
             plugin_paths=plugin_paths,
-            reserved_plugin_commands=frozenset(
-                {
-                    "/help",
-                    "/clear",
-                    "/status",
-                    "/retry",
-                    "/reload",
-                    "/leaves",
-                    "/switch",
-                    "/branch",
-                    "/fork",
-                    "/compact",
-                    "/merge",
-                    "/policies",
-                }
-            ),
+            reserved_plugin_commands=reserved_plugin_commands,
             memory_enabled=self._memory_store is not None,
             skills_enabled=self._skill_loader is not None,
             assembly_warnings=tuple(assembly_warnings),

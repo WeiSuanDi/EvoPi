@@ -1101,6 +1101,47 @@ class BaseHarness:
         self._plugin_active_overrides.clear()
         for api in self._plugin_apis.values():
             self._bind_plugin_api(api)
+        self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
+
+    def compact_session(self, summary: str) -> CompactEntry:
+        """Persist a manual summary and atomically refresh the active transcript."""
+
+        if self.is_running:
+            raise RuntimeError("Cannot compact a Session while the Harness is running")
+        normalized = summary.strip()
+        if not normalized:
+            raise ValueError("Compaction summary cannot be empty")
+        leaf_id = self.session.leaf_id
+        if leaf_id is None:
+            raise RuntimeError("No active Session leaf to compact")
+        path = self.session.get_active_path()
+        anchor_id = path[0].entry_id if path else leaf_id
+        for entry in reversed(path):
+            if getattr(entry, "type", None) == "checkpoint":
+                anchor_id = entry.entry_id
+                break
+        compacted = self.session.compact(
+            up_to_entry_id=anchor_id,
+            summary=normalized,
+        )
+        self._restore_session_transcript()
+        self._refresh_system_prompt_after_capability_change()
+        if self.trace_writer is not None:
+            self.trace_writer.write(
+                TraceRecord(
+                    type="session_compaction_end",
+                    data={
+                        "operation": "manual",
+                        "session_id": self.session.session_id,
+                        "entry_id": compacted.entry_id,
+                        "summary_sha256": hashlib.sha256(
+                            normalized.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                )
+            )
+        return compacted
 
     def close(self) -> None:
         if self.is_running:
