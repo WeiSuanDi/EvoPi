@@ -11,14 +11,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer
 from prompt_toolkit.input import Input
 from prompt_toolkit.output import Output
 from rich.console import Console
-from rich.panel import Panel
 
 from evopi.ai.models import model_from_environment
 from evopi.coding.harness import CodingHarness
-from evopi.cli.commands import handle_slash_command, set_last_prompt
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
@@ -33,6 +32,13 @@ from evopi.cli.product import (
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
+from evopi.cli.repl import (
+    ReplCommandContext,
+    ReplCommandRegistry,
+    ReplCompleter,
+    build_repl_startup_config,
+    startup_panel,
+)
 from evopi.cli.runtime import (
     build_model_runtime,
     fallback_values_from_args,
@@ -306,6 +312,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         enable_subagent=enable_subagent,
         tool_names=included_tools,
         excluded_tool_names=excluded_tools,
+        reserved_plugin_commands=ReplCommandRegistry().reserved_plugin_commands,
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
     )
@@ -364,6 +371,7 @@ def _create_repl_prompt_session(
     *,
     input: Input | None = None,
     output: Output | None = None,
+    completer: Completer | None = None,
 ) -> PromptSession[str]:
     """Create the REPL editor without retaining its submitted input line."""
 
@@ -371,6 +379,8 @@ def _create_repl_prompt_session(
         erase_when_done=True,
         input=input,
         output=output,
+        completer=completer,
+        complete_while_typing=False,
     )
 
 
@@ -452,25 +462,6 @@ async def _run_repl(
     try:
         harness = _build_harness(args)
 
-        # Welcome — auto-detect enabled modules
-        extras = []
-        if harness.capabilities.memory_enabled:
-            extras.append("Memory")
-        if harness.capabilities.skills_enabled:
-            extras.append("Skills")
-        if getattr(args, "enable_subagent", False):
-            extras.append("SubAgent")
-        extra_str = f" | [green]+{'/'.join(extras)}[/]" if extras else ""
-
-        console.print(Panel(
-            f"[bold]EvoPi[/] — Type your message, [bold]/help[/] for commands.\n"
-            f"Model: [cyan]{harness.model.name}[/] | "
-            f"Session: [dim]{harness.session.session_id[:12]}...[/] | "
-            f"Workspace: [dim]{harness.session.workspace[:40]}[/]"
-            f"{extra_str}",
-            border_style="blue",
-        ))
-
         display = ReplDisplay()
         display.set_status(
             f"Model: {harness.model.name} | "
@@ -478,7 +469,22 @@ async def _run_repl(
         )
         harness.subscribe(display.handle_event)
 
-        session = _create_repl_prompt_session()
+        registry = ReplCommandRegistry()
+        command_context = ReplCommandContext(
+            harness=harness,
+            startup=build_repl_startup_config(args, harness),
+            display=display,
+            console=console,
+        )
+        session = _create_repl_prompt_session(
+            completer=ReplCompleter(
+                registry=registry,
+                context=command_context,
+            )
+        )
+        console.print(startup_panel(command_context))
+        for warning in harness.capabilities.warnings:
+            console.print(f"[yellow]Warning: {warning}[/]")
         from evopi.cli.plugin_ui import ReplPluginUI
 
         harness.attach_plugin_ui(
@@ -507,19 +513,16 @@ async def _run_repl(
                 continue
 
             if user_input.startswith("/"):
-                if user_input == "/retry":
-                    from evopi.cli.commands import _last_prompt
-                    if _last_prompt:
-                        user_input = _last_prompt
-                        console.print(f"[dim]Retrying: {user_input[:80]}...[/]")
-                    else:
-                        console.print("[yellow]No previous prompt to retry.[/]")
-                        continue
-                else:
-                    await handle_slash_command(harness, user_input)
+                result = await registry.dispatch(command_context, user_input)
+                if result.action == "quit":
+                    console.print("[dim]Goodbye.[/]")
+                    return result.exit_code
+                if result.action != "retry" or result.prompt is None:
                     continue
+                user_input = result.prompt
+                console.print(f"[dim]Retrying: {user_input[:80]}...[/]")
 
-            set_last_prompt(user_input)
+            command_context.recent_prompt = user_input
 
             try:
                 display.show_user_message(user_input)
@@ -589,7 +592,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if raw_args[:1] == ["chat"]:
-            args = build_parser().parse_args(raw_args[1:])
+            chat_parser = build_parser()
+            chat_parser.prog = "evopi chat"
+            args = chat_parser.parse_args(raw_args[1:])
             return asyncio.run(
                 _run_repl(args, initial_prompt=getattr(args, "prompt", None))
             )
