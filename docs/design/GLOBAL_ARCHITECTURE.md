@@ -314,3 +314,14 @@ Plugin 发现阶段不得 import 候选 Python。项目 Plugin 同时需要摘�
 Trust；源码变化只产生 stale 状态，运行时继续使用已批准快照。SubAgent 是父 Harness
 的受治理子运行，安全 Policy、Confirmation、Abort、Deadline 与 Tool capability
 ceiling 均不可弱化。
+
+## 两层产品入口
+
+Coding CLI 将现有能力组织成“交互工作台 + 管理与自动化命令”两层入口。它只是
+CodingHarness 的产品宿主：`evopi`/`chat` 负责持续交互，`run` 提供稳定的一次性
+结果，`session/policy/plugin/config/doctor` 暴露明确的管理边界。CLI Tool ceiling
+位于 Harness 控制层，与 Plugin 覆盖取交集；Core 不感知命令树、终端渲染或用户配置。
+
+动态 Coding Prompt 由最终活动 Tool 视图生成，能力变化后刷新。Prompt 只陈述当前
+真实能力与治理事实，不把 Session UI 命令或未启用能力伪装成模型能力。完整产品契约
+见 `CLI_PRODUCT.md`。

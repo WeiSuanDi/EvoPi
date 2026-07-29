@@ -120,3 +120,14 @@ Plan Mode 样例只使用通用 API：
 - 快捷键、自定义编辑器或任意 Rich Renderer；
 - 通用跨插件 Event Bus、任意消息注入；
 - 自动审查、自动批准或自动激活。
+
+## CLI 与 Prompt 集成
+
+Plugin Command 与内置命令进入同一个只读命令注册表和帮助/补全系统，但不能覆盖保留
+名称。Plugin Tool 的 `prompt_snippet`、`prompt_guidelines`、`effects` 和来源可以进入
+动态 Coding Prompt；只有最终活动 Tool 会被描述。Plugin Tool 覆盖只能收窄 CLI/
+Harness ceiling。
+
+`doctor` 不扫描或 import 候选目录，只静态验证已有批准记录指向的内容寻址快照。
+`config show` 也不导入 Plugin。`--plugin PATH` 仅保留为明确带 warning 的不受审开发
+入口，正式流程仍是 review → approve → reload。

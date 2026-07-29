@@ -1,65 +1,109 @@
-"""Dynamic system prompt — the agent always knows exactly what tools it has."""
+"""Minimal dynamic Coding prompt assembled from active capabilities."""
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
 
 from evopi.core.tool import Tool
 
 BASE_SYSTEM_PROMPT = """\
-You are an expert coding assistant operating inside EvoPi, a policy-governed agent runtime.
-You help users by reading files, executing commands, editing code, and writing new files.
+You are an expert coding assistant operating inside EvoPi.
+Work carefully, make small verifiable changes, and report only outcomes confirmed by tools.
 
-Every tool call passes through EvoPi's Policy Engine which may block destructive
-commands, require confirmation, or restrict writes to the workspace.
+## Governance
 
-## Sessions & Commands
+Policy may block, require confirmation, rewrite arguments, or trigger validation.
+Never bypass Policy, fabricate approval, or claim that reloading approves a candidate.
 
-Your conversation is automatically saved. Users can branch, fork, or compact the
-conversation tree. Type `/help` to see all commands.
+## Extension boundary
 
-## Plugins
-
-EvoPi exposes PluginAPI v1 for Tools, Policies, Commands, Context Providers,
-dynamic Prompt Fragments, Session State, Tool activity controls, and host UI.
-Create extensions as inactive candidates under `.evopi/plugin-candidates/`.
-Use `evopi plugin init NAME --template basic|plan-mode` to start from the SDK
-shipped with the installed package. For larger Plugins, scaffold first, then
-inspect and modify files with multiple exact `edit_file` operations.
-
-Never write new code directly into an active Plugin snapshot and never claim
-that `/reload` approves code. The lifecycle is always:
-
-`candidate → review → digest-bound approval → reload`
-
-The user must run review and approval. An Agent may create or edit a candidate,
-but cannot approve or activate it.
-
-## Guidelines
-
-- Read files before editing. Prefer small, verifiable changes.
-- Use `edit_file` for exact incremental changes; use `write_file` for new files.
-- Use workspace-relative paths. Never claim success unless the tool confirms it.
-- Be concise. Use Markdown for code blocks and structure.
-- If asked for a capability EvoPi lacks (web search, API access, sub-agents),
-  propose creating a plugin.
+Only when the user explicitly asks to extend EvoPi, use the packaged candidate SDK and
+the formal candidate → review → approval → reload lifecycle.
 """
 
 
-def build_system_prompt(tools: list[Tool], *, base: str = BASE_SYSTEM_PROMPT) -> str:
-    """Dynamically assemble the system prompt with live tool descriptions.
+def build_system_prompt(
+    tools: list[Tool],
+    *,
+    base: str = BASE_SYSTEM_PROMPT,
+    workspace: str | Path | None = None,
+    append: str | None = None,
+) -> str:
+    """Build a concise prompt from the final active Tool view."""
 
-    The model always sees the actual tools registered at runtime — plugins,
-    Memory, and SubAgent tools appear or disappear automatically.
-    """
-    lines = [base, "", "## Available Tools", ""]
-    for tool in sorted(tools, key=lambda t: t.name):
-        desc = tool.description.split("\n")[0]  # first line only
-        plugin_tag = tool.metadata.get("plugin_source", "")
-        source = f" [plugin: {plugin_tag}]" if plugin_tag else ""
-        lines.append(f"- `{tool.name}` — {desc}{source}")
-    return "\n".join(lines)
+    ordered = sorted(tools, key=lambda item: item.name)
+    lines = [base.rstrip(), "", "## Available Tools", ""]
+    if not ordered:
+        lines.append("Available tools: none.")
+    else:
+        for tool in ordered:
+            snippet = tool.metadata.get("prompt_snippet")
+            description = (
+                snippet.strip()
+                if isinstance(snippet, str) and snippet.strip()
+                else tool.description.splitlines()[0].strip()
+            )
+            plugin = tool.metadata.get("plugin_source")
+            source = f" [plugin: {plugin}]" if isinstance(plugin, str) else ""
+            lines.append(f"- `{tool.name}` — {description}{source}")
+
+    guidelines = _guidelines(ordered)
+    if guidelines:
+        lines.extend(("", "## Working Guidelines", ""))
+        lines.extend(f"- {guideline}" for guideline in guidelines)
+    if workspace is not None:
+        lines.extend(
+            (
+                "",
+                "## Workspace",
+                "",
+                str(Path(workspace).expanduser().resolve()),
+            )
+        )
+    prompt = "\n".join(lines).rstrip()
+    if append is not None and append.strip():
+        prompt = f"{prompt}\n\n{append.strip()}"
+    return prompt
 
 
-__all__ = ["BASE_SYSTEM_PROMPT", "build_system_prompt", "CODING_SYSTEM_PROMPT"]
+def _guidelines(tools: list[Tool]) -> tuple[str, ...]:
+    effects = {
+        effect
+        for tool in tools
+        for effect in _tool_effects(tool.metadata.get("effects"))
+    }
+    values: list[str] = [
+        "Read relevant context before acting and keep changes narrowly scoped.",
+        "Use workspace-relative paths and trust Tool results over assumptions.",
+    ]
+    if "write" in effects:
+        values.append("Use exact incremental edits and verify writes before claiming success.")
+    if "execute" in effects:
+        values.append("Run the smallest relevant verification command and report failures honestly.")
+    if "network" in effects:
+        values.append("Use network access only when the task requires current external information.")
+    if "delegate" in effects:
+        values.append("Delegate only bounded tasks and validate child results before relying on them.")
+    for tool in tools:
+        raw = tool.metadata.get("prompt_guidelines", ())
+        candidates: tuple[str, ...]
+        if isinstance(raw, str):
+            candidates = (raw,)
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            candidates = tuple(raw)
+        else:
+            candidates = ()
+        values.extend(item.strip() for item in candidates if item.strip())
+    return tuple(dict.fromkeys(values))
 
-# Backward-compatible alias
+
+def _tool_effects(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return ("unknown",)
+    return tuple(item.strip() for item in value if item.strip()) or ("unknown",)
+
+
 CODING_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT
+
+__all__ = ["BASE_SYSTEM_PROMPT", "CODING_SYSTEM_PROMPT", "build_system_prompt"]

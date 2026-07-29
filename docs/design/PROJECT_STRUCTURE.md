@@ -260,6 +260,17 @@ Coding 场景示范层。
 职责：
 
 - coding harness
+
+## CLI 产品结构
+
+`evopi/cli/product.py` 定义顶层产品帮助与一次性结果协议；
+`evopi/cli/repl.py` 维护唯一的交互命令注册表；
+`evopi/cli/runtime.py` 解析 Model Route、Failover 与 Tool ceiling；
+`evopi/cli/diagnostics.py` 提供安全配置快照和离线 Doctor；
+`evopi/cli/main.py` 只负责编排两层入口。
+
+公开产品契约见 `docs/design/CLI_PRODUCT.md`。CLI 是 CodingHarness 的宿主，不代表
+BaseHarness 会隐式启用 Memory、Skills、活动 Policy、磁盘 Session 或用户配置。
 - coding tools
 - coding policies
 - coding prompts

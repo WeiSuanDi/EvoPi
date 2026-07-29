@@ -106,11 +106,19 @@ OPENAI_MODEL=your-model-name
 
 ## 快速开始
 
-在当前目录运行编码 Agent：
+启动交互工作台，或执行一次性任务：
 
 ```powershell
+evopi
+evopi chat '先检查项目，然后继续保持对话。'
 evopi '检查这个项目并总结它的架构。'
+evopi run '检查这个项目并总结它的架构。'
+Get-Content task.md | evopi run --json
 ```
+
+前两种形式用于交互；`evopi "PROMPT"` 保留兼容的一次性语义，`evopi run` 是明确的
+自动化入口，并支持稳定、最小披露的 JSON 结果。使用 `evopi --help` 可以查看完整的
+`session`、`policy`、`plugin`、`config` 与 `doctor` 命令树。
 
 也可以显式选择模型提供方或工作区：
 
@@ -118,6 +126,23 @@ evopi '检查这个项目并总结它的架构。'
 evopi --provider anthropic --workspace C:\path\to\project '运行测试并解释所有失败。'
 evopi --provider openai-responses '通过 Responses API 检查这个项目。'
 ```
+
+可以在不显示凭据值的情况下查看有效配置，或执行完全离线的诊断：
+
+```powershell
+evopi config show --json
+evopi doctor
+```
+
+显式 Fallback Route 与 Tool ceiling 都属于 Harness 控制：
+
+```powershell
+evopi chat --fallback openai-responses:gpt-5 --exclude-tools shell_command
+evopi run --tools read_file,list_dir '只读总结仓库，不要修改。'
+```
+
+所有 Fallback 候选会在 Session 启动前完成校验。Plugin、Plan Mode 与 SubAgent 可以继续
+收窄 Tool ceiling，但不能把被 CLI 关闭的能力重新启用。
 
 基于 Harness 的 CLI 默认会对瞬态模型错误额外重试最多三次，也可以显式调整：
 

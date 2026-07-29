@@ -881,6 +881,7 @@ class BaseHarness:
                 list(names),
             )
         self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
         self._pending_plugin_runtime_events.append(
             CoreEvent(
                 type="plugin_tools_changed",
@@ -902,6 +903,7 @@ class BaseHarness:
                 _PLUGIN_ACTIVE_TOOLS_STATE_KEY,
             )
         self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
         self._pending_plugin_runtime_events.append(
             CoreEvent(
                 type="plugin_tools_changed",
@@ -918,12 +920,14 @@ class BaseHarness:
         for plugin_name in expired:
             self._plugin_active_overrides.pop(plugin_name, None)
         self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
 
     def _restore_plugin_overrides(self) -> None:
         self._plugin_active_overrides.clear()
         for plugin_name in self._plugin_apis:
             self._restore_plugin_override(plugin_name)
         self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
 
     def _restore_plugin_override(self, plugin_name: str) -> None:
         raw_names = self.session.plugin_state(plugin_name).get(
