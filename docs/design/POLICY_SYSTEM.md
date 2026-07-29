@@ -313,7 +313,8 @@ block > require_confirmation > rewrite_args > trigger_validation > allow
 ```mermaid
 flowchart LR
     Trace["执行 Trace"] --> Pattern["发现重复失败 / 重复需求"]
-    Pattern --> Draft["生成 Policy 草稿"]
+    Pattern --> Opportunity["不可变 Opportunity Report"]
+    Opportunity --> Draft["生成 Policy 草稿"]
     Draft --> Schema["Schema 校验"]
     Schema --> DryRun["Dry-run / 单元测试"]
     DryRun --> Replay["Trace Replay"]
@@ -323,6 +324,34 @@ flowchart LR
 ```
 
 这个闭环表达的是：Agent 可以辅助产生新策略，但策略必须经过验证才能进入 runtime。
+
+## Policy Pattern Discovery v1
+
+Pattern Discovery 是演进闭环的证据蒸馏层，不是第二个 Policy Engine。它只读取用户
+显式提供的历史 JSONL Trace，将反复出现的真人 `before_tool_call` Confirmation 决策
+聚合为不可变 `PolicyDiscoveryReport`：
+
+```text
+policy_evaluation → confirmation_request → confirmation_response
+  ↓ 严格关联与结构校验
+Tool + Policy + risk + argument shape
+  ↓ 至少 3 次且跨 2 个 Run
+repeated_denial / mixed_decisions / repeated_approval
+```
+
+语义签名不包含原始参数值。报告用聚合 `input_digest` 绑定规范化后的输入语料，只保存
+Trace SHA-256、行号、Run ID、参数字段与结构摘要；自动拒绝、取消和其他 Hook 只形成
+诊断统计。损坏 JSONL、不支持的版本、重复
+Request ID、断裂关联或字段契约错误会使整次发现失败且不落盘。无匹配模式则生成零
+Opportunity 的有效报告。
+
+排序固定为安全主题优先：重复拒绝、决策分歧、重复批准；同类再按风险、跨 Run 数、
+频次和最近时间排序。这个排序只决定审查顺序，不建议 `allow/block` 动作。
+
+公共 API 位于 `evopi.evolution`。CLI 使用
+`evopi policy discover TRACE...`，结果原子写入
+`EVOPI_HOME/opportunities/policies/reports/`。Discovery 不运行模型、工具、
+Confirmation Handler、Validator 或候选源码，也不会创建、批准、启用或替换 Policy。
 
 ## `before_tool_call` Trace Replay
 
@@ -389,7 +418,8 @@ Finding 只保存案例 ID、工具名、Trace 行号、历史/候选 action 和
 审查；生成式候选仍由 Schema warning 进入审查。
 
 Supervisor 的 `passed` 仅表示当前技术证据没有待处理项，不等于人工批准或已经启用。
-Human Approval、ApprovalRecord 和 Activation Gate 属于后续独立边界。
+Human Approval、ApprovalRecord 和 Active Selection 已由后续独立生命周期实现，仍不
+属于 Supervisor 聚合器。
 
 ## Policy Evolution Pipeline v1
 
@@ -410,7 +440,8 @@ Evidence、Approval 和 Active Selection 是三个独立事实。`review_require
 运行时 Loader 会在 import 前重新校验目录摘要和 Manifest，import 后校验实例契约，
 再标注 Artifact digest、Activation ID 与 Selection ID。同名覆盖必须显式绑定替换
 名称和被替换 Policy 的当前摘要；缺失或漂移均 fail closed。Coding CLI 默认装配活动
-集，裸 BaseHarness 保持中立。模型自动生成候选与自动 Promotion 不属于 v1。
+集，裸 BaseHarness 保持中立。Pattern Discovery 已提供只读机会发现；模型自动生成
+候选与自动 Promotion 仍不属于 v1。
 
 ## 通用 Artifact Activation
 

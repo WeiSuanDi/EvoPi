@@ -346,6 +346,27 @@ Policies are ordinary typed Python components and can be registered individually
 
 The `evopi` CLI installs an asynchronous interactive `y/N` confirmation handler automatically. Pressing `Ctrl+C` at a confirmation returns an explicit `cancelled` decision and aborts the run. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
 
+### Policy pattern discovery
+
+EvoPi can turn repeated human Tool-confirmation decisions in historical Trace files into a
+deterministic, reviewable Policy Opportunity report:
+
+```bash
+evopi policy discover .evopi/trace.jsonl
+evopi policy discover ./trace-archive --min-occurrences 3 --min-runs 2 --json
+```
+
+Discovery is offline: it does not call a model, execute tools, request confirmation, or create,
+approve, and activate a Policy. By default, a pattern needs at least three matching decisions
+across two Runs. Only explicit human `approve` and `deny` responses are evidence; automatic
+denials, cancellations, and confirmations outside `before_tool_call` remain diagnostic counts.
+
+Patterns expose stable semantic signatures derived from Tool, Policy, risk, and argument shape.
+Raw commands, paths, Prompt text, and argument values are not copied into the report. Each report
+binds the normalized input corpus with an aggregate digest and is stored as a digest-protected
+immutable artifact under `EVOPI_HOME/opportunities/policies/`, ready for human review or a future
+candidate generation stage.
+
 ### Offline policy replay
 
 EvoPi can replay a candidate `before_tool_call` Policy against historical JSONL traces without calling a model, executing tools, or requesting human confirmation:

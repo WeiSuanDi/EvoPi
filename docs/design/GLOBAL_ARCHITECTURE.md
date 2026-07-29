@@ -230,7 +230,8 @@ Core 是稳定内核，不作为常规自演进对象。
 ```mermaid
 flowchart LR
     Trace["Trace / Failure Cases"] --> Pattern["模式发现"]
-    Pattern --> Candidate["候选 Policy / Harness 改动"]
+    Pattern --> Opportunity["不可变 Opportunity Evidence"]
+    Opportunity --> Candidate["候选 Policy / Harness 改动"]
     Candidate --> Schema["Schema Check"]
     Schema --> DryRun["Dry-run / Replay"]
     DryRun --> Supervisor["Supervisor Agent Review"]
@@ -252,6 +253,11 @@ Policy Evolution v1 已把这条闭环落实为目录候选、非执行式静态
 不可变 Evidence、人工批准/拒绝、独立活动指针、Harness 事务装配和回滚。批准不等于
 启用，技术 `passed` 也不等于人工授权。Coding CLI 默认读取当前用户活动集；裸
 BaseHarness 不隐式读取用户目录。
+
+Pattern Discovery v1 进一步补齐 Trace 到候选之前的只读入口：它只分析显式提供的
+`before_tool_call` Policy/Confirmation 证据，以不含原始参数值的语义签名产生不可变
+Opportunity Report。报告标记重复拒绝、决策分歧和重复批准，但不生成候选、不建议
+具体 Policy 动作，也不改变运行时。
 
 ## 两种演进形态
 
