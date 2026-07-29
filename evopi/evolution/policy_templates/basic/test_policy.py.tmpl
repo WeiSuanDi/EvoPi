@@ -1,0 +1,6 @@
+from policy import POLICY
+
+
+def test_policy_identity() -> None:
+    assert POLICY.name == "{{POLICY_NAME}}"
+    assert POLICY.enabled is True

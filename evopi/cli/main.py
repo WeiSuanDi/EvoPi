@@ -21,6 +21,7 @@ from evopi.cli.commands import handle_slash_command, set_last_prompt
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
+from evopi.cli.policy import policy_init_main
 from evopi.cli.plugin import plugin_main
 from evopi.cli.resume import pick_session
 from evopi.cli.session import (
@@ -407,6 +408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if raw_args[:2] == ["policy", "review"]:
         return policy_review_main(raw_args[2:])
+    if raw_args[:2] == ["policy", "init"]:
+        return policy_init_main(raw_args[2:])
     if raw_args[:2] == ["session", "list"]:
         return session_list_main(raw_args[2:])
     if raw_args[:2] == ["session", "gc"]:

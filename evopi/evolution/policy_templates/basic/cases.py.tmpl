@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from evopi.core.context import AgentContext
+from evopi.core.tool import ToolCall
+from evopi.policy.types import PolicyContext
+
+
+CASES = [
+    PolicyContext(
+        hook="before_tool_call",
+        agent_context=AgentContext(),
+        tool_call=ToolCall(
+            id="dry-run-1",
+            name="read_file",
+            arguments={"path": "README.md"},
+        ),
+        arguments={"path": "README.md"},
+    )
+]

@@ -31,6 +31,7 @@ include = ["evopi*"]
 
 [tool.setuptools.package-data]
 "evopi.plugins" = ["sdk_templates/**/*"]
+"evopi.evolution" = ["policy_templates/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

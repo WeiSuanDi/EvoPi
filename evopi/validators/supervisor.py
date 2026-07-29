@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 from uuid import uuid4
 
 from evopi.policy.types import Policy
@@ -109,6 +109,64 @@ class SupervisorReport:
                 for finding in self.findings
             ],
         }
+
+
+def supervisor_report_from_dict(raw: object) -> SupervisorReport:
+    """Decode a strict JSON report produced by an isolated review worker."""
+
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise ValueError("unsupported Supervisor Report schema")
+    candidate_raw = _object(raw.get("candidate"), "candidate")
+    checks_raw = _array(raw.get("checks"), "checks")
+    findings_raw = _array(raw.get("findings"), "findings")
+    try:
+        created_at = datetime.fromisoformat(str(raw["created_at"]))
+        if created_at.tzinfo is None:
+            raise ValueError("created_at must include timezone")
+        candidate = PolicyCandidateSnapshot(
+            name=str(candidate_raw["name"]),
+            version=str(candidate_raw["version"]),
+            hooks=tuple(str(item) for item in _array(candidate_raw["hooks"], "hooks")),
+            source=str(candidate_raw["source"]),
+            risk_level=str(candidate_raw["risk_level"]),
+            enabled=_boolean(candidate_raw["enabled"], "enabled"),
+        )
+        checks = tuple(
+            SupervisorCheckResult(
+                name=cast(SupervisorCheckName, item["name"]),
+                status=cast(SupervisorCheckStatus, item["status"]),
+                errors=tuple(str(value) for value in _array(item["errors"], "errors")),
+                warnings=tuple(
+                    str(value) for value in _array(item["warnings"], "warnings")
+                ),
+                metadata=dict(_object(item["metadata"], "metadata")),
+            )
+            for item in (_object(value, "check") for value in checks_raw)
+        )
+        findings = tuple(
+            SupervisorFinding(
+                code=str(item["code"]),
+                severity=cast(SupervisorFindingSeverity, item["severity"]),
+                message=str(item["message"]),
+                check=cast(SupervisorCheckName, item["check"]),
+                case_id=_optional_string(item.get("case_id"), "case_id"),
+                tool_name=_optional_string(item.get("tool_name"), "tool_name"),
+                source_line=_optional_int(item.get("source_line"), "source_line"),
+                details=dict(_object(item["details"], "details")),
+            )
+            for item in (_object(value, "finding") for value in findings_raw)
+        )
+        return SupervisorReport(
+            schema_version=1,
+            report_id=str(raw["report_id"]),
+            created_at=created_at.astimezone(UTC),
+            candidate=candidate,
+            status=cast(SupervisorStatus, raw["status"]),
+            checks=checks,
+            findings=findings,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid Supervisor Report: {exc}") from exc
 
 
 def build_policy_review_report(
@@ -379,6 +437,40 @@ def _json_ready(value: Any) -> Any:
     return repr(value)
 
 
+def _object(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return value
+
+
+def _array(value: object, name: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be an array")
+    return value
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _optional_string(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or null")
+    return value
+
+
+def _optional_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer or null")
+    return value
+
+
 __all__ = [
     "PolicyCandidateSnapshot",
     "SupervisorCheckResult",
@@ -388,4 +480,5 @@ __all__ = [
     "SupervisorReport",
     "SupervisorStatus",
     "build_policy_review_report",
+    "supervisor_report_from_dict",
 ]

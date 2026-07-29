@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+from evopi.policy.decisions import PolicyDecision
+from evopi.policy.types import PolicyContext
+
+
+class {{CLASS_NAME}}:
+    name = "{{POLICY_NAME}}"
+    version = "0.1.0"
+    description = "A governed EvoPi Policy candidate"
+    hooks = ("before_tool_call",)
+    priority = 100
+    enabled = True
+    source = "project"
+    risk_level = "medium"
+    metadata = {}
+
+    def run(self, context: PolicyContext) -> PolicyDecision:
+        return PolicyDecision(action="allow", reason="{{POLICY_NAME}} allowed the call")
+
+
+POLICY = {{CLASS_NAME}}()

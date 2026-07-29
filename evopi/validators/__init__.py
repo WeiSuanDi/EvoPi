@@ -19,6 +19,7 @@ from evopi.validators.supervisor import (
     SupervisorReport,
     SupervisorStatus,
     build_policy_review_report,
+    supervisor_report_from_dict,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "dry_run_policy",
     "load_before_tool_replay_cases",
     "replay_policy",
+    "supervisor_report_from_dict",
 ]
