@@ -12,9 +12,10 @@ from typing import Any, Literal, TypeAlias, cast
 from uuid import uuid4
 
 from evopi.policy.types import RiskLevel
+from evopi.evolution.file_lock import EvolutionFileLock
 
 ArtifactKind: TypeAlias = Literal["policy", "plugin"]
-ACTIVATION_SCHEMA_VERSION = 2
+ACTIVATION_SCHEMA_VERSION = 3
 
 
 class ActivationDecision(str, Enum):
@@ -43,6 +44,8 @@ class ArtifactCandidate:
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise ValueError("artifact digest must be a SHA-256 hexadecimal string")
         object.__setattr__(self, "digest", digest)
+        _require_json_safe(self.metadata, "artifact metadata")
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -54,6 +57,11 @@ class ActivationRecord:
     decided_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     evidence: tuple[str, ...] = ()
     reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_json_safe(self.metadata, "activation metadata")
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -90,6 +98,7 @@ class ActivationStore:
         evidence: tuple[str, ...] = (),
         reason: str | None = None,
         decided_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> ActivationRecord:
         if not decided_by.strip():
             raise ValueError("decided_by must not be empty")
@@ -100,13 +109,20 @@ class ActivationStore:
             evidence=evidence,
             reason=reason,
             decided_at=decided_at or datetime.now(UTC),
+            metadata=dict(metadata or {}),
         )
-        self._records.append(record)
-        try:
-            self._save()
-        except Exception:
-            self._records.pop()
-            raise
+        if self._path is None:
+            self._records.append(record)
+            return record
+        with EvolutionFileLock(self._lock_path):
+            if self._path.exists():
+                self._load()
+            self._records.append(record)
+            try:
+                self._save()
+            except Exception:
+                self._records.pop()
+                raise
         return record
 
     def check(self, candidate: ArtifactCandidate) -> ActivationCheck:
@@ -120,6 +136,17 @@ class ActivationStore:
             ):
                 return ActivationCheck(record=record)
         return ActivationCheck(record=None)
+
+    def get(self, record_id: str) -> ActivationRecord:
+        for record in self._records:
+            if record.record_id == record_id:
+                return record
+        raise ArtifactActivationError(f"activation record does not exist: {record_id}")
+
+    @property
+    def _lock_path(self) -> Path:
+        assert self._path is not None
+        return self._path.with_name(f"{self._path.name}.lock")
 
     def _save(self) -> None:
         if self._path is None:
@@ -147,7 +174,10 @@ class ActivationStore:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ArtifactActivationError(f"invalid activation store: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != ACTIVATION_SCHEMA_VERSION:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema_version") not in {2, ACTIVATION_SCHEMA_VERSION}
+        ):
             raise ArtifactActivationError("unsupported activation store schema")
         items = raw.get("activations")
         if not isinstance(items, list):
@@ -179,6 +209,7 @@ def _record_to_dict(record: ActivationRecord) -> dict[str, Any]:
         "decided_at": record.decided_at.isoformat(),
         "evidence": list(record.evidence),
         "reason": record.reason,
+        "metadata": record.metadata,
     }
 
 
@@ -209,9 +240,17 @@ def _record_from_dict(raw: object) -> ActivationRecord:
             decided_at=decided_at.astimezone(UTC),
             evidence=tuple(str(item) for item in raw.get("evidence", [])),
             reason=str(raw["reason"]) if raw.get("reason") is not None else None,
+            metadata=dict(raw.get("metadata", {})),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ArtifactActivationError(f"invalid activation record: {exc}") from exc
+
+
+def _require_json_safe(value: Any, label: str) -> None:
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be strictly JSON-safe") from exc
 
 
 __all__ = [

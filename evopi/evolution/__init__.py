@@ -38,6 +38,18 @@ from evopi.evolution.policy_evidence import (
     resolve_evolution_home,
 )
 from evopi.evolution.policy_sdk import initialize_policy_candidate
+from evopi.evolution.file_lock import EvolutionFileLock, EvolutionStoreLockError
+from evopi.evolution.policy_activation import (
+    POLICY_SELECTION_SCHEMA_VERSION,
+    ActivePolicySelection,
+    PolicyActivationAction,
+    PolicyActivationRecord,
+    PolicyActivationService,
+    PolicyApprovalService,
+    PolicyArtifactStore,
+    PolicyReplacement,
+    PolicySelectionStore,
+)
 
 __all__ = [
     "ACTIVATION_SCHEMA_VERSION",
@@ -49,6 +61,9 @@ __all__ = [
     "ArtifactActivationError",
     "ArtifactCandidate",
     "ArtifactKind",
+    "ActivePolicySelection",
+    "EvolutionFileLock",
+    "EvolutionStoreLockError",
     "POLICY_MANIFEST_SCHEMA_VERSION",
     "POLICY_EVIDENCE_SCHEMA_VERSION",
     "PolicyCandidate",
@@ -56,12 +71,20 @@ __all__ = [
     "PolicyCandidateInspection",
     "PolicyCandidateSnapshotStore",
     "PolicyCandidateStatus",
+    "POLICY_SELECTION_SCHEMA_VERSION",
+    "PolicyActivationAction",
+    "PolicyActivationRecord",
+    "PolicyActivationService",
+    "PolicyApprovalService",
+    "PolicyArtifactStore",
     "PolicyManifest",
     "PolicyEvidenceError",
     "PolicyEvidenceStore",
     "PolicyReviewEvidence",
     "PolicyReviewService",
     "PolicyReviewWorkerInfo",
+    "PolicyReplacement",
+    "PolicySelectionStore",
     "initialize_policy_candidate",
     "WORKSPACE_TRUST_SCHEMA_VERSION",
     "WorkspaceTrustRecord",
