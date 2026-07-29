@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,6 +25,13 @@ from evopi.cli.policy_review import policy_review_main
 from evopi.cli.policy import policy_init_main, policy_lifecycle_main
 from evopi.cli.policy_discovery import policy_discover_main
 from evopi.cli.plugin import plugin_main
+from evopi.cli.product import (
+    build_product_parser,
+    build_run_result,
+    compose_run_prompt,
+    format_management_help,
+    run_exit_code,
+)
 from evopi.cli.resume import pick_session
 from evopi.cli.session import (
     print_session_opened,
@@ -36,6 +44,12 @@ from evopi.session import SessionManager
 
 if TYPE_CHECKING:
     from evopi.evolution import PolicyActivationService
+
+
+_UNREVIEWED_PLUGIN_WARNING = (
+    "--plugin is a deprecated, unreviewed development override; "
+    "use plugin review -> approve -> reload for product use"
+)
 
 
 def _non_negative_int(value: str) -> int:
@@ -60,57 +74,68 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="evopi", description="Run the EvoPi coding agent")
+    parser = argparse.ArgumentParser(
+        prog="evopi",
+        description="Run the EvoPi coding agent",
+    )
     parser.add_argument("prompt", nargs="?", help="Task for the agent")
-    parser.add_argument(
+    model_group = parser.add_argument_group("Model")
+    model_group.add_argument(
         "--provider",
         choices=["anthropic", "openai-compatible", "openai-responses"],
     )
-    parser.add_argument("--model", help="Override the model name from .env")
-    parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))
-    parser.add_argument("--no-retry", action="store_true")
-    parser.add_argument("--max-retries", type=_non_negative_int, default=3)
-    parser.add_argument(
+    model_group.add_argument("--model", help="Override the model name from .env")
+    model_group.add_argument("--no-retry", action="store_true")
+    model_group.add_argument("--max-retries", type=_non_negative_int, default=3)
+    model_group.add_argument(
         "--max-output-tokens",
         type=_positive_int,
         default=4096,
         metavar="N",
         help="Maximum output tokens for each model attempt (default: 4096)",
     )
-    parser.add_argument(
+    model_group.add_argument(
         "--model-timeout", type=_positive_float, default=120.0,
         help="HTTP stream idle timeout in seconds",
     )
-    parser.add_argument(
-        "--deadline", type=_positive_float, metavar="SECONDS",
-        help="Wall-clock deadline for the entire run",
-    )
-    parser.add_argument(
-        "--tool-timeout", type=_positive_float, metavar="SECONDS",
-        help="Default timeout for individual tool executions",
-    )
-    parser.add_argument(
+    model_group.add_argument(
         "--context-window", type=int, metavar="N",
         help="Model context window size for compaction decisions",
     )
-    parser.add_argument(
+
+    runtime_group = parser.add_argument_group("Runtime")
+    runtime_group.add_argument("--workspace", type=Path, default=Path.cwd())
+    runtime_group.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))
+    runtime_group.add_argument(
+        "--deadline", type=_positive_float, metavar="SECONDS",
+        help="Wall-clock deadline for the entire run",
+    )
+    runtime_group.add_argument(
+        "--tool-timeout", type=_positive_float, metavar="SECONDS",
+        help="Default timeout for individual tool executions",
+    )
+
+    governance_group = parser.add_argument_group("Governance")
+    governance_group.add_argument(
         "--approvals-path", type=Path, metavar="PATH",
         help="Path to the approvals JSON file",
     )
-    parser.add_argument(
+    governance_group.add_argument(
         "--approval-mode", choices=["strict", "warn", "off"], default="warn",
         help="Activation Gate mode (default: warn)",
     )
-    parser.add_argument(
+    governance_group.add_argument(
+        "--no-evolved-policies",
+        action="store_true",
+        help="Do not load the current user's explicitly active evolved Policies",
+    )
+
+    session_options = parser.add_argument_group("Session")
+    session_options.add_argument(
         "--compaction", choices=["on", "off"], default="on",
         help="Enable or disable automatic context compaction (default: on)",
     )
-    parser.add_argument(
-        "--system-prompt", metavar="TEXT",
-        help="Override the default system prompt",
-    )
-    session_group = parser.add_mutually_exclusive_group()
+    session_group = session_options.add_mutually_exclusive_group()
     session_group.add_argument(
         "--new-session",
         action="store_true",
@@ -131,16 +156,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Interactively pick a session to resume",
     )
-    parser.add_argument(
+    session_options.add_argument(
         "--session-root",
         type=Path,
         help="Override the persisted Session root directory",
     )
-    parser.add_argument(
+
+    resources_group = parser.add_argument_group("Resources")
+    resources_group.add_argument(
         "--plugin", type=Path, action="append", metavar="PATH",
-        help="Load a plugin from PATH (repeatable)",
+        help="Load an unreviewed development plugin from PATH (deprecated)",
     )
-    memory_group = parser.add_mutually_exclusive_group()
+    memory_group = resources_group.add_mutually_exclusive_group()
     memory_group.add_argument(
         "--memory", type=Path, metavar="PATH",
         help="Enable persistent memory (JSON file path, e.g. .evopi/memory.json)",
@@ -150,18 +177,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable workspace Memory for this invocation",
     )
-    parser.add_argument(
+    resources_group.add_argument(
         "--skills-root", type=Path, metavar="PATH",
         help="Enable skill loading from PATH (e.g. ~/.evopi/skills)",
     )
-    parser.add_argument(
+    resources_group.add_argument(
         "--enable-subagent", action="store_true",
         help="Enable the spawn_subagent tool for delegated tasks",
     )
-    parser.add_argument(
-        "--no-evolved-policies",
-        action="store_true",
-        help="Do not load the current user's explicitly active evolved Policies",
+
+    advanced_group = parser.add_argument_group("Advanced")
+    advanced_group.add_argument(
+        "--system-prompt", metavar="TEXT",
+        help="Override the default system prompt",
     )
     return parser
 
@@ -193,6 +221,8 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
 
     # Auto-detect Skills — on if skills directory exists
     skills_root, resource_warnings = _skills_root_from_args(args)
+    if getattr(args, "plugin", None):
+        resource_warnings = (*resource_warnings, _UNREVIEWED_PLUGIN_WARNING)
 
     # SubAgent — explicit opt-in only
     enable_subagent = getattr(args, "enable_subagent", False)
@@ -292,11 +322,20 @@ def _plugin_paths_from_args(args: argparse.Namespace) -> list[str | Path]:
 
     approved = list(approved_plugin_entrypoints(args.workspace))
     explicit = list(getattr(args, "plugin", None) or [])
+    if explicit:
+        print(
+            f"EvoPi warning: {_UNREVIEWED_PLUGIN_WARNING}.",
+            file=sys.stderr,
+        )
     paths: list[str | Path] = [*approved, *explicit]
     return list(dict.fromkeys(paths))
 
 
-async def _run_one_shot(args: argparse.Namespace) -> int:
+async def _run_one_shot(
+    args: argparse.Namespace,
+    *,
+    json_output: bool = False,
+) -> int:
     """Single prompt → response → exit."""
     prompt_text = args.prompt
     harness: CodingHarness | None = None
@@ -306,7 +345,11 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
         def display(event: CoreEvent) -> None:
             if event.type == "session_start":
                 print_session_opened(harness.session)  # type: ignore[arg-type]
-            elif event.type == "message_update" and event.data.get("kind") == "text":
+            elif (
+                not json_output
+                and event.type == "message_update"
+                and event.data.get("kind") == "text"
+            ):
                 print(event.data.get("delta", ""), end="", flush=True)
             elif event.type == "model_retry_start":
                 info = event.data.get("error_info")
@@ -320,16 +363,32 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
                 )
 
         harness.subscribe(display)
-        answer = await harness.prompt(prompt_text)
+        try:
+            answer = await harness.prompt(prompt_text)
+        except (ValueError, RuntimeError):
+            if not json_output:
+                raise
+            payload = build_run_result(harness, None)
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return run_exit_code(payload["end_reason"])
+        if json_output:
+            payload = build_run_result(harness, answer)
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            return run_exit_code(payload["end_reason"])
         if not answer.content.endswith("\n"):
             print()
-        return 0
+        state = harness.agent.last_run
+        return run_exit_code(state.end_reason if state is not None else "completed")
     finally:
         if harness is not None and not harness.is_running:
             harness.close()
 
 
-async def _run_repl(args: argparse.Namespace) -> int:
+async def _run_repl(
+    args: argparse.Namespace,
+    *,
+    initial_prompt: str | None = None,
+) -> int:
     """Multi-turn REPL: prompt → response → prompt → ..."""
     console = Console(file=sys.stderr)
     harness: CodingHarness | None = None
@@ -372,15 +431,20 @@ async def _run_repl(args: argparse.Namespace) -> int:
                 console=console,
             )
         )
+        pending_input = initial_prompt
         while True:
-            try:
-                user_input = (await session.prompt_async("> ")).strip()
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Aborted.[/]")
-                return 130
-            except EOFError:
-                console.print("\n[dim]Goodbye.[/]")
-                return 0
+            if pending_input is not None:
+                user_input = pending_input.strip()
+                pending_input = None
+            else:
+                try:
+                    user_input = (await session.prompt_async("> ")).strip()
+                except KeyboardInterrupt:
+                    console.print("\n[yellow]Aborted.[/]")
+                    return 130
+                except EOFError:
+                    console.print("\n[dim]Goodbye.[/]")
+                    return 0
 
             if not user_input:
                 continue
@@ -437,6 +501,20 @@ def _session_manager_from_args(args: argparse.Namespace) -> SessionManager:
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
 
+    if raw_args in (["--help"], ["-h"]):
+        print(build_product_parser().format_help(), end="")
+        return 0
+    if raw_args == ["--version"]:
+        from evopi import __version__
+
+        print(f"EvoPi {__version__}")
+        return 0
+    if len(raw_args) == 2 and raw_args[0] in {"session", "policy", "plugin"} and raw_args[1] in {
+        "--help",
+        "-h",
+    }:
+        print(format_management_help(raw_args[0]))
+        return 0
     if raw_args[:2] == ["policy", "review"]:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["policy", "init"]:
@@ -452,13 +530,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(raw_args) >= 2 and raw_args[0] == "plugin":
         return plugin_main(raw_args[1], raw_args[2:])
 
-    args = (
-        build_parser().parse_args()
-        if argv is None
-        else build_parser().parse_args(raw_args)
-    )
-
     try:
+        if raw_args[:1] == ["chat"]:
+            args = build_parser().parse_args(raw_args[1:])
+            return asyncio.run(
+                _run_repl(args, initial_prompt=getattr(args, "prompt", None))
+            )
+        if raw_args[:1] == ["run"]:
+            run_parser = build_parser()
+            run_parser.prog = "evopi run"
+            run_parser.add_argument(
+                "--json",
+                action="store_true",
+                dest="json_output",
+                help="Emit one stable JSON result to stdout",
+            )
+            args = run_parser.parse_args(raw_args[1:])
+            stdin_text = _read_piped_stdin()
+            args.prompt = compose_run_prompt(stdin_text, getattr(args, "prompt", None))
+            if not args.prompt:
+                print(
+                    "EvoPi run requires a prompt or piped stdin.",
+                    file=sys.stderr,
+                )
+                return 2
+            return asyncio.run(
+                _run_one_shot(args, json_output=bool(args.json_output))
+            )
+
+        args = (
+            build_parser().parse_args()
+            if argv is None
+            else build_parser().parse_args(raw_args)
+        )
         if getattr(args, "prompt", None):
             return asyncio.run(_run_one_shot(args))
         return asyncio.run(_run_repl(args))
@@ -468,6 +572,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nEvoPi aborted.")
         return 130
+
+
+def _read_piped_stdin() -> str:
+    try:
+        if sys.stdin.isatty():
+            return ""
+        return sys.stdin.read()
+    except (AttributeError, OSError):
+        return ""
+
+
+__all__ = [
+    "build_parser",
+    "build_product_parser",
+    "build_run_result",
+    "compose_run_prompt",
+    "main",
+    "run_exit_code",
+]
 
 if __name__ == "__main__":
     raise SystemExit(main())
