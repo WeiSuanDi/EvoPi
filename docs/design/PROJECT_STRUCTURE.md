@@ -179,9 +179,10 @@ Skill 是任务经验包，不是底层工具。
 - Run-end Checkpoint 原子写入、校验和日志回退
 - 中断 Run 闭合与未知 ToolResult 恢复
 - 运行时指纹比较和结构化恢复 warning
+- 证据绑定的 Branch Merge 规划、提交和摘要上下文投影
 
 Session 负责一个任务或对话窗口如何跨 Run、跨 CLI 进程持续存在。当前已实现
-Tree-ready Entry、branch/fork 基础操作、compact 上下文压缩和 Checkpoint 快照。
+Tree-ready Entry、branch/fork、证据绑定 merge、compact 上下文压缩和 Checkpoint 快照。
 完整协议见 [`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
 
 ## evopi/trace

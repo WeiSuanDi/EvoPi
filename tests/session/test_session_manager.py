@@ -165,7 +165,7 @@ def test_persistent_session_round_trip_and_tree_contract(tmp_path: Path) -> None
         for previous, current in zip(restored.entries, restored.entries[1:])
     )
     header = json.loads(session_path.read_text(encoding="utf-8").splitlines()[0])
-    assert header["schema_version"] == 3
+    assert header["schema_version"] == 4
     assert header["type"] == "session"
     restored.close()
 
@@ -297,7 +297,7 @@ def test_v1_log_is_atomically_migrated_with_backup(tmp_path: Path) -> None:
         json.loads(line)
         for line in session_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert all(record["schema_version"] == 3 for record in migrated)
+    assert all(record["schema_version"] == 4 for record in migrated)
 
 
 def test_v2_log_is_atomically_migrated_with_backup(tmp_path: Path) -> None:
@@ -329,7 +329,7 @@ def test_v2_log_is_atomically_migrated_with_backup(tmp_path: Path) -> None:
         json.loads(line)
         for line in session_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert all(record["schema_version"] == 3 for record in migrated)
+    assert all(record["schema_version"] == 4 for record in migrated)
 
 
 def test_interrupted_run_gets_unknown_tool_result_without_execution(
