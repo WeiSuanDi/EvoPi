@@ -154,6 +154,8 @@ evopi --session ID "prompt"    # 显式打开 ID 或路径
 evopi --no-session "prompt"    # 仅内存
 evopi session list             # 当前工作区只读列表
 evopi session list --all --json
+evopi session gc ID|PATH       # Checkpoint GC Dry Run
+evopi session gc ID --apply    # 校验计划后删除
 
 # REPL 内
 /leaves
@@ -194,8 +196,26 @@ Context Window 且超过预留输入预算时明确失败，要求用户改用�
 阻断、拒绝、模型错误、超时或事实日志写入失败都不会追加 `MergeEntry`。事件和 Trace
 只记录定位字段、计数与摘要哈希，不重复记录完整摘要。
 
+## Checkpoint GC
+
+Checkpoint 是可由事实日志重建的派生缓存。`SessionManager.plan_checkpoint_gc()` 只读
+扫描一个已持锁的持久 Session：对每个现存叶保留路径上最近三份校验有效快照，多个叶的
+共享祖先只计一次；最近七天内的全部 Checkpoint 文件无条件保护。更老且不在保留集中的
+有效快照，以及超过保护期的损坏快照、无日志引用的 UUID 快照和崩溃临时文件进入候选。
+缺失的日志引用会进入计划的可观测项，但不存在文件无需删除。
+
+计划是 `schema_version=1` 的稳定审计工件，绑定 Session ID、Session 路径、事实日志
+SHA-256，以及每个候选的规范化相对路径、文件大小和内容摘要。`apply_checkpoint_gc()`
+在删除第一份文件前先完成全量预检；日志或任一候选发生漂移就整体拒绝。进入删除阶段后，
+单文件失败写入结构化 Report，其余候选可继续处理，且不会把 SessionManager 标记为
+broken。
+
+GC 不追加维护 Entry，也不修改 Session Tree。`session.jsonl`、版本备份、锁、Trace、
+消息、分支和任何非 Checkpoint 文件永不进入候选。CLI 默认 Dry Run，只有 `--apply`
+才永久删除；v1 每次只处理一个显式 Session，不提供后台或批量 GC。
+
 ## 隐私与 v4 边界
 
 Session 和 Checkpoint 是本地明文，可能包含 Prompt、模型回复与工具输出。用户应像
 保护 Trace 一样保护 Session 根目录。v4 不做自动脱敏、加密、远程存储、删除/重命名、
-Checkpoint GC、跨 Session Merge、双父 DAG、运行中继续执行或工具幂等重放。
+Session Log GC、跨 Session Merge、双父 DAG、运行中继续执行或工具幂等重放。

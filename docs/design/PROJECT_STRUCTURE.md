@@ -180,9 +180,11 @@ Skill 是任务经验包，不是底层工具。
 - 中断 Run 闭合与未知 ToolResult 恢复
 - 运行时指纹比较和结构化恢复 warning
 - 证据绑定的 Branch Merge 规划、提交和摘要上下文投影
+- Checkpoint GC 只读规划、漂移预检和结构化执行报告
 
 Session 负责一个任务或对话窗口如何跨 Run、跨 CLI 进程持续存在。当前已实现
-Tree-ready Entry、branch/fork、证据绑定 merge、compact 上下文压缩和 Checkpoint 快照。
+Tree-ready Entry、branch/fork、证据绑定 merge、compact 上下文压缩、Checkpoint 快照
+和派生快照 GC。
 完整协议见 [`SESSION_DESIGN.md`](SESSION_DESIGN.md)。
 
 ## evopi/trace
@@ -256,7 +258,8 @@ Coding 是 EvoPi 的第一个验证场景，不是项目本体。
 Confirmation Handler 收集 Shell 工具的 `y/N` 人工授权。第一次 `Ctrl+C` 请求优雅
 Abort 并返回状态码 130；确认界面的中断映射为显式 `cancelled` 决策。普通 Prompt
 默认继续当前工作区最近 Session，并支持 `--new-session / --session / --no-session /
---session-root`；`evopi session list` 提供只读列表。
+--session-root`；`evopi session list` 提供只读列表，`evopi session gc` 对一个显式
+Session 预览或执行 Checkpoint 缓存回收。
 
 ## docs
 

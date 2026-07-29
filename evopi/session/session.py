@@ -29,6 +29,14 @@ from evopi.session.errors import (
     SessionPersistenceError,
     SessionSerializationError,
 )
+from evopi.session.gc import (
+    DEFAULT_CHECKPOINT_GC_SETTINGS,
+    CheckpointGCPlan,
+    CheckpointGCReport,
+    CheckpointGCSettings,
+    apply_checkpoint_gc,
+    plan_checkpoint_gc,
+)
 from evopi.session.merge import (
     MergeSummaryOrigin,
     SessionMergeError,
@@ -302,6 +310,42 @@ class SessionManager:
             manager._restore_messages()
             manager._recover_interrupted_run()
             manager._ensure_latest_run_checkpoint()
+        except Exception:
+            manager.close()
+            raise
+        return manager
+
+    @classmethod
+    def open_for_maintenance(
+        cls,
+        reference: str | Path,
+        *,
+        root: str | Path | None = None,
+    ) -> "SessionManager":
+        """Open a current-schema Session under lock without recovery writes."""
+
+        session_root = resolve_session_root(root)
+        path = _resolve_session_reference(reference, session_root)
+        manager = cls(Path.cwd())
+        manager.root = session_root
+        manager.session_path = path
+        manager._lock = _SessionFileLock(path.parent / _LOCK_FILENAME)
+        manager._lock.acquire()
+        manager._recovery = _RecoveryState(reason="open")
+        try:
+            source_version = _session_file_version(path)
+            if source_version != 4:
+                raise SessionFormatError(
+                    "Session maintenance requires schema v4; open the Session "
+                    "normally once to migrate it"
+                )
+            header, entries, _repaired = _read_session_file(path, repair=False)
+            manager.header = header
+            manager._attached_workspace = header.workspace
+            manager._entries = entries
+            manager._entry_index = {entry.entry_id: entry for entry in entries}
+            manager._rebuild_leaf_state()
+            manager._restore_messages()
         except Exception:
             manager.close()
             raise
@@ -686,6 +730,24 @@ class SessionManager:
         self._last_checkpoint = checkpoint
         self._recovery.checkpoint_id = checkpoint_id
         return checkpoint
+
+    def plan_checkpoint_gc(
+        self,
+        settings: CheckpointGCSettings = DEFAULT_CHECKPOINT_GC_SETTINGS,
+        *,
+        now: datetime | None = None,
+    ) -> CheckpointGCPlan:
+        """Build a read-only plan for reclaiming derived Checkpoint files."""
+
+        return plan_checkpoint_gc(self, settings, now=now)
+
+    def apply_checkpoint_gc(
+        self,
+        plan: CheckpointGCPlan,
+    ) -> CheckpointGCReport:
+        """Apply a previously validated Checkpoint GC plan."""
+
+        return apply_checkpoint_gc(self, plan)
 
     def branch(self, *, from_entry_id: str, branch_name: str = "") -> BranchEntry:
         """Create a new branch from an existing entry.

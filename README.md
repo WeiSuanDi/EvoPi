@@ -140,6 +140,8 @@ evopi --session SESSION_ID 'Continue this specific task.'
 evopi --no-session 'Run without disk persistence.'
 evopi session list
 evopi session list --all --json
+evopi session gc SESSION_ID                  # dry-run preview
+evopi session gc SESSION_ID --apply --json   # validated deletion
 ```
 
 Use `--session-root PATH` or `EVOPI_SESSION_DIR` to override the default
@@ -247,6 +249,13 @@ is omitted, EvoPi runs a governed, tool-free model operation over the source div
 result is a digest-bound summary message on the target branch—source messages, tool executions,
 and Plugin state are never copied or replayed. `/switch` accepts the same unique Entry prefixes,
 and `/leaves` shows names, message previews, and the active leaf.
+
+Run `evopi session gc SESSION_ID|PATH` to preview reclaimable Checkpoint cache files. The
+default policy keeps three valid snapshots per existing leaf and protects every file newer than
+seven days. `--apply` is required for deletion; before deleting anything EvoPi revalidates the
+Session ID, Session Log digest, and every candidate's relative path, size, and digest. Session
+JSONL, branches, messages, version backups, locks, Trace files, and non-Checkpoint files are never
+GC candidates.
 
 Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
 
