@@ -51,6 +51,20 @@ from evopi.evolution.policy_activation import (
     PolicySelectionStore,
 )
 from evopi.evolution.policy_runtime import LoadedPolicyArtifact, PolicyArtifactLoader
+from evopi.evolution.policy_discovery import discover_policy_opportunities
+from evopi.evolution.policy_discovery_protocol import (
+    POLICY_DISCOVERY_SCHEMA_VERSION,
+    PolicyDiscoveryError,
+    PolicyDiscoveryReport,
+    PolicyDiscoverySettings,
+    PolicyDiscoverySource,
+    PolicyDiscoveryStats,
+    PolicyOpportunity,
+    PolicyOpportunityEvidence,
+    PolicyOpportunityTheme,
+    policy_discovery_report_from_dict,
+)
+from evopi.evolution.policy_opportunity_store import PolicyOpportunityStore
 
 __all__ = [
     "ACTIVATION_SCHEMA_VERSION",
@@ -66,12 +80,18 @@ __all__ = [
     "EvolutionFileLock",
     "EvolutionStoreLockError",
     "POLICY_MANIFEST_SCHEMA_VERSION",
+    "POLICY_DISCOVERY_SCHEMA_VERSION",
     "POLICY_EVIDENCE_SCHEMA_VERSION",
     "PolicyCandidate",
     "PolicyCandidateError",
     "PolicyCandidateInspection",
     "PolicyCandidateSnapshotStore",
     "PolicyCandidateStatus",
+    "PolicyDiscoveryError",
+    "PolicyDiscoveryReport",
+    "PolicyDiscoverySettings",
+    "PolicyDiscoverySource",
+    "PolicyDiscoveryStats",
     "POLICY_SELECTION_SCHEMA_VERSION",
     "PolicyActivationAction",
     "PolicyActivationRecord",
@@ -80,6 +100,10 @@ __all__ = [
     "PolicyArtifactStore",
     "PolicyArtifactLoader",
     "PolicyManifest",
+    "PolicyOpportunity",
+    "PolicyOpportunityEvidence",
+    "PolicyOpportunityStore",
+    "PolicyOpportunityTheme",
     "PolicyEvidenceError",
     "PolicyEvidenceStore",
     "PolicyReviewEvidence",
@@ -96,4 +120,6 @@ __all__ = [
     "policy_candidate_digest",
     "resolve_policy_entrypoint",
     "resolve_evolution_home",
+    "discover_policy_opportunities",
+    "policy_discovery_report_from_dict",
 ]

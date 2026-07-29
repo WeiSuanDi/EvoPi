@@ -333,6 +333,26 @@ Policy 是普通的类型化 Python 组件，既可以单独注册，也可以�
 
 `evopi` CLI 会自动安装异步交互式 `y/N` Confirmation Handler。在确认界面按下 `Ctrl+C` 会产生明确的 `cancelled` 决策并中止当前运行。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
 
+### Policy 模式发现
+
+EvoPi 可以把历史 Trace 中反复出现的人工 Tool Confirmation 决策整理成确定性、可审查
+的 Policy Opportunity Report：
+
+```bash
+evopi policy discover .evopi/trace.jsonl
+evopi policy discover ./trace-archive --min-occurrences 3 --min-runs 2 --json
+```
+
+Discovery 完全离线：不调用模型、不执行工具、不请求确认，也不会创建、批准或启用
+Policy。默认只有同类决策至少出现 3 次且跨 2 个 Run 才形成 Opportunity。只有真人明确
+给出的 `approve/deny` 是演进证据；自动拒绝、取消和非 `before_tool_call` 确认只进入
+诊断统计。
+
+报告公开由 Tool、Policy、风险和参数结构生成的稳定语义签名，不把原始命令、路径、
+Prompt 或参数值复制进报告。每份报告还用聚合输入摘要绑定规范化后的 Trace 语料，并
+作为带摘要校验的不可变工件保存在
+`EVOPI_HOME/opportunities/policies/`，供人工审查或未来候选生成阶段使用。
+
 ### 离线 Policy 回放
 
 EvoPi 可以用历史 JSONL Trace 回放候选 `before_tool_call` Policy，整个过程不会调用模型、执行工具或请求人工确认：
