@@ -7,12 +7,14 @@ from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias
 
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage
+from evopi.core.model_attempts import ModelAttemptInfo
 from evopi.core.model_errors import ModelErrorInfo
 from evopi.core.tool import ToolCall, ToolResult
 from evopi.core.types import JsonObject, Metadata
 
 HookName: TypeAlias = Literal[
     "before_model_call",
+    "before_model_failover",
     "after_model_call",
     "before_tool_call",
     "after_tool_call",
@@ -37,6 +39,11 @@ class PolicyContext:
     arguments: JsonObject | None = None
     error: str | None = None
     error_info: ModelErrorInfo | None = None
+    model_attempt: ModelAttemptInfo | None = None
+    source_model_attempt: ModelAttemptInfo | None = None
+    target_model_attempt: ModelAttemptInfo | None = None
+    remaining_model_attempts: int | None = None
+    circuit_snapshots: tuple[Any, ...] = ()
     aborted: bool = False
     tool_plugin_source: str | None = None
     policy_plugin_source: str | None = None

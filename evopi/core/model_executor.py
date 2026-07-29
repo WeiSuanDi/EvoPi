@@ -13,6 +13,11 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener, notify
 from evopi.core.messages import AssistantMessage
 from evopi.core.model import Model
+from evopi.core.model_attempts import (
+    ModelAttemptInfo,
+    ModelAttemptRouter,
+    ModelAttemptSelection,
+)
 from evopi.core.model_errors import (
     ModelErrorInfo,
     ModelRetryConfig,
@@ -72,75 +77,127 @@ class ModelCallExecutor:
         prepare_context: Callable[..., Any] | None,
         signal: AbortSignal | None,
         deadline_event: asyncio.Event | None = None,
+        attempt_router: ModelAttemptRouter | None = None,
     ) -> ModelCallOutcome:
         attempt = 1
         retry_started = False
+        selection: ModelAttemptSelection | None = None
+        if attempt_router is not None:
+            selection = await attempt_router.select_initial(
+                context=context,
+                attempt=attempt,
+                run_id=run_id,
+                turn=turn,
+                signal=signal,
+            )
         while True:
+            active_model = selection.model if selection is not None else model
+            attempt_info = selection.info if selection is not None else None
+            model_start_data: dict[str, Any] = {
+                "turn": turn,
+                "model": active_model.name,
+                "attempt": attempt,
+            }
+            if attempt_info is not None:
+                model_start_data["attempt_info"] = attempt_info
             await notify(
                 emit,
                 CoreEvent(
                     type="model_start",
                     run_id=run_id,
-                    data={
-                        "turn": turn,
-                        "model": model.name,
-                        "attempt": attempt,
-                    },
+                    data=model_start_data,
                 ),
                 signal=signal,
             )
             try:
                 message = await consume_attempt(
-                    model,
+                    active_model,
                     context,
                     emit,
                     run_id,
                     attempt=attempt,
+                    attempt_info=attempt_info,
                     prepare_context=prepare_context,
+                    attempt_router=attempt_router,
+                    attempt_selection=selection,
                     signal=signal,
                 )
             except ModelAttemptFailure as failure:
                 error_info = error_info_from_exception(failure.error)
                 retry_number = attempt
-                delay = self.retry_delay(error_info, retry_number)
-                if (
-                    delay is None
-                    or retry_number > self.retry_config.max_retries
-                ):
+                next_selection: ModelAttemptSelection | None = None
+                try:
+                    if attempt_router is not None and selection is not None:
+                        await attempt_router.record_failure(
+                            selection,
+                            failure.error,
+                            error_info,
+                        )
+                    if (
+                        attempt_router is not None
+                        and selection is not None
+                        and self.retry_config.enabled
+                        and retry_number <= self.retry_config.max_retries
+                    ):
+                        next_selection = await attempt_router.select_after_failure(
+                            context=context,
+                            previous=selection,
+                            error=failure.error,
+                            error_info=error_info,
+                            next_attempt=attempt + 1,
+                            max_attempts=self.retry_config.max_retries + 1,
+                            run_id=run_id,
+                            turn=turn,
+                            signal=signal,
+                        )
+                        delay = (
+                            next_selection.delay
+                            if next_selection is not None
+                            else None
+                        )
+                    else:
+                        delay = self.retry_delay(error_info, retry_number)
+                except BaseException as router_error:
                     if retry_started:
-                        await notify(
-                            emit,
-                            CoreEvent(
-                                type="model_retry_end",
-                                run_id=run_id,
-                                data={
-                                    "success": False,
-                                    "cancelled": False,
-                                    "attempts": attempt,
-                                    "retries": attempt - 1,
-                                    "max_retries": (
-                                        self.retry_config.max_retries
-                                    ),
-                                    "error_info": error_info,
-                                },
-                            ),
+                        await self._emit_retry_end_failure(
+                            emit=emit,
+                            run_id=run_id,
+                            attempt=attempt,
+                            error_info=error_info_from_exception(router_error),
+                            attempt_info=attempt_info,
+                            signal=signal,
+                        )
+                    raise
+                if delay is None or retry_number > self.retry_config.max_retries:
+                    if retry_started:
+                        await self._emit_retry_end_failure(
+                            emit=emit,
+                            run_id=run_id,
+                            attempt=attempt,
+                            error_info=error_info,
+                            attempt_info=attempt_info,
                             signal=signal,
                         )
                     raise failure.error from failure
 
                 retry_started = True
+                retry_data: dict[str, Any] = {
+                    "retry": retry_number,
+                    "next_attempt": attempt + 1,
+                    "max_retries": self.retry_config.max_retries,
+                    "delay": delay,
+                    "error_info": error_info,
+                }
+                if next_selection is not None:
+                    assert selection is not None
+                    retry_data["attempt_info"] = next_selection.info
+                    retry_data["source_attempt_info"] = selection.info
                 await notify(
                     emit,
                     CoreEvent(
                         type="model_retry_start",
                         run_id=run_id,
-                        data={
-                            "retry": retry_number,
-                            "next_attempt": attempt + 1,
-                            "max_retries": self.retry_config.max_retries,
-                            "delay": delay,
-                            "error_info": error_info,
-                        },
+                        data=retry_data,
                     ),
                     signal=signal,
                 )
@@ -178,13 +235,52 @@ class ModelCallExecutor:
                         cancelled=True,
                     )
                 attempt += 1
+                if next_selection is not None:
+                    selection = next_selection
                 continue
+            if attempt_router is not None and selection is not None:
+                if message.stop_reason == "aborted":
+                    await attempt_router.record_abandoned(selection)
+                else:
+                    await attempt_router.record_success(selection)
             return ModelCallOutcome(
                 message=message,
                 attempts=attempt,
                 retry_started=retry_started,
                 cancelled=message.stop_reason == "aborted",
             )
+
+    async def _emit_retry_end_failure(
+        self,
+        *,
+        emit: EventListener | None,
+        run_id: str | None,
+        attempt: int,
+        error_info: ModelErrorInfo | None,
+        attempt_info: ModelAttemptInfo | None,
+        signal: AbortSignal | None,
+    ) -> None:
+        await notify(
+            emit,
+            CoreEvent(
+                type="model_retry_end",
+                run_id=run_id,
+                data={
+                    "success": False,
+                    "cancelled": False,
+                    "attempts": attempt,
+                    "retries": attempt - 1,
+                    "max_retries": self.retry_config.max_retries,
+                    "error_info": error_info,
+                    **(
+                        {"attempt_info": attempt_info}
+                        if attempt_info is not None
+                        else {}
+                    ),
+                },
+            ),
+            signal=signal,
+        )
 
     def retry_delay(
         self,

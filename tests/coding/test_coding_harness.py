@@ -4,6 +4,7 @@ import asyncio
 import sys
 from collections.abc import AsyncIterator
 
+from evopi.ai import ModelCandidate, ModelRoute
 from evopi.coding.harness import CodingHarness
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage, ToolResultMessage
@@ -16,6 +17,7 @@ from evopi.trace.reader import read_trace
 
 class ScriptedModel:
     name = "coding-script"
+    context_window = 0
 
     def __init__(self, messages: list[AssistantMessage]) -> None:
         self._messages = iter(messages)
@@ -37,6 +39,33 @@ def test_coding_harness_prompt_describes_final_active_tools(tmp_path) -> None:
     assert "## Available Tools" in harness.system_prompt
     for tool_name in harness.capabilities.tool_names:
         assert f"`{tool_name}`" in harness.system_prompt
+
+
+def test_coding_harness_accepts_an_explicit_model_route(tmp_path) -> None:
+    primary = ScriptedModel([AssistantMessage(content="primary", stop_reason="stop")])
+    fallback = ScriptedModel([AssistantMessage(content="fallback", stop_reason="stop")])
+    route = ModelRoute(
+        candidates=(
+            ModelCandidate(
+                candidate_id="primary",
+                provider="test-primary",
+                model=primary,
+            ),
+            ModelCandidate(
+                candidate_id="fallback",
+                provider="test-fallback",
+                model=fallback,
+            ),
+        )
+    )
+
+    harness = CodingHarness(
+        model=primary,
+        model_route=route,
+        workspace=tmp_path,
+    )
+
+    assert harness.model_route is route
 
 
 def test_corrupt_memory_disables_memory_without_blocking_harness(tmp_path) -> None:

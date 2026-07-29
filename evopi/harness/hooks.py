@@ -4,6 +4,7 @@ from evopi.policy.types import HookName
 
 HOOKS: tuple[HookName, ...] = (
     "before_model_call",
+    "before_model_failover",
     "after_model_call",
     "before_tool_call",
     "after_tool_call",

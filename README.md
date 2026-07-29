@@ -253,9 +253,51 @@ The native Responses adapter keeps EvoPi as the conversation-state authority: re
 persist their JSON-safe provider output in `AssistantMessage.metadata`, so reasoning and other
 non-executable output items can be replayed through Session and Checkpoint recovery. Older
 messages and provider switches remain compatible through normalized message reconstruction.
-Malformed same-provider state fails closed before any network request.
+Provider state is bound to a hashed model-and-endpoint compatibility identity; a different
+candidate uses normalized text and ToolCall reconstruction instead of replaying private output
+items. Malformed same-provider state fails closed before any network request.
 
 Bare `Agent` instances do not retry unless given a `ModelRetryConfig`. `BaseHarness` and `CodingHarness` enable deterministic retries by default: up to three additional full model attempts with 2/4/8-second backoff. Only transient `rate_limited`, `overloaded`, `timeout`, `connection`, and `server` errors retry. A longer valid `Retry-After` takes precedence; values above the 60-second wait ceiling fail immediately.
+
+Hosts that need multiple providers can pass an ordered `ModelRoute` to `BaseHarness` or
+`CodingHarness`. Failover shares the existing total attempt budget, preserves the successful
+candidate for the rest of the Run, and keeps circuit health in process-local memory. Transient
+failures, exhausted quota, context overflow, and explicit model-unavailable codes can select the
+next compatible candidate. Every candidate change—including an initial fallback because the
+primary circuit is open or its context window is too small—runs the `before_model_failover`
+Policy hook before any request reaches the target provider. Policy may allow, block, or require
+human confirmation; unsupported actions fail closed. The hook receives the final prepared target
+context, including Context Provider and Plugin Prompt contributions. Setting
+`ModelFailoverConfig(enabled=False)` prevents both failure-driven and initial candidate changes.
+
+```python
+from evopi.ai import ModelCandidate, ModelRoute
+from evopi.coding.harness import CodingHarness
+
+# primary and fallback are already configured Model implementations.
+route = ModelRoute(
+    candidates=(
+        ModelCandidate(
+            candidate_id="primary",
+            provider="openai-responses",
+            model=primary,
+            failure_domain="openai-production",
+        ),
+        ModelCandidate(
+            candidate_id="fallback",
+            provider="anthropic",
+            model=fallback,
+            failure_domain="anthropic-production",
+        ),
+    )
+)
+harness = CodingHarness(model=primary, model_route=route, workspace=".")
+```
+
+Failure-domain values are hashed before entering events or Trace. Circuit state and Run affinity
+are deliberately not persisted or synchronized across processes; the route fingerprint is part of
+the Session runtime fingerprint so configuration drift remains observable. Model routes are an
+explicit Python host configuration in v1; the standard CLI remains a single-model entry point.
 
 Every retry remains in the same Run and Turn. Context providers and `before_model_call` Policies run again for each attempt, while `after_model_call` runs only for a successful response. A failed attempt is retained in events and Trace with `stop_reason=error`, including partial text or tool-call diagnostics, but is never committed to model context. `model_retry_start` and `model_retry_end` make retry timing and outcome observable. Abort interrupts both the active stream and backoff wait.
 

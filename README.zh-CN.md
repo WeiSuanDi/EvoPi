@@ -246,10 +246,48 @@ Agent Context、Checkpoint 投影与重启恢复保持一致。通过验证的 v
 原生 Responses Adapter 继续以 EvoPi 作为对话状态的唯一事实来源：请求固定使用
 `store=false` 并重发完整的已提交上下文。成功或 incomplete 响应会把 JSON-safe Provider
 输出保存在 `AssistantMessage.metadata` 中，使 reasoning 等非执行输出项能够随 Session 与
-Checkpoint 恢复后原样续传。旧消息和 Provider 切换通过归一化消息重建保持兼容；同名
-Provider State 损坏时会在网络请求前 fail closed。
+Checkpoint 恢复后原样续传。Provider State 绑定哈希后的模型与端点兼容身份；切换到不
+兼容候选时只通过归一化文本和 ToolCall 重建，不会误重放私有输出项。旧消息仍可通过同一
+降级路径继续使用；同名 Provider State 损坏时会在网络请求前 fail closed。
 
 裸 `Agent` 只有显式传入 `ModelRetryConfig` 才会自动重试；`BaseHarness` 与 `CodingHarness` 默认启用确定性重试：初次调用之外最多三次，退避为 2/4/8 秒。只有 `rate_limited`、`overloaded`、`timeout`、`connection` 和 `server` 会重试。合法且更长的 `Retry-After` 优先；若超过 60 秒等待上限则立即失败。
+
+需要多 Provider 的宿主可以向 `BaseHarness` 或 `CodingHarness` 传入有序 `ModelRoute`。
+Failover 与现有 Retry 共用总 attempt 预算，并在同一个 Run 内保持成功候选亲和性；熔断
+健康状态只保存在当前进程。瞬态错误、配额耗尽、上下文溢出和明确的模型不可用 code
+可以切换到下一个兼容候选。任何候选变化都必须先经过 `before_model_failover` Policy，
+包括主候选因熔断开启或上下文窗口不足而在第一次请求前被跳过的情况。Policy 只能允许、
+阻断或要求人工确认；没有路由语义的动作会 fail closed。Hook 接收包含 Context Provider
+与 Plugin Prompt 注入内容的最终目标 Context。`ModelFailoverConfig(enabled=False)` 会同时
+禁止失败后切换与首次请求前的候选绕行。
+
+```python
+from evopi.ai import ModelCandidate, ModelRoute
+from evopi.coding.harness import CodingHarness
+
+# primary 与 fallback 是已经完成配置的 Model 实例。
+route = ModelRoute(
+    candidates=(
+        ModelCandidate(
+            candidate_id="primary",
+            provider="openai-responses",
+            model=primary,
+            failure_domain="openai-production",
+        ),
+        ModelCandidate(
+            candidate_id="fallback",
+            provider="anthropic",
+            model=fallback,
+            failure_domain="anthropic-production",
+        ),
+    )
+)
+harness = CodingHarness(model=primary, model_route=route, workspace=".")
+```
+
+原始 failure-domain 在进入 Event/Trace 前会被哈希。Circuit 状态和 Run affinity 不持久化、
+不做跨进程同步；Route 指纹会进入 Session 运行时指纹，因此配置漂移仍然可观测。v1 的
+Model Route 采用显式 Python 宿主配置，标准 CLI 入口仍使用单模型配置。
 
 所有 attempt 都属于同一个 Run 和 Turn。Context Provider 与 `before_model_call` Policy 每次都会重新运行，`after_model_call` 只处理成功响应。失败 attempt 会以 `stop_reason=error` 完整保存在 Event 与 Trace 中，包括部分文本和 ToolCall 诊断信息，但不会写入模型上下文。`model_retry_start` / `model_retry_end` 暴露重试等待和最终结果；Abort 可以打断正在进行的模型流或退避等待。
 

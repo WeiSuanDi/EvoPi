@@ -14,6 +14,11 @@ from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener, notify
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
+from evopi.core.model_attempts import (
+    ModelAttemptInfo,
+    ModelAttemptRouter,
+    ModelAttemptSelection,
+)
 from evopi.core.model_executor import (
     ModelAttemptFailure as _ModelAttemptFailure,
     ModelCallExecutor,
@@ -110,6 +115,7 @@ class AgentLoop:
         should_stop_after_turn: ShouldStopAfterTurn | None = None,
         run_id: str | None = None,
         signal: AbortSignal | None = None,
+        model_attempt_router: ModelAttemptRouter | None = None,
     ) -> AssistantMessage:
         result = await self.run_with_result(
             model=model,
@@ -123,6 +129,7 @@ class AgentLoop:
             should_stop_after_turn=should_stop_after_turn,
             run_id=run_id,
             signal=signal,
+            model_attempt_router=model_attempt_router,
         )
         return result.message
 
@@ -140,6 +147,7 @@ class AgentLoop:
         should_stop_after_turn: ShouldStopAfterTurn | None = None,
         run_id: str | None = None,
         signal: AbortSignal | None = None,
+        model_attempt_router: ModelAttemptRouter | None = None,
     ) -> AgentLoopResult:
         deadline_event: asyncio.Event | None = None
         deadline_task: asyncio.Task[None] | None = None
@@ -176,6 +184,7 @@ class AgentLoop:
                     prepare_context=prepare_context,
                     signal=signal,
                     deadline_event=deadline_event,
+                    model_attempt_router=model_attempt_router,
                 )
                 assistant = model_outcome.message
                 model_was_aborted = assistant.stop_reason == "aborted"
@@ -392,6 +401,7 @@ class AgentLoop:
         prepare_context: PrepareContext | None,
         signal: AbortSignal | None,
         deadline_event: asyncio.Event | None = None,
+        model_attempt_router: ModelAttemptRouter | None = None,
     ) -> _ModelCallOutcome:
         return await ModelCallExecutor(
             self.retry_config,
@@ -406,6 +416,7 @@ class AgentLoop:
             prepare_context=prepare_context,
             signal=signal,
             deadline_event=deadline_event,
+            attempt_router=model_attempt_router,
         )
 
     _wait_for_retry = staticmethod(ModelCallExecutor.wait_for_retry)
@@ -417,7 +428,10 @@ class AgentLoop:
         emit: EventListener | None,
         run_id: str | None,
         attempt: int,
+        attempt_info: ModelAttemptInfo | None,
         prepare_context: PrepareContext | None,
+        attempt_router: ModelAttemptRouter | None,
+        attempt_selection: ModelAttemptSelection | None,
         signal: AbortSignal | None,
     ) -> AssistantMessage:
         complete: AssistantMessage | None = None
@@ -425,16 +439,19 @@ class AgentLoop:
         builder = AssistantMessageBuilder()
         partial_calls: dict[int, dict[str, Any]] = {}
         model_context = context.snapshot()
+        message_start_data: dict[str, Any] = {
+            "message_id": message_id,
+            "role": "assistant",
+            "attempt": attempt,
+        }
+        if attempt_info is not None:
+            message_start_data["attempt_info"] = attempt_info
         await notify(
             emit,
             CoreEvent(
                 type="message_start",
                 run_id=run_id,
-                data={
-                    "message_id": message_id,
-                    "role": "assistant",
-                    "attempt": attempt,
-                },
+                data=message_start_data,
             ),
             signal=signal,
         )
@@ -442,15 +459,30 @@ class AgentLoop:
         aborted = False
         try:
             if prepare_context is not None:
-                replacement = call_with_optional_signal(
-                    prepare_context,
-                    model_context,
-                    signal=signal,
-                )
+                if self._accepts_keyword(prepare_context, "attempt_info"):
+                    replacement = call_with_optional_signal(
+                        prepare_context,
+                        model_context,
+                        attempt_info=attempt_info,
+                        signal=signal,
+                    )
+                else:
+                    replacement = call_with_optional_signal(
+                        prepare_context,
+                        model_context,
+                        signal=signal,
+                    )
                 if inspect.isawaitable(replacement):
                     replacement = await replacement
                 if replacement is not None:
                     model_context = replacement
+
+            if attempt_router is not None and attempt_selection is not None:
+                await attempt_router.authorize_attempt(
+                    attempt_selection,
+                    model_context,
+                    signal,
+                )
 
             if signal is not None and signal.aborted:
                 await signal._wait_until_notified()
@@ -469,17 +501,20 @@ class AgentLoop:
                 model_event = cast(ModelStreamEvent, event)
                 if isinstance(model_event, TextDelta):
                     builder.add_text(model_event.delta)
+                    update_data: dict[str, Any] = {
+                        "message_id": message_id,
+                        "role": "assistant",
+                        "kind": "text",
+                        "delta": model_event.delta,
+                    }
+                    if attempt_info is not None:
+                        update_data["attempt_info"] = attempt_info
                     await notify(
                         emit,
                         CoreEvent(
                             type="message_update",
                             run_id=run_id,
-                            data={
-                                "message_id": message_id,
-                                "role": "assistant",
-                                "kind": "text",
-                                "delta": model_event.delta,
-                            },
+                            data=update_data,
                         ),
                         signal=signal,
                     )
@@ -499,20 +534,23 @@ class AgentLoop:
                     if model_event.tool_name:
                         state["name"] += model_event.tool_name
                     state["arguments"] += model_event.arguments_delta
+                    update_data = {
+                        "message_id": message_id,
+                        "role": "assistant",
+                        "kind": "tool_call",
+                        "index": model_event.index,
+                        "delta_length": len(model_event.arguments_delta),
+                        "tool_call_id": model_event.tool_call_id,
+                        "tool_name": model_event.tool_name,
+                    }
+                    if attempt_info is not None:
+                        update_data["attempt_info"] = attempt_info
                     await notify(
                         emit,
                         CoreEvent(
                             type="message_update",
                             run_id=run_id,
-                            data={
-                                "message_id": message_id,
-                                "role": "assistant",
-                                "kind": "tool_call",
-                                "index": model_event.index,
-                                "delta_length": len(model_event.arguments_delta),
-                                "tool_call_id": model_event.tool_call_id,
-                                "tool_name": model_event.tool_name,
-                            },
+                            data=update_data,
                         ),
                         signal=signal,
                     )
@@ -532,12 +570,21 @@ class AgentLoop:
                 error,
                 attempt,
             )
+            if attempt_info is not None:
+                failed.metadata["model_attempt"] = self._attempt_metadata(attempt_info)
+            message_end_data: dict[str, Any] = {
+                "message": failed,
+                "attempt": attempt,
+                "committed": False,
+            }
+            if attempt_info is not None:
+                message_end_data["attempt_info"] = attempt_info
             await notify(
                 emit,
                 CoreEvent(
                     type="message_end",
                     run_id=run_id,
-                    data={"message": failed, "attempt": attempt, "committed": False},
+                    data=message_end_data,
                 ),
                 signal=signal,
             )
@@ -553,7 +600,36 @@ class AgentLoop:
         if complete is None:
             raise ModelProtocolError("Model stream ended without a completion")
         complete.id = message_id
+        if attempt_info is not None:
+            complete.metadata = {
+                **complete.metadata,
+                "model_attempt": self._attempt_metadata(attempt_info),
+            }
         return complete
+
+    @staticmethod
+    def _accepts_keyword(callback: Callable[..., Any], name: str) -> bool:
+        try:
+            parameters = inspect.signature(callback).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == name
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    @staticmethod
+    def _attempt_metadata(info: ModelAttemptInfo) -> dict[str, Any]:
+        return {
+            "route_id": info.route_id,
+            "candidate_id": info.candidate_id,
+            "provider": info.provider,
+            "model": info.model,
+            "failure_domain_id": info.failure_domain_id,
+            "attempt": info.attempt,
+            "route_round": info.route_round,
+        }
 
     @staticmethod
     def _build_failed_message(

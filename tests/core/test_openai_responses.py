@@ -226,12 +226,19 @@ def test_openai_responses_replays_provider_output_and_tool_results() -> None:
                             stop_reason="tool_use",
                             metadata={
                                 "provider": "openai-responses",
+                                "model": "test-model",
                                 "openai_responses": {
                                     "schema_version": 1,
                                     "response_id": "resp-1",
                                     "status": "completed",
                                     "output": provider_output,
                                     "incomplete_details": None,
+                                    "compatibility_id": (
+                                        responses._provider_compatibility_id(
+                                            model="test-model",
+                                            base_url="https://api.openai.com/v1",
+                                        )
+                                    ),
                                 },
                             },
                         ),
@@ -328,6 +335,86 @@ def test_openai_responses_reconstructs_provider_neutral_assistant_history() -> N
             "call_id": "call-1",
             "output": "contents",
         },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored_model", "stored_base_url"),
+    [
+        ("other-model", "https://api.openai.com/v1"),
+        ("test-model", "https://other.example/v1"),
+    ],
+)
+def test_openai_responses_reconstructs_state_from_incompatible_candidate(
+    stored_model: str,
+    stored_base_url: str,
+) -> None:
+    captured_input: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_input.extend(json.loads(request.content)["input"])
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"type":"response.completed","response":{'
+                '"id":"resp-2","status":"completed","incomplete_details":null,'
+                '"output":[{"type":"message","role":"assistant","content":[]}]}}'
+            ),
+        )
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        model = responses.OpenAIResponsesModel(
+            model="test-model",
+            api_key="test-key",
+            client=client,
+        )
+        _ = [
+            event
+            async for event in model.stream(
+                AgentContext(
+                    messages=[
+                        AssistantMessage(
+                            content="portable text",
+                            stop_reason="stop",
+                            metadata={
+                                "provider": "openai-responses",
+                                "model": stored_model,
+                                "openai_responses": {
+                                    "schema_version": 1,
+                                    "response_id": "resp-old",
+                                    "status": "completed",
+                                    "output": [
+                                        {
+                                            "type": "reasoning",
+                                            "id": "reasoning-old",
+                                            "summary": [],
+                                        }
+                                    ],
+                                    "incomplete_details": None,
+                                    "compatibility_id": (
+                                        responses._provider_compatibility_id(
+                                            model=stored_model,
+                                            base_url=stored_base_url,
+                                        )
+                                    ),
+                                },
+                            },
+                        )
+                    ]
+                )
+            )
+        ]
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+    assert captured_input == [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "portable text"}],
+        }
     ]
 
 
