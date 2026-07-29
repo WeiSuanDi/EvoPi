@@ -40,7 +40,11 @@ from evopi.evolution import (
     PolicyArtifactLoader,
 )
 from evopi.harness.context_manager import ContextManager, ContextProvider
-from evopi.harness.capabilities import HarnessCapabilities, PolicyCapability
+from evopi.harness.capabilities import (
+    HarnessCapabilities,
+    PolicyCapability,
+    ToolCapability,
+)
 from evopi.harness.confirmation import (
     ConfirmationHandler,
     ConfirmationRequest,
@@ -82,6 +86,14 @@ from evopi.trace.writer import JsonlTraceWriter
 
 _logger = logging.getLogger(__name__)
 _PLUGIN_ACTIVE_TOOLS_STATE_KEY = "_evopi.active_tools"
+
+
+def _tool_effects(tool: Tool) -> tuple[str, ...]:
+    raw = tool.metadata.get("effects", ["unknown"])
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        return ("unknown",)
+    effects = tuple(dict.fromkeys(item.strip() for item in raw if item.strip()))
+    return effects or ("unknown",)
 
 
 class PolicyBlockedError(RuntimeError):
@@ -271,6 +283,8 @@ class BaseHarness:
         self._plugin_active_overrides: dict[
             str, tuple[str, frozenset[str]]
         ] = {}
+        self._tool_ceiling: frozenset[str] | None = None
+        self._tool_exclusions: frozenset[str] = frozenset()
         self._plugin_prompt_fragments: list[tuple[str, Any]] = []
         self._plugin_context_providers: list[ContextProvider] = []
         self._pending_plugin_runtime_events: list[CoreEvent] = []
@@ -400,8 +414,31 @@ class BaseHarness:
                 replaces=replacement.policy_name if replacement is not None else None,
                 )
             )
+        registered_tools = sorted(self.tools.all(), key=lambda item: item.name)
+        active_names = frozenset(tool.name for tool in self._active_tools())
+        tool_capabilities = tuple(
+            ToolCapability(
+                name=tool.name,
+                description=tool.description,
+                effects=_tool_effects(tool),
+                source=(
+                    "plugin"
+                    if isinstance(tool.metadata.get("plugin_source"), str)
+                    else str(tool.metadata.get("source") or "harness")
+                ),
+                plugin=(
+                    str(tool.metadata["plugin_source"])
+                    if isinstance(tool.metadata.get("plugin_source"), str)
+                    else None
+                ),
+                active=tool.name in active_names,
+            )
+            for tool in registered_tools
+        )
         return HarnessCapabilities(
-            tool_names=tuple(sorted(tool.name for tool in self.tools.all())),
+            tool_names=tuple(tool.name for tool in registered_tools),
+            active_tool_names=tuple(sorted(active_names)),
+            tools=tool_capabilities,
             policy_names=tuple(sorted(policy.name for policy in self.policies.all())),
             policies=tuple(policy_capabilities),
             plugin_names=self._plugin_names,
@@ -771,11 +808,46 @@ class BaseHarness:
         for api in self._plugin_apis.values():
             self._bind_plugin_api(api)
 
+    def active_tools(self) -> tuple[Tool, ...]:
+        """Return the final Tool view after all owner-isolated restriction layers."""
+
+        return tuple(self._active_tools())
+
+    def configure_tool_ceiling(
+        self,
+        *,
+        include_names: set[str] | frozenset[str] | None = None,
+        exclude_names: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Set the user/Harness Tool ceiling while idle."""
+
+        if self.is_running:
+            raise RuntimeError("Cannot change Tool ceiling while the Harness is running")
+        if include_names is not None and exclude_names is not None:
+            raise ValueError("Tool ceiling include and exclude modes are mutually exclusive")
+        known = {tool.name for tool in self.tools.all()}
+        requested = set(include_names if include_names is not None else exclude_names or ())
+        unknown = sorted(requested - known)
+        if unknown:
+            raise ValueError("Unknown Tool name(s): " + ", ".join(unknown))
+        if include_names is not None:
+            self._tool_ceiling = frozenset(include_names)
+            self._tool_exclusions = frozenset()
+        elif exclude_names is not None:
+            self._tool_ceiling = None
+            self._tool_exclusions = frozenset(exclude_names)
+        else:
+            self._tool_ceiling = None
+            self._tool_exclusions = frozenset()
+        self.agent.tools = self._active_tools()
+        self._refresh_system_prompt_after_capability_change()
+
     def _active_tools(self) -> list[Tool]:
         tools = self.tools.all()
-        if not self._plugin_active_overrides:
-            return tools
         allowed = {tool.name for tool in tools}
+        if self._tool_ceiling is not None:
+            allowed.intersection_update(self._tool_ceiling)
+        allowed.difference_update(self._tool_exclusions)
         for _, names in self._plugin_active_overrides.values():
             allowed.intersection_update(names)
         return [tool for tool in tools if tool.name in allowed]
@@ -1736,6 +1808,10 @@ class BaseHarness:
                         "attached_workspace": self.session.attached_workspace,
                         "checkpoint_id": self.session.recovery_info.checkpoint_id,
                         "warnings": list(self.session.recovery_info.warnings),
+                        "runtime_fingerprint": self._runtime_fingerprint,
+                        "active_tool_names": list(
+                            self.capabilities.active_tool_names
+                        ),
                     },
                 )
             )
@@ -1917,7 +1993,7 @@ class BaseHarness:
                 else self.model.name
             ),
             system_prompt=self.system_prompt,
-            tools=[tool.definition() for tool in self.tools.all()],
+            tools=[tool.definition() for tool in self._active_tools()],
             policies=policies,
         )
 
@@ -1937,7 +2013,7 @@ class BaseHarness:
         if len(messages) < 4:
             return  # nothing worth compacting
 
-        tools_defs = [t.definition() for t in self.tools.all()]
+        tools_defs = [t.definition() for t in self._active_tools()]
         context_tokens = estimate_context_tokens(
             messages, system_prompt=self.system_prompt, tools=tools_defs
         )
@@ -1949,7 +2025,7 @@ class BaseHarness:
                 hook="before_session_compact",
                 agent_context=AgentContext(
                     messages=list(self.agent.messages),
-                    tools=self.tools.all(),
+                    tools=self._active_tools(),
                 ),
                 arguments={
                     "context_tokens": context_tokens,

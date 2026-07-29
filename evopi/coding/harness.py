@@ -12,6 +12,11 @@ from pathlib import Path
 from evopi.ai.routing import ModelRoute
 from evopi.coding.policies import coding_policy_pack
 from evopi.coding.prompts import build_system_prompt
+from evopi.coding.capabilities import (
+    CodingResources,
+    MemoryResourceCapability,
+    SkillResourceCapability,
+)
 from evopi.coding.tools import (
     coding_tools,
     create_spawn_subagent_tool,
@@ -67,11 +72,17 @@ class CodingHarness(BaseHarness):
         memory_path: str | Path | None = None,
         skills_root: str | Path | None = None,
         enable_subagent: bool = False,
+        tool_names: set[str] | frozenset[str] | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
         resource_warnings: tuple[str, ...] = (),
         policy_activation_service: PolicyActivationService | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self._dynamic_system_prompt = not bool(system_prompt)
+        if tool_names is not None and excluded_tool_names is not None:
+            raise ValueError(
+                "Tool include and exclude ceilings are mutually exclusive"
+            )
 
         # ------------------------------------------------------------------ #
         #  Memory (optional)
@@ -105,25 +116,48 @@ class CodingHarness(BaseHarness):
         # ------------------------------------------------------------------ #
         tool_registry = ToolRegistry()
         for tool in coding_tools(self.workspace):
+            tool.metadata.setdefault("source", "coding")
             tool_registry.register(tool)
         if self._memory_store is not None:
             for tool in memory_tools(self._memory_store, self._memory_service):
+                tool.metadata.setdefault("source", "memory")
                 tool_registry.register(tool)
         if enable_subagent:
-            child_tool_names = frozenset(tool.name for tool in tool_registry)
+            child_tool_names = frozenset(
+                tool.name
+                for tool in tool_registry
+                if (
+                    tool_names is None or tool.name in tool_names
+                )
+                and (
+                    excluded_tool_names is None
+                    or tool.name not in excluded_tool_names
+                )
+            )
             self._subagent_manager: SubAgentManager | None = SubAgentManager(
                 model,
                 tools=list(tool_registry),
                 governance=GovernanceEnvelope(allowed_tool_names=child_tool_names),
             )
-            tool_registry.register(create_spawn_subagent_tool(self._subagent_manager))
+            subagent_tool = create_spawn_subagent_tool(self._subagent_manager)
+            subagent_tool.metadata.setdefault("source", "subagent")
+            tool_registry.register(subagent_tool)
         else:
             self._subagent_manager = None
 
         # ------------------------------------------------------------------ #
         #  Dynamic system prompt — the model sees its actual tool set
         # ------------------------------------------------------------------ #
-        resolved_prompt = system_prompt or build_system_prompt(list(tool_registry))
+        prompt_tools = [
+            tool
+            for tool in tool_registry
+            if (tool_names is None or tool.name in tool_names)
+            and (
+                excluded_tool_names is None
+                or tool.name not in excluded_tool_names
+            )
+        ]
+        resolved_prompt = system_prompt or build_system_prompt(prompt_tools)
 
         # ------------------------------------------------------------------ #
         #  Base harness (Plugin loading + Agent creation with dynamic prompt)
@@ -190,6 +224,10 @@ class CodingHarness(BaseHarness):
         )
         if policy_activation_service is not None:
             self._install_active_policies()
+        self.configure_tool_ceiling(
+            include_names=tool_names,
+            exclude_names=excluded_tool_names,
+        )
         if self._subagent_manager is not None:
             self._subagent_manager.bind_parent(self)
 
@@ -204,6 +242,36 @@ class CodingHarness(BaseHarness):
             self.add_context_provider(self._skill_context_provider)
 
     # -- context providers ---------------------------------------------------
+
+    @property
+    def resources(self) -> CodingResources:
+        """Return a content-free snapshot for CLI and host status surfaces."""
+
+        skills = (
+            tuple(
+                SkillResourceCapability(
+                    name=skill.name,
+                    version=skill.version,
+                    risk_level=skill.risk_level,
+                    source=skill.source_path,
+                )
+                for skill in self._skill_loader.registry.all()
+            )
+            if self._skill_loader is not None
+            else ()
+        )
+        return CodingResources(
+            memory=MemoryResourceCapability(
+                enabled=self._memory_store is not None,
+                entry_count=(
+                    len(self._memory_store.all())
+                    if self._memory_store is not None
+                    else 0
+                ),
+            ),
+            skills=skills,
+            subagent_enabled=self._subagent_manager is not None,
+        )
 
     async def _memory_context_provider(self, ctx: AgentContext) -> AgentContext:
         if self._memory_store is None:
@@ -251,7 +319,7 @@ class CodingHarness(BaseHarness):
     def _refresh_system_prompt_after_capability_change(self) -> None:
         if not self._dynamic_system_prompt:
             return
-        prompt = build_system_prompt(self.tools.all())
+        prompt = build_system_prompt(list(self.active_tools()))
         self.system_prompt = prompt
         self.agent.system_prompt = prompt
         for index, message in enumerate(self.agent.messages):

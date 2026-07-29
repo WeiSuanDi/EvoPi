@@ -1,8 +1,11 @@
 from evopi.ai.models import (
     AnthropicMessagesModel,
+    ModelEnvironmentConfig,
     OpenAICompatibleModel,
     OpenAIResponsesModel,
+    model_from_config,
     model_from_environment,
+    resolve_model_environment,
 )
 from evopi.ai.routing import (
     CircuitAcquireResult,
@@ -21,9 +24,12 @@ __all__ = [
     "CircuitStateSnapshot",
     "ModelCandidate",
     "ModelFailoverConfig",
+    "ModelEnvironmentConfig",
     "ModelRoute",
     "ModelRouteUnavailableError",
     "OpenAICompatibleModel",
     "OpenAIResponsesModel",
+    "model_from_config",
     "model_from_environment",
+    "resolve_model_environment",
 ]

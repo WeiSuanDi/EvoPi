@@ -1,5 +1,9 @@
 from evopi.harness.base import BaseHarness, PolicyBlockedError
-from evopi.harness.capabilities import HarnessCapabilities, PolicyCapability
+from evopi.harness.capabilities import (
+    HarnessCapabilities,
+    PolicyCapability,
+    ToolCapability,
+)
 from evopi.harness.model_operation import GovernedModelOperation
 from evopi.harness.confirmation import (
     ConfirmationDecision,
@@ -13,6 +17,7 @@ __all__ = [
     "BaseHarness",
     "HarnessCapabilities",
     "PolicyCapability",
+    "ToolCapability",
     "GovernedModelOperation",
     "ConfirmationDecision",
     "ConfirmationHandler",
