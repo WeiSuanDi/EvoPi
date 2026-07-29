@@ -33,6 +33,11 @@ from evopi.cli.product import (
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
+from evopi.cli.runtime import (
+    build_model_runtime,
+    fallback_values_from_args,
+    parse_tool_selection,
+)
 from evopi.cli.session import (
     print_session_opened,
     session_gc_main,
@@ -73,6 +78,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="evopi",
@@ -102,6 +114,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--context-window", type=int, metavar="N",
         help="Model context window size for compaction decisions",
     )
+    model_group.add_argument(
+        "--fallback",
+        action="append",
+        metavar="PROVIDER:MODEL",
+        help="Add an ordered failover candidate (repeatable)",
+    )
+    model_group.add_argument(
+        "--no-failover",
+        action="store_true",
+        help="Disable model failover and reject configured fallbacks",
+    )
+    model_group.add_argument(
+        "--circuit-failure-threshold",
+        type=_positive_int,
+        default=2,
+        metavar="N",
+        help="Failures before a candidate circuit opens (default: 2)",
+    )
+    model_group.add_argument(
+        "--circuit-recovery-timeout",
+        type=_non_negative_float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Circuit cooldown before a half-open probe (default: 30)",
+    )
 
     runtime_group = parser.add_argument_group("Runtime")
     runtime_group.add_argument("--workspace", type=Path, default=Path.cwd())
@@ -113,6 +150,17 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_group.add_argument(
         "--tool-timeout", type=_positive_float, metavar="SECONDS",
         help="Default timeout for individual tool executions",
+    )
+    tool_selection = runtime_group.add_mutually_exclusive_group()
+    tool_selection.add_argument(
+        "--tools",
+        metavar="NAME,...",
+        help="Restrict the runtime to exactly these registered Tools",
+    )
+    tool_selection.add_argument(
+        "--exclude-tools",
+        metavar="NAME,...",
+        help="Disable these registered Tools",
     )
 
     governance_group = parser.add_argument_group("Governance")
@@ -198,7 +246,6 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     """Build a CodingHarness from CLI args, auto-detecting available modules."""
     from evopi.session.compact import CompactionSettings
 
-    session_manager = _session_manager_from_args(args)
     model_options: dict[str, Any] = {
         "timeout": getattr(args, "model_timeout", 120.0),
         "model": getattr(args, "model", None),
@@ -206,10 +253,17 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     }
     if hasattr(args, "max_output_tokens"):
         model_options["max_tokens"] = args.max_output_tokens
-    model = model_from_environment(
-        getattr(args, "provider", None),
-        **model_options,
-    )
+    fallback_values = fallback_values_from_args(args)
+    if fallback_values or getattr(args, "no_failover", False):
+        model, model_route, _ = build_model_runtime(args)
+    else:
+        model = model_from_environment(
+            getattr(args, "provider", None),
+            **model_options,
+        )
+        model_route = None
+    included_tools, excluded_tools = parse_tool_selection(args)
+    session_manager = _session_manager_from_args(args)
 
     # Auto-detect Memory — always on, stored in workspace
     memory_path = getattr(args, "memory", None)
@@ -229,6 +283,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
 
     return CodingHarness(
         model=model,
+        model_route=model_route,
         workspace=args.workspace,
         trace_path=args.trace,
         system_prompt=getattr(args, "system_prompt", "") or "",
@@ -249,6 +304,8 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         memory_path=memory_path,
         skills_root=skills_root,
         enable_subagent=enable_subagent,
+        tool_names=included_tools,
+        excluded_tool_names=excluded_tools,
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
     )

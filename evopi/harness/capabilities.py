@@ -6,6 +6,16 @@ from dataclasses import dataclass
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ToolCapability:
+    name: str
+    description: str
+    effects: tuple[str, ...]
+    source: str
+    plugin: str | None
+    active: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class PolicyCapability:
     name: str
     version: str
@@ -22,6 +32,8 @@ class HarnessCapabilities:
     """Public, read-only view of the capabilities visible to an Agent."""
 
     tool_names: tuple[str, ...] = ()
+    active_tool_names: tuple[str, ...] = ()
+    tools: tuple[ToolCapability, ...] = ()
     policy_names: tuple[str, ...] = ()
     policies: tuple[PolicyCapability, ...] = ()
     plugin_names: tuple[str, ...] = ()
@@ -31,4 +43,4 @@ class HarnessCapabilities:
     warnings: tuple[str, ...] = ()
 
 
-__all__ = ["HarnessCapabilities", "PolicyCapability"]
+__all__ = ["HarnessCapabilities", "PolicyCapability", "ToolCapability"]
