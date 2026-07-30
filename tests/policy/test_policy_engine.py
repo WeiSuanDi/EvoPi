@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
+import pytest
+
 from evopi.core.context import AgentContext
 from evopi.core.tool import ToolCall, ToolResult
 from evopi.policy.builtins import OutputTruncationPolicy, ShellSafetyPolicy
@@ -64,6 +66,36 @@ def test_builtin_shell_policy_blocks_destructive_command() -> None:
                 agent_context=AgentContext(),
                 tool_call=ToolCall(id="1", name="shell_command", arguments={}),
                 arguments={"command": "git reset --hard HEAD"},
+            )
+        )
+    )
+
+    assert evaluation.final.action == "block"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rd /s /q build",
+        "del /f /s /q C:\\data\\*",
+        "Remove-Item C:\\data -Recurse -Force",
+        "ri C:\\data -r -fo",
+        "Clear-Disk -Number 0 -RemoveData",
+        "Format-Volume -DriveLetter C",
+    ],
+)
+def test_shell_policy_blocks_cmd_and_powershell_destructive_forms(
+    command: str,
+) -> None:
+    engine = PolicyEngine(PolicyRegistry([ShellSafetyPolicy()]))
+
+    evaluation = asyncio.run(
+        engine.evaluate(
+            PolicyContext(
+                hook="before_tool_call",
+                agent_context=AgentContext(),
+                tool_call=ToolCall(id="1", name="shell_command", arguments={}),
+                arguments={"command": command},
             )
         )
     )

@@ -180,6 +180,23 @@ def test_invalid_max_turns_environment_fails_during_argument_parsing(
     assert error.value.code == 2
 
 
+def test_shell_cli_overrides_environment_and_rejects_unknown_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EVOPI_SHELL", "powershell")
+
+    assert cli_main.build_parser().parse_args([]).shell == "powershell"
+    assert cli_main.build_parser().parse_args(["--shell", "cmd"]).shell == "cmd"
+    with pytest.raises(SystemExit) as error:
+        cli_main.build_parser().parse_args(["--shell", "fish"])
+    assert error.value.code == 2
+
+    monkeypatch.setenv("EVOPI_SHELL", "fish")
+    with pytest.raises(SystemExit) as environment_error:
+        cli_main.build_parser().parse_args([])
+    assert environment_error.value.code == 2
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [

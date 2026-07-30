@@ -351,3 +351,8 @@ System Prompt。
 CodingHarness 支持生成 Prompt、完整替换和追加三种组合语义。Plugin Prompt Fragment
 与 Skill Context 仍在每次模型调用前装配，不被固化进基础 Prompt。裸 BaseHarness
 不读取 CLI 环境、用户活动 Policy 或 Coding 资源。
+
+Shell Environment 是 CodingHarness 的显式装配依赖，不属于 BaseHarness 或 Core。
+CodingHarness 使用解析后的 `ShellEnvironment` 同时构造 Shell Tool、Tool metadata 与
+动态 Prompt，避免执行器和模型各自猜测语法。CLI 必须在创建 Session 和模型前完成
+解析；自定义 Harness 可直接注入同一只读值。

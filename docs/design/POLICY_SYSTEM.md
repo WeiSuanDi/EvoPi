@@ -128,6 +128,11 @@ ToolConfirmationPolicy(tool_names={"shell_command"})
 Pack 决定，而不是硬编码在通用 Policy 中。当前 Coding Policy Pack 默认对
 `shell_command` 启用确认，工作区内的 `write_file` 不要求交互确认。
 
+`ShellSafetyPolicy` 审查的是模型提交的原始命令，与底层命令传输方式无关。内置规则
+覆盖 POSIX、cmd 与 PowerShell 的明确破坏性形式，包括递归删除、磁盘清理/格式化和
+关机重启；命中后仍以 `block` 优先。未命中的普通命令继续由
+`ToolConfirmationPolicy` 请求人工确认。
+
 ## 第一版 Policy 边界
 
 第一版 Policy 系统固定包含 6 项能力：

@@ -42,6 +42,13 @@ cannot re-enable a disabled Tool.
 cap. The REPL displays `Turn current/max`; `/status`, `/settings`, and `config show` expose the
 effective limit.
 
+`--shell auto|cmd|powershell` and `EVOPI_SHELL` use
+`CLI > environment > auto` precedence. Resolution completes before Model or Session
+construction. `auto` means `cmd.exe` on Windows and `/bin/sh` on POSIX; explicit PowerShell
+prefers `pwsh` and falls back to `powershell.exe` only on Windows. Arbitrary executable paths
+are not accepted. Config, Doctor, Startup, and `/settings` expose both requested and resolved
+values without executing a command.
+
 The public Harness snapshot exposes the registered and active Tool views, source, effects, and
 Plugin ownership. Coding resource snapshots expose only Memory status/count, Skill identity and
 risk, and SubAgent availability. REPL and diagnostics never inspect private Harness fields.

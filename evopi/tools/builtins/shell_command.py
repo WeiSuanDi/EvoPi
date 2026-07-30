@@ -12,6 +12,10 @@ from typing import Any
 
 from evopi.core.tool import Tool, ToolResult
 from evopi.tools.schema import object_schema
+from evopi.tools.shell_environment import (
+    ShellEnvironment,
+    resolve_shell_environment,
+)
 
 
 def create_shell_command_tool(
@@ -19,8 +23,10 @@ def create_shell_command_tool(
     *,
     timeout: float = 60.0,
     abort_grace_period: float = 1.0,
+    shell_environment: ShellEnvironment | None = None,
 ) -> Tool:
     root = Path(workspace).resolve()
+    environment = shell_environment or resolve_shell_environment()
     if abort_grace_period < 0:
         raise ValueError("abort_grace_period cannot be negative")
 
@@ -34,8 +40,24 @@ def create_shell_command_tool(
             )
         else:
             process_options["start_new_session"] = True
-        process = await asyncio.create_subprocess_shell(
-            command,
+        process_environment: dict[str, str] | None = None
+        process_argv = environment.argv(command)
+        if environment.kind == "cmd":
+            # CPython quotes exec argv with C-runtime rules on Windows, but
+            # cmd.exe does not decode embedded \" sequences. Transport the
+            # reviewed command through this child process's private environment.
+            process_environment = os.environ.copy()
+            process_environment["EVOPI_SHELL_COMMAND"] = command
+            process_argv = (
+                environment.executable,
+                "/d",
+                "/s",
+                "/c",
+                "%EVOPI_SHELL_COMMAND%",
+            )
+            process_options["env"] = process_environment
+        process = await asyncio.create_subprocess_exec(
+            *process_argv,
             cwd=root,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -61,7 +83,8 @@ def create_shell_command_tool(
     return Tool(
         name="shell_command",
         description=(
-            "Run a shell command with the workspace as its current directory. "
+            f"Run a command through {environment.display_name} "
+            f"({environment.executable}) with the workspace as its current directory. "
             "This tool is governed by shell safety policies but is not a sandbox."
         ),
         parameters=object_schema(
@@ -71,7 +94,13 @@ def create_shell_command_tool(
         handler=shell_command,
         timeout=timeout,
         timeout_grace_period=abort_grace_period,
-        metadata={"effects": ["execute"]},
+        metadata={
+            "effects": ["execute"],
+            "shell_mode": environment.requested_mode,
+            "shell_kind": environment.kind,
+            "shell_executable": environment.executable,
+            "prompt_guidelines": [environment.syntax_guideline],
+        },
     )
 
 

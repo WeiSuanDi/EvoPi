@@ -18,20 +18,28 @@ from evopi.tools.builtins import (
     create_write_file_tool,
 )
 from evopi.tools.schema import object_schema
+from evopi.tools.shell_environment import ShellEnvironment
 
 
 # ---------------------------------------------------------------------------
 # Workspace tools
 # ---------------------------------------------------------------------------
 
-def coding_tools(workspace: str | Path) -> list[Tool]:
+def coding_tools(
+    workspace: str | Path,
+    *,
+    shell_environment: ShellEnvironment | None = None,
+) -> list[Tool]:
     """The four workspace-scoped file and shell tools."""
     return [
         create_list_dir_tool(workspace),
         create_read_file_tool(workspace),
         create_edit_file_tool(workspace),
         create_write_file_tool(workspace),
-        create_shell_command_tool(workspace),
+        create_shell_command_tool(
+            workspace,
+            shell_environment=shell_environment,
+        ),
     ]
 
 

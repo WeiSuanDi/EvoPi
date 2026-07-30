@@ -150,6 +150,7 @@ evopi run --tools read_file,list_dir '只读总结仓库，不要修改。'
 evopi --max-retries 5 --model-timeout 90 '检查这个仓库。'
 evopi --max-output-tokens 8192 '用增量方式构建较大的候选。'
 evopi --max-turns 40 '完成一项仓库级任务。'
+evopi --shell powershell '使用 PowerShell 语法检查仓库。'
 evopi --no-retry '执行任务，但不要自动重试模型。'
 ```
 
@@ -157,6 +158,12 @@ evopi --no-retry '执行任务，但不要自动重试模型。'
 `Agent.last_run`、生命周期事件、Trace 和 REPL 都会公开已使用量与配置上限。
 CodingHarness 的最后一个 Turn 会从模型 Context 中移除 Tool 并要求提交经验证的最终答复，
 不会偷偷增加一次隐藏总结调用。
+
+`--shell auto|cmd|powershell` 与 `EVOPI_SHELL` 按“CLI > 环境变量 > auto”选择
+`shell_command` 的实际环境。Windows 的 `auto` 解析为 `cmd.exe`，POSIX 解析为
+`/bin/sh`；显式 PowerShell 优先使用 `pwsh`，并在 Windows 上回退到 Windows
+PowerShell。`config show`、`doctor` 和 REPL 设置会展示解析后的可执行程序与语法，
+动态 Tool 提示也使用同一事实来源。
 
 在 PowerShell 中，当 Prompt 含空格或引号时，建议使用单引号包裹整个 Prompt。
 

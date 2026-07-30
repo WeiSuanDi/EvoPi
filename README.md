@@ -151,6 +151,7 @@ Harness-backed CLI runs retry transient model failures up to three additional ti
 evopi --max-retries 5 --model-timeout 90 'Review this repository.'
 evopi --max-output-tokens 8192 'Build a larger candidate incrementally.'
 evopi --max-turns 40 'Complete a repository-wide task.'
+evopi --shell powershell 'Inspect the repository with PowerShell syntax.'
 evopi --no-retry 'Run this task without automatic model retries.'
 ```
 
@@ -158,6 +159,12 @@ The strict model Turn budget defaults to 20 and can also be set with
 `EVOPI_MAX_TURNS`. `run --json`, `Agent.last_run`, lifecycle events, Trace, and the REPL expose
 both the consumed and configured budget. On the final CodingHarness Turn, EvoPi removes Tools
 from the model context and asks for a verified final answer; it never adds a hidden summary call.
+
+`--shell auto|cmd|powershell` and `EVOPI_SHELL` select the `shell_command` environment with
+`CLI > environment > auto` precedence. On Windows, `auto` resolves to `cmd.exe`; on POSIX it
+resolves to `/bin/sh`. Explicit PowerShell prefers `pwsh` and falls back to Windows PowerShell.
+The resolved executable and syntax are shown by `config show`, `doctor`, and REPL settings, and
+are included in the model's dynamic Tool guidance.
 
 On PowerShell, single quotes are recommended when a prompt contains spaces or quotation marks.
 
