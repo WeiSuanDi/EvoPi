@@ -271,6 +271,10 @@ Coding 场景示范层。
 
 公开产品契约见 `docs/design/CLI_PRODUCT.md`。CLI 是 CodingHarness 的宿主，不代表
 BaseHarness 会隐式启用 Memory、Skills、活动 Policy、磁盘 Session 或用户配置。
+
+CLI 将 `--max-turns / EVOPI_MAX_TURNS` 解析为严格模型 Turn 总预算。Core 只记录计量；
+CodingHarness 负责剩余两轮提示、最后一轮空 Tool 视图和防御 Policy。该分层避免把
+Coding 产品的收尾行为固化到通用 Agent Loop。
 - coding tools
 - coding policies
 - coding prompts

@@ -192,6 +192,9 @@ def test_transient_failure_retries_without_polluting_context() -> None:
     assert [event.type for event in events].count("model_retry_start") == 1
     assert [event.type for event in events].count("model_retry_end") == 1
     assert [event.type for event in events].count("turn_start") == 1
+    assert agent.last_run is not None
+    assert agent.last_run.turns_used == 1
+    assert agent.last_run.max_turns == 20
 
 
 def test_retry_exhaustion_reports_once_to_policy_run_state_and_trace(tmp_path) -> None:

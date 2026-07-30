@@ -38,6 +38,7 @@ def test_config_snapshot_is_stable_and_never_contains_credentials(
     assert payload["model"] == "gpt-test"
     assert payload["credential_configured"] is True
     assert payload["workspace_trusted"] is False
+    assert payload["max_turns"] == 20
     assert "top-secret-key" not in serialized
     assert "api_key" not in serialized.lower()
 
@@ -146,3 +147,16 @@ def test_append_system_prompt_parser_is_compatible() -> None:
     )
     assert args.system_prompt == "replacement"
     assert args.append_system_prompt == "appendix"
+
+
+def test_config_snapshot_uses_max_turns_environment_and_explicit_override(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("EVOPI_MAX_TURNS", "31")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert build_config_snapshot(workspace=workspace).max_turns == 31
+    assert build_config_snapshot(workspace=workspace, max_turns=8).max_turns == 8

@@ -128,6 +128,10 @@ Plugin Command 与内置命令进入同一个只读命令注册表和帮助/补�
 动态 Coding Prompt；只有最终活动 Tool 会被描述。Plugin Tool 覆盖只能收窄 CLI/
 Harness ceiling。
 
+Turn Budget 的最后一轮空 Tool 视图位于所有 Plugin 覆盖之外：Plugin 只能继续收窄，
+不能在 Finalize Turn 重新启用 Tool。Plugin Prompt Fragment 仍可参与 Context 组装，
+但随后生成的最终 Domain Context 会在 `before_model_call` Policy 之前完成。
+
 `doctor` 不扫描或 import 候选目录，只静态验证已有批准记录指向的内容寻址快照。
 `config show` 也不导入 Plugin。`--plugin PATH` 仅保留为明确带 warning 的不受审开发
 入口，正式流程仍是 review → approve → reload。

@@ -42,6 +42,7 @@ class ReplStartupConfig:
     included_tools: tuple[str, ...] | None
     excluded_tools: tuple[str, ...] | None
     credential_configured: bool = False
+    max_turns: int = 20
 
 
 @dataclass(slots=True, kw_only=True)
@@ -122,6 +123,7 @@ def build_repl_startup_config(
         included_tools=_split_selection(getattr(args, "tools", None)),
         excluded_tools=_split_selection(getattr(args, "exclude_tools", None)),
         credential_configured=credential_configured,
+        max_turns=harness.agent.max_turns,
     )
 
 
@@ -376,6 +378,7 @@ def _status(context: ReplCommandContext, arguments: str, raw: str) -> ReplComman
     )
     table.add_row("Session", harness.session.session_id)
     table.add_row("Workspace", context.startup.workspace)
+    table.add_row("Turn budget", str(context.startup.max_turns))
     table.add_row(
         "Active tools",
         f"{len(capabilities.active_tool_names)}/{len(capabilities.tool_names)}",
@@ -406,6 +409,7 @@ def _settings(context: ReplCommandContext, arguments: str, raw: str) -> ReplComm
         ("Retry", f"{value.retry_enabled} ({value.max_retries})"),
         ("Deadline", str(value.deadline or "-")),
         ("Tool timeout", str(value.tool_timeout or "-")),
+        ("Max turns", str(value.max_turns)),
         ("Fallbacks", ", ".join(value.fallbacks) or "none"),
         ("Tool allowlist", ", ".join(value.included_tools or ()) or "none"),
         ("Tool exclusions", ", ".join(value.excluded_tools or ()) or "none"),

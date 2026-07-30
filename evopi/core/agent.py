@@ -81,6 +81,7 @@ class Agent:
         self._active_guard = Lock()
         self._active_run: _ActiveRun | None = None
         self._current_run_id: str | None = None
+        self._current_turn = 0
         self._last_run: AgentRunState | None = None
 
     @property
@@ -107,6 +108,12 @@ class Agent:
     @property
     def max_turns(self) -> int:
         return self._loop.max_turns
+
+    @property
+    def current_turn(self) -> int:
+        """One-based model Turn currently executing, or zero while idle."""
+
+        return self._current_turn if self.is_running else 0
 
     @property
     def retry_config(self) -> ModelRetryConfig:
@@ -153,6 +160,7 @@ class Agent:
             with self._active_guard:
                 self._active_run = active
             self._current_run_id = run_id
+            self._current_turn = 0
             run_start = len(self.messages)
             user_message = UserMessage(content=content)
             self.messages.append(user_message)
@@ -251,6 +259,8 @@ class Agent:
                 self._last_run = AgentRunState(
                     run_id=run_id,
                     end_reason=reason,
+                    turns_used=self._current_turn,
+                    max_turns=self.max_turns,
                     error=error,
                     error_info=(
                         error_info_from_exception(failure)
@@ -264,6 +274,8 @@ class Agent:
                         run_id=run_id,
                         data={
                             "reason": reason,
+                            "turns_used": self._current_turn,
+                            "max_turns": self.max_turns,
                             "messages": list(self.messages[run_start:]),
                             "error": error,
                             "error_info": (
@@ -285,6 +297,7 @@ class Agent:
                         pass
                 await self._stop_abort_monitor(active)
                 self._current_run_id = None
+                self._current_turn = 0
                 with self._active_guard:
                     if self._active_run is active:
                         self._active_run = None
@@ -292,7 +305,13 @@ class Agent:
                     active.idle.set_result(None)
 
     async def _emit_run_start(self, run_id: str, user_message: UserMessage) -> None:
-        await self._emit(CoreEvent(type="agent_start", run_id=run_id))
+        await self._emit(
+            CoreEvent(
+                type="agent_start",
+                run_id=run_id,
+                data={"max_turns": self.max_turns},
+            )
+        )
         await self._emit(
             CoreEvent(
                 type="message_start",
@@ -372,6 +391,8 @@ class Agent:
         self._last_run = AgentRunState(
             run_id=run_id,
             end_reason=reason,
+            turns_used=self._current_turn,
+            max_turns=self.max_turns,
             error=error,
             error_info=error_info,
         )
@@ -388,6 +409,8 @@ class Agent:
                 run_id=run_id,
                 data={
                     "reason": reason,
+                    "turns_used": self._current_turn,
+                    "max_turns": self.max_turns,
                     "messages": list(self.messages[run_start:]),
                     "error": error,
                     "error_info": error_info,
@@ -423,6 +446,10 @@ class Agent:
     async def _emit(self, event: CoreEvent) -> None:
         if event.run_id is None:
             event.run_id = self._current_run_id
+        if event.type == "turn_start":
+            turn = event.data.get("turn")
+            if isinstance(turn, int):
+                self._current_turn = turn
         signal = self.signal
         for listener in tuple(self._listeners):
             value = call_with_optional_signal(listener, event, signal=signal)

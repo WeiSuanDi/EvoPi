@@ -149,8 +149,14 @@ evopi run --tools read_file,list_dir '只读总结仓库，不要修改。'
 ```powershell
 evopi --max-retries 5 --model-timeout 90 '检查这个仓库。'
 evopi --max-output-tokens 8192 '用增量方式构建较大的候选。'
+evopi --max-turns 40 '完成一项仓库级任务。'
 evopi --no-retry '执行任务，但不要自动重试模型。'
 ```
+
+严格模型 Turn 预算默认为 20，也可通过 `EVOPI_MAX_TURNS` 设置。`run --json`、
+`Agent.last_run`、生命周期事件、Trace 和 REPL 都会公开已使用量与配置上限。
+CodingHarness 的最后一个 Turn 会从模型 Context 中移除 Tool 并要求提交经验证的最终答复，
+不会偷偷增加一次隐藏总结调用。
 
 在 PowerShell 中，当 Prompt 含空格或引号时，建议使用单引号包裹整个 Prompt。
 
@@ -255,7 +261,9 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `ToolResult.terminate` 是工具批次级的早停提示。EvoPi 会完成当前 AssistantMessage 请求的所有工具；只有非空批次中的每个最终结果都设置 `terminate=True`，才跳过下一次模型调用。Policy 阻断、确认拒绝、工具缺失或执行失败通常会返回错误结果，并允许模型在下一轮作出解释。
 
-`Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和 `agent_end` 暴露，结束原因包括 `completed`、`terminated`、`aborted`、`error` 和 `turn_limit`。
+`Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和
+`agent_end` 暴露，其中包含 `turns_used`、`max_turns`，结束原因包括 `completed`、
+`terminated`、`aborted`、`error` 和 `turn_limit`。
 
 Session Log 使用 schema v4。活动叶切换、Plugin 状态和证据绑定的分支合并都是追加式
 事实，因此 Harness transcript、Agent Context、Checkpoint 投影与重启恢复保持一致。

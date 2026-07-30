@@ -137,6 +137,8 @@ def build_run_result(
         "session_id": harness.session.session_id,
         "run_id": state.run_id if state is not None else None,
         "end_reason": state.end_reason if state is not None else "error",
+        "turns_used": state.turns_used if state is not None else 0,
+        "max_turns": state.max_turns if state is not None else harness.agent.max_turns,
         "assistant": (
             {
                 "id": answer.id,

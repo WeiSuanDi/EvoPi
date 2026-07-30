@@ -24,9 +24,9 @@ Management and automation
 - Interactive rendering and one-shot model text use the existing Rich/streaming surfaces.
 - In one-shot mode, model text is written to stdout; runtime status, warnings, retries,
   Confirmation, and Session information are written to stderr.
-- `run --json` emits schema v1 with Session/Run IDs, end reason, final Assistant message, and a
-  bounded safe error projection. It never copies the Prompt, Tool arguments, Provider State, or
-  credentials.
+- `run --json` emits schema v1 with Session/Run IDs, end reason, `turns_used`, `max_turns`, final
+  Assistant message, and a bounded safe error projection. It never copies the Prompt, Tool
+  arguments, Provider State, or credentials.
 - Normal and governed termination return `0`; runtime failure, deadline, or turn limit return
   `1`; user Abort returns `130`. A missing `run` input returns `2`.
 
@@ -36,6 +36,11 @@ Model routing accepts explicit ordered fallbacks and circuit settings. The CLI v
 candidate before opening a Session or issuing a model request. Tool include/exclude options form
 a Harness-level capability ceiling: Plugin overrides, Plan Mode, and SubAgents may narrow it but
 cannot re-enable a disabled Tool.
+
+`--max-turns N` and `EVOPI_MAX_TURNS` configure a strict model Turn budget with
+`CLI > environment > 20` precedence. The value must be positive and has no artificial upper
+cap. The REPL displays `Turn current/max`; `/status`, `/settings`, and `config show` expose the
+effective limit.
 
 The public Harness snapshot exposes the registered and active Tool views, source, effects, and
 Plugin ownership. Coding resource snapshots expose only Memory status/count, Skill identity and
@@ -67,6 +72,11 @@ boundary for explicit extension requests.
 `--system-prompt` fully replaces the generated prompt. `--append-system-prompt` appends to either
 the generated or replacement prompt. Plugin Prompt Fragments and Skill context remain in the
 per-model-call Context assembly chain.
+
+When a Coding run reaches two remaining Turns, an ephemeral Context message requests
+prioritization and final-answer preparation. On the last Turn, the model receives an empty Tool
+view and a final-answer instruction. A Coding Policy blocks fabricated ToolCalls; no `N+1`
+summary request is created. These are Domain behaviors, not defaults of bare Agent/BaseHarness.
 
 ## Configuration and diagnostics
 

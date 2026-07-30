@@ -172,7 +172,15 @@ class AgentLoop:
                     )
                 await notify(
                     emit,
-                    CoreEvent(type="turn_start", run_id=run_id, data={"turn": turn}),
+                    CoreEvent(
+                        type="turn_start",
+                        run_id=run_id,
+                        data={
+                            "turn": turn,
+                            "max_turns": self.max_turns,
+                            "remaining_turns": self.max_turns - turn + 1,
+                        },
+                    ),
                     signal=signal,
                 )
                 model_outcome = await self._call_model_with_retry(

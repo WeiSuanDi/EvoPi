@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -150,6 +151,13 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_group = parser.add_argument_group("Runtime")
     runtime_group.add_argument("--workspace", type=Path, default=Path.cwd())
     runtime_group.add_argument("--trace", type=Path, default=Path(".evopi/trace.jsonl"))
+    runtime_group.add_argument(
+        "--max-turns",
+        type=_positive_int,
+        default=os.getenv("EVOPI_MAX_TURNS", "20"),
+        metavar="N",
+        help="Strict model Turn budget, including the final answer Turn (default: 20)",
+    )
     runtime_group.add_argument(
         "--deadline", type=_positive_float, metavar="SECONDS",
         help="Wall-clock deadline for the entire run",
@@ -298,6 +306,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         model_route=model_route,
         workspace=args.workspace,
         trace_path=args.trace,
+        max_turns=getattr(args, "max_turns", 20),
         system_prompt=getattr(args, "system_prompt", None),
         append_system_prompt=getattr(args, "append_system_prompt", None),
         retry_config=ModelRetryConfig(

@@ -564,3 +564,9 @@ REPL `/policies` 与管理 CLI 只展示公开快照；`config show` 和 `doctor
 不 Reload Policy。Doctor 只校验活动选择、批准记录和不可变工件摘要，损坏时报告
 `failed`。动态 Prompt 会告诉模型 Policy 可以 block、confirm、rewrite 或 validate，
 但模型不能绕过 Policy、伪造批准，或把 Reload 描述为授权。
+
+Coding Policy Pack 包含 `coding_final_turn_guard`。它只在严格预算的最后一个模型 Turn
+阻断模型直接构造的 ToolCall，与 Harness 提供空 Tool 视图形成纵深防御。该规则仍走
+普通 `before_tool_call` Policy Engine，因此继续遵守
+`block > require_confirmation > rewrite_args > trigger_validation > allow`，不会由
+Confirmation 绕过。

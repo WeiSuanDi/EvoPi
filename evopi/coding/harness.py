@@ -23,8 +23,11 @@ from evopi.coding.tools import (
     memory_tools,
 )
 from evopi.core.context import AgentContext
+from evopi.core.cancellation import AbortSignal
+from evopi.core.events import CoreEvent
 from evopi.core.messages import SystemMessage
 from evopi.core.model import Model
+from evopi.core.model_attempts import ModelAttemptInfo
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.evolution import PolicyActivationService
 from evopi.harness.base import BaseHarness
@@ -216,7 +219,13 @@ class CodingHarness(BaseHarness):
                 continue
             self.register_tool(tool)
         self.load_policy_pack(
-            coding_policy_pack(self.workspace, max_output_chars=max_output_chars)
+            coding_policy_pack(
+                self.workspace,
+                max_output_chars=max_output_chars,
+                is_final_turn=lambda: (
+                    self.agent.current_turn == self.agent.max_turns
+                ),
+            )
         )
         if policy_activation_service is not None:
             self._install_active_policies()
@@ -311,6 +320,63 @@ class CodingHarness(BaseHarness):
                     )
                 break
         return ctx
+
+    async def _prepare_domain_context(
+        self,
+        context: AgentContext,
+        *,
+        attempt_info: ModelAttemptInfo | None = None,
+        signal: AbortSignal | None = None,
+    ) -> AgentContext:
+        del attempt_info, signal
+        turn = self.agent.current_turn
+        if turn < 1:
+            return context
+        remaining = self.agent.max_turns - turn + 1
+        if remaining > 2:
+            return context
+
+        mode = "finalize" if remaining == 1 else "warning"
+        if mode == "finalize":
+            context.tools = []
+            if self._dynamic_system_prompt:
+                prompt = build_system_prompt(
+                    [],
+                    workspace=self.workspace,
+                    append=self._append_system_prompt,
+                )
+                for index, message in enumerate(context.messages):
+                    if (
+                        isinstance(message, SystemMessage)
+                        and message.content == self.system_prompt
+                    ):
+                        context.messages[index] = SystemMessage(content=prompt)
+                        break
+                else:
+                    context.messages.insert(0, SystemMessage(content=prompt))
+            budget_prompt = (
+                "Only 1 model turn remains. Tools are unavailable in this final turn. "
+                "Return a final answer now with the verified outcome, any unfinished "
+                "items, and the concrete next step. Do not request or fabricate ToolCalls."
+            )
+        else:
+            budget_prompt = (
+                "Only 2 model turns remain. Prioritize essential verification and prepare "
+                "to return a complete final answer on the next model turn."
+            )
+        context.messages.insert(0, SystemMessage(content=budget_prompt))
+        await self.agent.emit_event(
+            CoreEvent(
+                type="turn_budget_applied",
+                data={
+                    "mode": mode,
+                    "turn": turn,
+                    "max_turns": self.agent.max_turns,
+                    "remaining_turns": remaining,
+                },
+            )
+        )
+        return context
 
     def _refresh_system_prompt_after_capability_change(self) -> None:
         if not self._dynamic_system_prompt:

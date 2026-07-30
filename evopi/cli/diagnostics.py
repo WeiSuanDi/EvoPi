@@ -39,6 +39,7 @@ class ConfigSnapshot:
     model: str
     base_url: str
     credential_configured: bool
+    max_turns: int
     fallbacks: tuple[ModelEnvironmentConfig, ...]
     evopi_home: str
     session_root: str
@@ -57,6 +58,7 @@ class ConfigSnapshot:
             "model": self.model,
             "base_url": self.base_url,
             "credential_configured": self.credential_configured,
+            "max_turns": self.max_turns,
             "fallbacks": [
                 {
                     "provider": item.provider,
@@ -123,11 +125,13 @@ def build_config_snapshot(
     workspace: str | Path,
     provider: str | None = None,
     model: str | None = None,
+    max_turns: int | None = None,
 ) -> ConfigSnapshot:
     """Resolve the effective product configuration without creating a model."""
 
     resolved_workspace = Path(workspace).expanduser().resolve()
     primary = resolve_model_environment(provider, model=model)
+    resolved_max_turns = _resolve_max_turns(max_turns)
     raw_fallbacks = tuple(
         item.strip()
         for item in os.getenv("EVOPI_FALLBACKS", "").split(",")
@@ -169,6 +173,7 @@ def build_config_snapshot(
         model=primary.model,
         base_url=primary.base_url,
         credential_configured=primary.credential_configured,
+        max_turns=resolved_max_turns,
         fallbacks=fallback_configs,
         evopi_home=str(home),
         session_root=str(resolve_session_root()),
@@ -185,6 +190,7 @@ def run_doctor(
     workspace: str | Path,
     provider: str | None = None,
     model: str | None = None,
+    max_turns: int | None = None,
 ) -> DoctorReport:
     """Run deterministic offline checks without loading executable Plugins."""
 
@@ -214,6 +220,7 @@ def run_doctor(
             workspace=workspace_path,
             provider=provider,
             model=model,
+            max_turns=max_turns,
         )
     except (OSError, ValueError) as exc:
         checks.append(
@@ -410,6 +417,7 @@ def config_show_main(argv: list[str]) -> int:
             workspace=args.workspace,
             provider=args.provider,
             model=args.model,
+            max_turns=args.max_turns,
         )
     except (OSError, ValueError) as exc:
         print(f"EvoPi config error: {exc}", file=sys.stderr)
@@ -430,6 +438,7 @@ def doctor_main(argv: list[str]) -> int:
         workspace=args.workspace,
         provider=args.provider,
         model=args.model,
+        max_turns=args.max_turns,
     )
     if args.json_output:
         print(
@@ -463,8 +472,20 @@ def _diagnostic_parser(prog: str, description: str) -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument("--model")
+    parser.add_argument("--max-turns", type=int)
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
+
+
+def _resolve_max_turns(value: int | None) -> int:
+    raw: int | str = value if value is not None else os.getenv("EVOPI_MAX_TURNS", "20")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("EVOPI_MAX_TURNS must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError("max_turns must be a positive integer")
+    return parsed
 
 
 __all__ = [
