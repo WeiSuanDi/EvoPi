@@ -150,8 +150,14 @@ Harness-backed CLI runs retry transient model failures up to three additional ti
 ```powershell
 evopi --max-retries 5 --model-timeout 90 'Review this repository.'
 evopi --max-output-tokens 8192 'Build a larger candidate incrementally.'
+evopi --max-turns 40 'Complete a repository-wide task.'
 evopi --no-retry 'Run this task without automatic model retries.'
 ```
+
+The strict model Turn budget defaults to 20 and can also be set with
+`EVOPI_MAX_TURNS`. `run --json`, `Agent.last_run`, lifecycle events, Trace, and the REPL expose
+both the consumed and configured budget. On the final CodingHarness Turn, EvoPi removes Tools
+from the model context and asks for a verified final answer; it never adds a hidden summary call.
 
 On PowerShell, single quotes are recommended when a prompt contains spaces or quotation marks.
 
@@ -261,7 +267,9 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `ToolResult.terminate` is a batch-level early-termination hint. EvoPi finishes every tool call requested by the current assistant message and skips the next model call only when every final result in the non-empty batch sets `terminate=True`. A blocked, denied, missing, or failed tool normally returns an error result and allows the model to explain it on the next turn.
 
-`Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
+`Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are
+available through `Agent.last_run` and `agent_end`, including `turns_used`, `max_turns`, and the
+reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
 
 Session logs use schema v4. Active-leaf, Plugin-state, and evidence-bound branch-merge changes are
 append-only facts, keeping the Harness transcript, Agent context, Checkpoint projection, and

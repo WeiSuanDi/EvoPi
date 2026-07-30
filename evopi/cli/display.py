@@ -21,6 +21,7 @@ class ReplDisplay:
         self._tool_status: list[str] = []
         self._live: Live | None = None
         self._turn: int = 0
+        self._max_turns: int = 0
         self._status_text: str = ""
         self._plugin_status: dict[str, str] = {}
 
@@ -57,6 +58,7 @@ class ReplDisplay:
         self._text = ""
         self._tool_status = []
         self._turn = 0
+        self._max_turns = 0
         self._start_live()
 
     def end_run(self) -> None:
@@ -85,6 +87,7 @@ class ReplDisplay:
 
     def _on_turn(self, data: dict[str, Any]) -> None:
         self._turn = data.get("turn", self._turn + 1)
+        self._max_turns = data.get("max_turns", self._max_turns)
         self._refresh()
 
     def _on_tool_start(self, data: dict[str, Any]) -> None:
@@ -139,7 +142,8 @@ class ReplDisplay:
         items: list[Any] = []
         status_parts = [self._status_text] if self._status_text else []
         if self._turn:
-            status_parts.append(f"Turn {self._turn}")
+            suffix = f"/{self._max_turns}" if self._max_turns else ""
+            status_parts.append(f"Turn {self._turn}{suffix}")
         if self._tool_status:
             status_parts.append("  ".join(self._tool_status))
         if self._plugin_status:

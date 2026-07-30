@@ -164,6 +164,8 @@ def test_status_and_resource_commands_use_public_snapshots(tmp_path) -> None:
     rendered = output.getvalue()
     assert "test-model" in rendered
     assert "Active tools" in rendered
+    assert "Turn budget" in rendered
+    assert "Max turns" in rendered
     assert "Memory" in rendered
     assert "private" not in rendered
 

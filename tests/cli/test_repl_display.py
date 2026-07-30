@@ -51,3 +51,20 @@ def test_repl_display_prints_submitted_user_message_once(monkeypatch) -> None:
     display.show_user_message("只显示一次")
 
     assert stderr.getvalue().count("只显示一次") == 1
+
+
+def test_repl_display_shows_current_and_maximum_turn(monkeypatch) -> None:
+    stderr = io.StringIO()
+    monkeypatch.setattr("evopi.cli.display.sys.stderr", stderr)
+    display = ReplDisplay()
+
+    display.start_run()
+    display.handle_event(
+        SimpleNamespace(
+            type="turn_start",
+            data={"turn": 12, "max_turns": 20, "remaining_turns": 9},
+        )
+    )
+    display.end_run()
+
+    assert "Turn 12/20" in stderr.getvalue()

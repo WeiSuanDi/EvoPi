@@ -70,6 +70,11 @@ Lifecycle v2 中，Harness 保存 Core 的结构化 `end_reason`：正常回答�
 `after_turn` Hook 上返回 `terminate` 并把原因写入 Trace，Harness 只把最终动作转换为
 布尔停止决定。它与工具结果的 `terminate` 批次提示互不替代。
 
+BaseHarness 在 Context Provider 与 Plugin Prompt Fragment 完成后、`before_model_call`
+Policy 之前提供受保护的 Domain Context 装配点。默认实现不改变 Context；CodingHarness
+用它注入临时 Turn 收尾提示，并在最后一个 Turn 收窄 Tool 视图。这样 Policy 始终审查
+模型真正会看到的最终 Context，且临时提示不会写入 Session。
+
 Provider Reliability v1 中，Harness 负责选择 Core 重试配置，但不重新实现重试循环。
 `BaseHarness` 与 `CodingHarness` 默认传入启用状态的 `ModelRetryConfig`，裸 `Agent` 则默认
 关闭，便于库调用方明确决定行为。每次重试仍重新进入 Harness 的 Context Provider 和

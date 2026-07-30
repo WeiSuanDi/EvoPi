@@ -40,6 +40,7 @@ async def handle_slash_command(
             fallbacks=(),
             included_tools=None,
             excluded_tools=None,
+            max_turns=harness.agent.max_turns,
         ),
         display=None,
         console=Console(file=sys.stderr),

@@ -28,6 +28,8 @@ class AgentLoopResult:
 class AgentRunState:
     run_id: str
     end_reason: AgentEndReason
+    turns_used: int = 0
+    max_turns: int = 20
     error: str | None = None
     error_info: ModelErrorInfo | None = None
 

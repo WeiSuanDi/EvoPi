@@ -1477,6 +1477,11 @@ class BaseHarness:
                             },
                         )
                     )
+        prepared = await self._prepare_domain_context(
+            prepared,
+            attempt_info=attempt_info,
+            signal=signal,
+        )
         evaluation = await self._evaluate(
             PolicyContext(
                 hook="before_model_call",
@@ -1488,6 +1493,18 @@ class BaseHarness:
         if not (signal and signal.aborted):
             self._raise_if_blocked(evaluation, "Model call")
         return prepared
+
+    async def _prepare_domain_context(
+        self,
+        context: AgentContext,
+        *,
+        attempt_info: ModelAttemptInfo | None = None,
+        signal: AbortSignal | None = None,
+    ) -> AgentContext:
+        """Domain hook applied before the final before_model_call Policy evaluation."""
+
+        del attempt_info, signal
+        return context
 
     async def _authorize_model_failover(
         self,

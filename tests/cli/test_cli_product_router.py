@@ -108,6 +108,8 @@ def test_run_json_payload_is_stable_and_does_not_copy_sensitive_metadata() -> No
     state = AgentRunState(
         run_id="run-1",
         end_reason="error",
+        turns_used=7,
+        max_turns=20,
         error="unsafe raw exception",
         error_info=ModelErrorInfo(
             kind="server",
@@ -132,6 +134,8 @@ def test_run_json_payload_is_stable_and_does_not_copy_sensitive_metadata() -> No
         "session_id": "session-1",
         "run_id": "run-1",
         "end_reason": "error",
+        "turns_used": 7,
+        "max_turns": 20,
         "assistant": {
             "id": "assistant-1",
             "content": "done",
@@ -151,6 +155,29 @@ def test_run_json_payload_is_stable_and_does_not_copy_sensitive_metadata() -> No
     serialized = json.dumps(payload)
     assert "must-not-leak" not in serialized
     assert "unsafe raw exception" not in serialized
+
+
+def test_max_turns_cli_overrides_environment_and_rejects_invalid_values(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EVOPI_MAX_TURNS", "37")
+
+    assert cli_main.build_parser().parse_args([]).max_turns == 37
+    assert cli_main.build_parser().parse_args(["--max-turns", "9"]).max_turns == 9
+    with pytest.raises(SystemExit) as error:
+        cli_main.build_parser().parse_args(["--max-turns", "0"])
+    assert error.value.code == 2
+
+
+def test_invalid_max_turns_environment_fails_during_argument_parsing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EVOPI_MAX_TURNS", "not-an-integer")
+
+    with pytest.raises(SystemExit) as error:
+        cli_main.build_parser().parse_args([])
+
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize(
