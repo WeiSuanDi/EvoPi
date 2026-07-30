@@ -5,6 +5,7 @@ from evopi.coding.capabilities import (
 )
 from evopi.coding.harness import CodingHarness
 from evopi.coding.policies import FinalTurnToolPolicy
+from evopi.coding.tools import create_plugin_candidate_tool
 
 __all__ = [
     "CodingHarness",
@@ -12,4 +13,5 @@ __all__ = [
     "FinalTurnToolPolicy",
     "MemoryResourceCapability",
     "SkillResourceCapability",
+    "create_plugin_candidate_tool",
 ]

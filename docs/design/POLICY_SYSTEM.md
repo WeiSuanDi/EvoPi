@@ -133,6 +133,11 @@ Pack 决定，而不是硬编码在通用 Policy 中。当前 Coding Policy Pack
 关机重启；命中后仍以 `block` 优先。未命中的普通命令继续由
 `ToolConfirmationPolicy` 请求人工确认。
 
+`create_plugin_candidate` 声明 `effects=["write"]` 并经过同一 Policy Engine，但其路径
+由 Tool 内部固定为工作区 `.evopi/plugin-candidates/<name>/`，且只能生成未授权候选，
+因此默认 Policy Pack 不额外请求 Confirmation。它不能写批准快照、活动目录或触发
+Reload；后续 Shell 测试仍按普通 Shell 规则确认，人工 Activation 边界保持不变。
+
 ## 第一版 Policy 边界
 
 第一版 Policy 系统固定包含 6 项能力：

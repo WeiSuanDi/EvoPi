@@ -218,6 +218,13 @@ dependencies and registration conflicts in temporary registries before atomicall
 active Plugin capability set. Generated candidates default to
 `.evopi/plugin-candidates/<name>/` and never approve or activate themselves.
 
+When an extension is explicitly requested, the CodingHarness exposes
+`create_plugin_candidate`. It creates only a packaged `basic` or `plan-mode` scaffold in that
+fixed candidate directory, performs non-executing static review, and returns its digest. The
+Tool has a `write` effect, respects CLI/Plan Mode ceilings, and cannot review, approve, activate,
+or reload anything. The intended authoring flow is scaffold → incremental `edit_file` changes →
+candidate tests → human `review → approve → reload`.
+
 `PluginAPI v1` is a single extension surface for Tools, Policies, asynchronous Commands, Context
 Providers, dynamic Prompt Fragments, branch-aware Session state, owner-scoped active Tool
 restrictions, host-neutral UI, and observational events. It does not define separate Plan,

@@ -120,6 +120,7 @@ Policy 负责具体怎么治理。
 - Policy 可感知工具插件来源（tool_plugin_source）
 - Command / Context Provider / Prompt Fragment / Session State / Tool View / UI
 - package data SDK、候选脚手架和 Plan Mode 普通样例
+- Coding `create_plugin_candidate` Tool（固定候选目录、静态审查、无授权能力）
 
 Plugin 是 Pi Extension 的 Python 对应物：同一 API 注册 Tool、Policy、Event Handler、
 Command、Context、Prompt 和状态能力。Plugin 不按功能分类；Plan Mode 是普通样例。
@@ -130,6 +131,9 @@ Plugin 和 PolicyPack 平级，由 Harness 统一装配。
 ```text
 Plugin 提供可热插拔的第三方扩展能力。
 ```
+
+`create_plugin_candidate` 位于 `evopi/coding/tools.py`，因为它是 Coding 产品的创作工作流，
+而不是 Plugin Runtime 或 Core 的默认行为；底层模板与审查仍由 `evopi/plugins` 提供。
 
 ## evopi/tools
 
