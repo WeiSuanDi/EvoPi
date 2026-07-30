@@ -480,3 +480,7 @@ Harness/Domain/CLI 层实现。Core 的 Model、Message、ToolResult、Event 和
 
 Shell 模式解析、平台语法与进程启动属于 Tool/Domain 层。Core 只执行已注册 Tool，
 不读取 `EVOPI_SHELL`、不选择可执行程序，也不把 Shell 特例写入 Agent Loop。
+
+同理，Plugin 候选创建只是 CodingHarness 注册的普通 Tool。Core 不理解候选目录、
+静态审查、Approval 或 Activation；它只保证该 Tool 经过统一 ToolCall、Policy Hook、
+ToolResult 和生命周期事件路径。

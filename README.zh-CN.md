@@ -214,6 +214,12 @@ evopi plugin deny ./my-plugin
 校验依赖和注册冲突，全部成功后才原子替换活动能力集。生成的候选默认位于
 `.evopi/plugin-candidates/<name>/`，不会自行批准或激活。
 
+当用户明确要求扩展时，CodingHarness 提供 `create_plugin_candidate`。它只会在上述
+固定候选目录生成随包提供的 `basic` 或 `plan-mode` 脚手架，执行不导入源码的静态审查，
+并返回摘要。该 Tool 的 effect 为 `write`，服从 CLI/Plan Mode ceiling，且不能执行
+review、approve、activate 或 reload。推荐创作链路是：脚手架 → `edit_file` 增量修改 →
+候选测试 → 人工 `review → approve → reload`。
+
 `PluginAPI v1` 是统一扩展面，可注册 Tool、Policy、异步 Command、Context Provider、
 动态 Prompt Fragment、分支感知的 Session 状态、所有者隔离的活动 Tool 限制、宿主
 无关 UI 和观察事件；它不会预先定义 Plan、Memory、Tool 等不同 Plugin 类型。批准后

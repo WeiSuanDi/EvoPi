@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from evopi.core.messages import UserMessage
-from evopi.core.tool import Tool
+from evopi.core.tool import Tool, ToolResult
 from evopi.memory import MemoryService
 from evopi.memory.store import MemoryStore
+from evopi.plugins import initialize_plugin_candidate, review_plugin
 from evopi.subagents.context_scope import SubAgentScope
 from evopi.subagents.manager import SubAgentManager
 from evopi.tools.builtins import (
@@ -30,17 +32,93 @@ def coding_tools(
     *,
     shell_environment: ShellEnvironment | None = None,
 ) -> list[Tool]:
-    """The four workspace-scoped file and shell tools."""
+    """Workspace-scoped coding and candidate-authoring tools."""
     return [
         create_list_dir_tool(workspace),
         create_read_file_tool(workspace),
         create_edit_file_tool(workspace),
         create_write_file_tool(workspace),
+        create_plugin_candidate_tool(workspace),
         create_shell_command_tool(
             workspace,
             shell_environment=shell_environment,
         ),
     ]
+
+
+def create_plugin_candidate_tool(workspace: str | Path) -> Tool:
+    """Create and statically inspect one inactive Plugin candidate."""
+
+    root = Path(workspace).expanduser().resolve()
+
+    def create_plugin_candidate(
+        name: str,
+        template: str = "basic",
+    ) -> ToolResult:
+        normalized = name.strip().lower()
+        target = root / ".evopi" / "plugin-candidates" / normalized
+        candidate_path = initialize_plugin_candidate(
+            name,
+            template=template,
+            path=target,
+        )
+        report = review_plugin(candidate_path)
+        payload = {
+            "candidate_path": str(candidate_path),
+            "static_check": "passed" if report.passed else "failed",
+            "digest": report.candidate.artifact.digest,
+            "warnings": list(report.warnings),
+            "errors": list(report.errors),
+            "next_steps": ["review", "approve", "reload"],
+        }
+        return ToolResult(
+            content=json.dumps(payload, ensure_ascii=False),
+            is_error=not report.passed,
+            metadata={
+                "candidate_path": str(candidate_path),
+                "candidate_digest": report.candidate.artifact.digest,
+                "static_check": payload["static_check"],
+            },
+        )
+
+    return Tool(
+        name="create_plugin_candidate",
+        description=(
+            "Create an inactive EvoPi Plugin candidate from a packaged template "
+            "under .evopi/plugin-candidates and run non-executing static review."
+        ),
+        parameters=object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Lowercase Plugin name using letters, digits, and hyphens"
+                    ),
+                },
+                "template": {
+                    "type": "string",
+                    "enum": ["basic", "plan-mode"],
+                    "description": "Packaged candidate template (default: basic)",
+                },
+            },
+            required=["name"],
+        ),
+        handler=create_plugin_candidate,
+        metadata={
+            "effects": ["write"],
+            "prompt_snippet": (
+                "Create an inactive, statically reviewed Plugin candidate scaffold."
+            ),
+            "prompt_guidelines": [
+                (
+                    "When the user explicitly requests an extension, use "
+                    "`create_plugin_candidate` before editing; customize it with "
+                    "`edit_file`, run its tests, and stop at the human "
+                    "review → approve → reload boundary."
+                )
+            ],
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +237,7 @@ def create_spawn_subagent_tool(manager: SubAgentManager) -> Tool:
 
 __all__ = [
     "coding_tools",
+    "create_plugin_candidate_tool",
     "create_recall_tool",
     "create_remember_tool",
     "create_spawn_subagent_tool",

@@ -105,6 +105,12 @@ evopi plugin init plan-mode --template plan-mode
 默认候选目录是 `.evopi/plugin-candidates/<name>/`。生成内容包含 Manifest、入口文件、
 README 和最小测试，不自动审查、批准或加载。
 
+CodingHarness 的 `create_plugin_candidate` 是同一 SDK 的受治理 Tool 门面，不是第二套
+Plugin 创建协议。它只接受名称与 `basic|plan-mode` 模板，目标固定在当前工作区候选
+目录，拒绝覆盖非空目录，并立即调用非执行式 `review_plugin()` 返回静态状态与摘要。
+Tool 不能访问 Approval/Activation/Reload，Agent 只能继续用 `edit_file` 增量修改和
+运行候选测试。其 `effects=["write"]`，因此 Tool ceiling 与 Plan Mode 会自然隐藏它。
+
 Plan Mode 样例只使用通用 API：
 
 - `/plan on|off|status` 和 `/execute`；

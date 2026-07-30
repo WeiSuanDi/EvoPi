@@ -283,6 +283,11 @@ Tool、Policy、Command、Prompt 和 Handler 快照。Run 开始时复制 Policy
 裸 BaseHarness 只有显式收到 `PolicyActivationService` 才读取活动工件；Coding CLI
 是默认接入该用户级配置的产品宿主，并提供 `--no-evolved-policies`。
 
+Plugin 候选创作仍属于 Coding Domain：CodingHarness 默认注册
+`create_plugin_candidate`，固定工作区候选路径并复用 Plugin SDK/静态审查。BaseHarness
+不认识候选目录，也不会隐式创建或授权工件。该 Tool 与其他 Tool 一样经过标准
+before/after Tool Policy、Event 和 Trace 链，Run 的能力快照与 Tool ceiling 同样适用。
+
 Event Handler 只观察订阅事件，返回值不能修改执行。`allow/block/confirmation/rewrite`
 必须由注册到 Policy Engine 的 Policy 给出。UI 只提供交互，不替代 Tool Confirmation
 Handler；非交互宿主的 Plugin 确认默认拒绝。

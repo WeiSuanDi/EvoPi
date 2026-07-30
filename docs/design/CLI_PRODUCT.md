@@ -76,6 +76,11 @@ and the model cannot fabricate approval or treat reload as approval. Session com
 knowledge and are not injected into the model. Plugin-authoring guidance appears only as a short
 boundary for explicit extension requests.
 
+When that request is explicit and the Tool ceiling permits writes, the active Tool view includes
+`create_plugin_candidate`. Its dynamic guideline directs the model to use the packaged scaffold,
+incremental edits, and candidate tests, then stop at human review/approval/reload. Read-only
+ceilings and Plan Mode remove it automatically through its declared `write` effect.
+
 `--system-prompt` fully replaces the generated prompt. `--append-system-prompt` appends to either
 the generated or replacement prompt. Plugin Prompt Fragments and Skill context remain in the
 per-model-call Context assembly chain.
