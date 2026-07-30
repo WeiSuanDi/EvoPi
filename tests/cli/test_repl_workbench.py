@@ -53,6 +53,9 @@ def _context(tmp_path, *, recent_prompt: str | None = None):
             fallbacks=(),
             included_tools=None,
             excluded_tools=None,
+            shell_mode="auto",
+            shell_kind="cmd",
+            shell_executable="cmd.exe",
         ),
         display=None,
         console=Console(file=output, force_terminal=False, width=120),
@@ -166,6 +169,8 @@ def test_status_and_resource_commands_use_public_snapshots(tmp_path) -> None:
     assert "Active tools" in rendered
     assert "Turn budget" in rendered
     assert "Max turns" in rendered
+    assert "Shell" in rendered
+    assert "cmd.exe" in rendered
     assert "Memory" in rendered
     assert "private" not in rendered
 

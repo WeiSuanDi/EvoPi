@@ -43,6 +43,9 @@ class ReplStartupConfig:
     excluded_tools: tuple[str, ...] | None
     credential_configured: bool = False
     max_turns: int = 20
+    shell_mode: str = "auto"
+    shell_kind: str = "-"
+    shell_executable: str = "-"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -124,6 +127,9 @@ def build_repl_startup_config(
         excluded_tools=_split_selection(getattr(args, "exclude_tools", None)),
         credential_configured=credential_configured,
         max_turns=harness.agent.max_turns,
+        shell_mode=harness.shell_environment.requested_mode,
+        shell_kind=harness.shell_environment.kind,
+        shell_executable=harness.shell_environment.executable,
     )
 
 
@@ -262,6 +268,10 @@ def startup_panel(context: ReplCommandContext) -> Panel:
         f"({context.startup.session_mode})",
         f"Workspace: [dim]{context.startup.workspace}[/]",
         (
+            f"Shell: {context.startup.shell_kind} "
+            f"([dim]{context.startup.shell_executable}[/])"
+        ),
+        (
             f"Active: {len(capabilities.active_tool_names)} Tools · "
             f"{len(capabilities.policy_names)} Policies · "
             f"{len(capabilities.plugin_names)} Plugins"
@@ -380,6 +390,10 @@ def _status(context: ReplCommandContext, arguments: str, raw: str) -> ReplComman
     table.add_row("Workspace", context.startup.workspace)
     table.add_row("Turn budget", str(context.startup.max_turns))
     table.add_row(
+        "Shell",
+        f"{context.startup.shell_kind} ({context.startup.shell_executable})",
+    )
+    table.add_row(
         "Active tools",
         f"{len(capabilities.active_tool_names)}/{len(capabilities.tool_names)}",
     )
@@ -410,6 +424,10 @@ def _settings(context: ReplCommandContext, arguments: str, raw: str) -> ReplComm
         ("Deadline", str(value.deadline or "-")),
         ("Tool timeout", str(value.tool_timeout or "-")),
         ("Max turns", str(value.max_turns)),
+        (
+            "Shell",
+            f"{value.shell_mode} → {value.shell_kind} ({value.shell_executable})",
+        ),
         ("Fallbacks", ", ".join(value.fallbacks) or "none"),
         ("Tool allowlist", ", ".join(value.included_tools or ()) or "none"),
         ("Tool exclusions", ", ".join(value.excluded_tools or ()) or "none"),

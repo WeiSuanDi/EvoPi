@@ -23,8 +23,10 @@ async def handle_slash_command(
 ) -> ReplCommandResult:
     """Dispatch through the registry for callers using the legacy helper."""
 
+    coding_harness = cast(CodingHarness, harness)
+    shell_environment = getattr(coding_harness, "shell_environment", None)
     context = ReplCommandContext(
-        harness=cast(CodingHarness, harness),
+        harness=coding_harness,
         startup=ReplStartupConfig(
             provider="unknown",
             model=harness.model.name,
@@ -41,6 +43,19 @@ async def handle_slash_command(
             included_tools=None,
             excluded_tools=None,
             max_turns=harness.agent.max_turns,
+            shell_mode=(
+                shell_environment.requested_mode
+                if shell_environment is not None
+                else "-"
+            ),
+            shell_kind=(
+                shell_environment.kind if shell_environment is not None else "-"
+            ),
+            shell_executable=(
+                shell_environment.executable
+                if shell_environment is not None
+                else "-"
+            ),
         ),
         display=None,
         console=Console(file=sys.stderr),

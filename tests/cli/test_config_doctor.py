@@ -9,6 +9,7 @@ from evopi.cli.diagnostics import (
     run_doctor,
 )
 from evopi.cli.main import main
+from evopi.tools import ShellEnvironment
 
 
 def _environment(monkeypatch, tmp_path) -> None:
@@ -39,6 +40,9 @@ def test_config_snapshot_is_stable_and_never_contains_credentials(
     assert payload["credential_configured"] is True
     assert payload["workspace_trusted"] is False
     assert payload["max_turns"] == 20
+    assert payload["shell"]["requested_mode"] == "auto"
+    assert payload["shell"]["kind"] in {"cmd", "posix-sh"}
+    assert payload["shell"]["executable"]
     assert "top-secret-key" not in serialized
     assert "api_key" not in serialized.lower()
 
@@ -160,3 +164,31 @@ def test_config_snapshot_uses_max_turns_environment_and_explicit_override(
 
     assert build_config_snapshot(workspace=workspace).max_turns == 31
     assert build_config_snapshot(workspace=workspace, max_turns=8).max_turns == 8
+
+
+def test_config_and_doctor_report_resolved_shell_without_executing_it(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _environment(monkeypatch, tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shell = ShellEnvironment(
+        requested_mode="powershell",
+        kind="powershell",
+        executable=str(tmp_path / "pwsh.exe"),
+        platform="win32",
+    )
+    (tmp_path / "pwsh.exe").touch()
+    monkeypatch.setattr(
+        "evopi.cli.diagnostics.resolve_shell_environment",
+        lambda mode: shell,
+    )
+
+    snapshot = build_config_snapshot(workspace=workspace, shell_mode="powershell")
+    report = run_doctor(workspace=workspace, shell_mode="powershell")
+
+    assert snapshot.shell_environment == shell
+    check = next(item for item in report.checks if item.name == "shell")
+    assert check.status is DoctorCheckStatus.PASSED
+    assert "pwsh.exe" in check.message

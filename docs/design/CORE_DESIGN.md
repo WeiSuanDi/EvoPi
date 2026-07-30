@@ -477,3 +477,6 @@ Partial / Delta 属于 Event / Stream；
 `chat`、`run`、REPL Command、配置诊断、Tool ceiling 和动态 Coding Prompt 都在
 Harness/Domain/CLI 层实现。Core 的 Model、Message、ToolResult、Event 和结束原因协议
 保持不变；`run --json` 只是对 `AgentRunState` 与最终 AssistantMessage 的安全投影。
+
+Shell 模式解析、平台语法与进程启动属于 Tool/Domain 层。Core 只执行已注册 Tool，
+不读取 `EVOPI_SHELL`、不选择可执行程序，也不把 Shell 特例写入 Agent Loop。

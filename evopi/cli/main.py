@@ -54,6 +54,7 @@ from evopi.cli.session import (
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.session import SessionManager
+from evopi.tools import resolve_shell_environment
 
 if TYPE_CHECKING:
     from evopi.evolution import PolicyActivationService
@@ -84,6 +85,14 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
+
+
+def _shell_mode(value: str) -> str:
+    if value not in {"auto", "cmd", "powershell"}:
+        raise argparse.ArgumentTypeError(
+            "must be one of: auto, cmd, powershell"
+        )
+    return value
 
 
 def _non_negative_float(value: str) -> float:
@@ -157,6 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("EVOPI_MAX_TURNS", "20"),
         metavar="N",
         help="Strict model Turn budget, including the final answer Turn (default: 20)",
+    )
+    runtime_group.add_argument(
+        "--shell",
+        type=_shell_mode,
+        choices=["auto", "cmd", "powershell"],
+        default=os.getenv("EVOPI_SHELL", "auto"),
+        help="Shell environment for shell_command (default: auto)",
     )
     runtime_group.add_argument(
         "--deadline", type=_positive_float, metavar="SECONDS",
@@ -266,6 +282,9 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
     """Build a CodingHarness from CLI args, auto-detecting available modules."""
     from evopi.session.compact import CompactionSettings
 
+    shell_environment = resolve_shell_environment(
+        getattr(args, "shell", os.getenv("EVOPI_SHELL", "auto"))
+    )
     model_options: dict[str, Any] = {
         "timeout": getattr(args, "model_timeout", 120.0),
         "model": getattr(args, "model", None),
@@ -331,6 +350,7 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         reserved_plugin_commands=ReplCommandRegistry().reserved_plugin_commands,
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
+        shell_environment=shell_environment,
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from evopi.coding import CodingHarness
 from evopi.coding.prompts import build_system_prompt
 from evopi.core.tool import Tool
+from evopi.tools import ShellEnvironment
 
 
 class _Model:
@@ -109,3 +110,23 @@ def test_dynamic_prompt_refreshes_after_tool_ceiling_change(tmp_path) -> None:
 
     assert "`read_file`" in harness.system_prompt
     assert "`shell_command`" not in harness.system_prompt
+
+
+def test_prompt_describes_the_actual_shell_environment(tmp_path) -> None:
+    shell = ShellEnvironment(
+        requested_mode="powershell",
+        kind="powershell",
+        executable="pwsh",
+        platform="win32",
+    )
+
+    harness = CodingHarness(
+        model=_Model(),
+        workspace=tmp_path,
+        memory_path=None,
+        shell_environment=shell,
+    )
+
+    assert "PowerShell" in harness.system_prompt
+    assert "pwsh" in harness.system_prompt
+    assert "Do not use cmd.exe or POSIX shell syntax" in harness.system_prompt

@@ -275,6 +275,12 @@ BaseHarness 会隐式启用 Memory、Skills、活动 Policy、磁盘 Session 或
 CLI 将 `--max-turns / EVOPI_MAX_TURNS` 解析为严格模型 Turn 总预算。Core 只记录计量；
 CodingHarness 负责剩余两轮提示、最后一轮空 Tool 视图和防御 Policy。该分层避免把
 Coding 产品的收尾行为固化到通用 Agent Loop。
+
+`evopi/tools/shell_environment.py` 解析有限的 Shell 模式并产生只读实际环境；
+`shell_command` 通过显式可执行程序与参数启动进程。Windows cmd 的原始命令通过
+子进程私有环境变量传输，以避开 CPython argv 转义与 `cmd.exe` 引号规则不兼容，
+Policy 始终先审查原始命令。Shell 选择、语法提示和诊断属于 Coding/CLI 装配，
+不会下沉到 Core 或 BaseHarness。
 - coding tools
 - coding policies
 - coding prompts

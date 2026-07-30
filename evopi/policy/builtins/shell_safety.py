@@ -15,8 +15,11 @@ _DANGEROUS_PATTERNS = (
     r"\bformat(?:\.com)?\s+[a-z]:",
     r"\bshutdown\b",
     r"\brmdir\s+/s\b",
-    r"\bdel\s+/[sq]",
-    r"\bremove-item\b[^\n]*\s-recurse\b",
+    r"\b(?:rd|rmdir)\b[^\n]*\s/s\b",
+    r"\b(?:del|erase)\b[^\n]*\s/(?:f|s|q)\b",
+    r"\b(?:remove-item|ri)\b[^\n]*(?:\s-recurse\b|\s-r\b)",
+    r"\b(?:clear-disk|format-volume|initialize-disk)\b",
+    r"\b(?:stop-computer|restart-computer)\b",
 )
 
 

@@ -46,6 +46,10 @@ from evopi.skills import SkillLoader
 from evopi.subagents.manager import SubAgentManager
 from evopi.subagents.context_scope import GovernanceEnvelope
 from evopi.tools.registry import ToolRegistry
+from evopi.tools.shell_environment import (
+    ShellEnvironment,
+    resolve_shell_environment,
+)
 
 
 class CodingHarness(BaseHarness):
@@ -81,8 +85,12 @@ class CodingHarness(BaseHarness):
         reserved_plugin_commands: frozenset[str] = frozenset(),
         resource_warnings: tuple[str, ...] = (),
         policy_activation_service: PolicyActivationService | None = None,
+        shell_environment: ShellEnvironment | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
+        self.shell_environment = (
+            shell_environment or resolve_shell_environment()
+        )
         self._dynamic_system_prompt = system_prompt is None
         self._append_system_prompt = append_system_prompt
         if tool_names is not None and excluded_tool_names is not None:
@@ -121,7 +129,10 @@ class CodingHarness(BaseHarness):
         #  Assemble tools FIRST so the prompt can see them
         # ------------------------------------------------------------------ #
         tool_registry = ToolRegistry()
-        for tool in coding_tools(self.workspace):
+        for tool in coding_tools(
+            self.workspace,
+            shell_environment=self.shell_environment,
+        ):
             tool.metadata.setdefault("source", "coding")
             tool_registry.register(tool)
         if self._memory_store is not None:

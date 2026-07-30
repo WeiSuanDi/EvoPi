@@ -30,6 +30,7 @@ from evopi.plugins import (
     review_plugin,
 )
 from evopi.session import resolve_session_root
+from evopi.tools import ShellEnvironment, resolve_shell_environment
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -40,6 +41,7 @@ class ConfigSnapshot:
     base_url: str
     credential_configured: bool
     max_turns: int
+    shell_environment: ShellEnvironment
     fallbacks: tuple[ModelEnvironmentConfig, ...]
     evopi_home: str
     session_root: str
@@ -59,6 +61,12 @@ class ConfigSnapshot:
             "base_url": self.base_url,
             "credential_configured": self.credential_configured,
             "max_turns": self.max_turns,
+            "shell": {
+                "requested_mode": self.shell_environment.requested_mode,
+                "kind": self.shell_environment.kind,
+                "executable": self.shell_environment.executable,
+                "platform": self.shell_environment.platform,
+            },
             "fallbacks": [
                 {
                     "provider": item.provider,
@@ -126,12 +134,16 @@ def build_config_snapshot(
     provider: str | None = None,
     model: str | None = None,
     max_turns: int | None = None,
+    shell_mode: str | None = None,
 ) -> ConfigSnapshot:
     """Resolve the effective product configuration without creating a model."""
 
     resolved_workspace = Path(workspace).expanduser().resolve()
     primary = resolve_model_environment(provider, model=model)
     resolved_max_turns = _resolve_max_turns(max_turns)
+    shell_environment = resolve_shell_environment(
+        shell_mode or os.getenv("EVOPI_SHELL") or "auto"
+    )
     raw_fallbacks = tuple(
         item.strip()
         for item in os.getenv("EVOPI_FALLBACKS", "").split(",")
@@ -174,6 +186,7 @@ def build_config_snapshot(
         base_url=primary.base_url,
         credential_configured=primary.credential_configured,
         max_turns=resolved_max_turns,
+        shell_environment=shell_environment,
         fallbacks=fallback_configs,
         evopi_home=str(home),
         session_root=str(resolve_session_root()),
@@ -191,6 +204,7 @@ def run_doctor(
     provider: str | None = None,
     model: str | None = None,
     max_turns: int | None = None,
+    shell_mode: str | None = None,
 ) -> DoctorReport:
     """Run deterministic offline checks without loading executable Plugins."""
 
@@ -221,6 +235,7 @@ def run_doctor(
             provider=provider,
             model=model,
             max_turns=max_turns,
+            shell_mode=shell_mode,
         )
     except (OSError, ValueError) as exc:
         checks.append(
@@ -263,6 +278,19 @@ def run_doctor(
                     f"Base URL is valid: {snapshot.base_url}"
                     if valid_url
                     else f"Base URL is invalid: {snapshot.base_url}"
+                ),
+            )
+        )
+        shell_path = Path(snapshot.shell_environment.executable)
+        checks.append(
+            _check(
+                "shell",
+                shell_path.is_file(),
+                (
+                    f"Shell is available: {snapshot.shell_environment.display_name} "
+                    f"({shell_path})"
+                    if shell_path.is_file()
+                    else f"Shell executable is unavailable: {shell_path}"
                 ),
             )
         )
@@ -418,6 +446,7 @@ def config_show_main(argv: list[str]) -> int:
             provider=args.provider,
             model=args.model,
             max_turns=args.max_turns,
+            shell_mode=args.shell,
         )
     except (OSError, ValueError) as exc:
         print(f"EvoPi config error: {exc}", file=sys.stderr)
@@ -439,6 +468,7 @@ def doctor_main(argv: list[str]) -> int:
         provider=args.provider,
         model=args.model,
         max_turns=args.max_turns,
+        shell_mode=args.shell,
     )
     if args.json_output:
         print(
@@ -473,6 +503,11 @@ def _diagnostic_parser(prog: str, description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--model")
     parser.add_argument("--max-turns", type=int)
+    parser.add_argument(
+        "--shell",
+        choices=["auto", "cmd", "powershell"],
+        default=os.getenv("EVOPI_SHELL", "auto"),
+    )
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
