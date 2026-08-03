@@ -32,6 +32,7 @@ from evopi.memory import (
 from evopi.policy.approval import ApprovalMode
 from evopi.session import SessionManager
 from evopi.session.compact import CompactionSettings
+from evopi.session.merge import MergeSettings
 from evopi.skills import SkillLoader
 from evopi.subagents.manager import SubAgentManager
 from evopi.subagents.context_scope import GovernanceEnvelope
@@ -59,6 +60,7 @@ class CodingHarness(BaseHarness):
         deadline: float | None = None,
         tool_timeout: float | None = None,
         compaction_settings: CompactionSettings | None = None,
+        merge_settings: MergeSettings | None = None,
         plugin_paths: list[str | Path] | None = None,
         # -- optional modules -------------------------------------------------
         memory_path: str | Path | None = None,
@@ -140,6 +142,7 @@ class CodingHarness(BaseHarness):
             deadline=deadline,
             tool_timeout=tool_timeout,
             compaction_settings=compaction_settings,
+            merge_settings=merge_settings,
             plugin_paths=plugin_paths,
             reserved_plugin_commands=frozenset(
                 {
@@ -153,6 +156,7 @@ class CodingHarness(BaseHarness):
                     "/branch",
                     "/fork",
                     "/compact",
+                    "/merge",
                 }
             ),
             memory_enabled=self._memory_store is not None,

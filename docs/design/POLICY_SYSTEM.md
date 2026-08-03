@@ -180,6 +180,9 @@ output_truncation_policy
 
 test_after_edit_policy
   hook = after_turn
+
+branch_merge_policy
+  hook = before_session_merge
 ```
 
 ### 3. PolicyDecision

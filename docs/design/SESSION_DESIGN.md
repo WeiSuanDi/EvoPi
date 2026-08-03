@@ -1,4 +1,4 @@
-# Session / Checkpoint v3 设计
+# Session / Checkpoint v4 设计
 
 ## 角色与层级
 
@@ -20,14 +20,15 @@ Session → Run → Turn → Model Attempt
 ## 事实来源与 Tree-ready Entry
 
 每个持久 Session 使用追加式 `session.jsonl` 作为事实来源。第一条是
-`SessionHeader`，之后是带独立 `schema_version=3`、UUID 与 UTC 时间的 Entry：
+`SessionHeader`，之后是带独立 `schema_version=4`、UUID 与 UTC 时间的 Entry：
 
 ```text
 run_start → message* → run_end → checkpoint
                          ├→ branch
                          ├→ compact
                          ├→ leaf_selected
-                         └→ plugin_state
+                         ├→ plugin_state
+                         └→ merge
 ```
 
 Entry 通过 `entry_id / parent_id` 构成树。`LeafSelectedEntry` 的 `parent_id` 指向
@@ -47,6 +48,14 @@ StopReason 与 JSON-safe metadata；遇到不支持的值会使事实日志写�
 `PluginStateEntry` 是 v3 的通用插件状态事实，包含插件名/版本、键、`set/delete`
 操作、严格 JSON-safe 值和可选 Run ID。状态沿当前活动叶投影，因此 branch、switch、
 fork 和重启拥有一致语义。单值默认限制 64 KiB，单插件活动投影限制 1 MiB。
+
+`MergeEntry` 是 v4 的证据绑定认知迁移事实。它仍然只有一个 `parent_id`，指向合并时的
+目标活动叶；来源 Entry、共同祖先、来源分歧路径 SHA-256、Entry 数量、摘要来源和
+operation ID 作为审计引用保存，不形成双父 DAG。加载日志时必须验证来源在该事实之前
+存在、当时确为叶、共同祖先同时位于两条路径上，并重新计算分歧路径数量与摘要。
+
+Merge 投影为 ID 稳定的上下文消息，只包含已提交摘要。来源分支的原始消息、ToolCall、
+ToolResult 和 Plugin State 不复制、不重放、不合并；来源分支仍可独立切换和继续增长。
 
 ## 磁盘布局与锁
 
@@ -130,6 +139,9 @@ Session 与 Plugin State 使用治理可观测事件，Trace schema 继续保持
 session_start
 session_checkpoint
 session_error
+session_merge_start
+session_merge_end
+session_merge_error
 plugin_state_changed
 ```
 
@@ -142,17 +154,24 @@ evopi --session ID "prompt"    # 显式打开 ID 或路径
 evopi --no-session "prompt"    # 仅内存
 evopi session list             # 当前工作区只读列表
 evopi session list --all --json
+evopi session gc ID|PATH       # Checkpoint GC Dry Run
+evopi session gc ID --apply    # 校验计划后删除
+
+# REPL 内
+/leaves
+/switch <唯一 Entry 前缀>
+/merge <来源叶前缀> [手工摘要]
 ```
 
 Session 信息与 warning 写 stderr，模型文本继续写 stdout。`reset()` 创建并绑定新
 Session；`close()` 释放锁，运行中禁止关闭。
 
-## v1 / v2 迁移
+## v1 / v2 / v3 迁移
 
-打开 v1/v2 日志时先在持锁状态下做完整结构验证，再分别生成只读
-`session.v1.jsonl.bak` / `session.v2.jsonl.bak`，将 Header 和 Entry 原子重写为 v3
-并重新校验。旧 Checkpoint 不作为 v3 Plugin 状态事实；恢复优先从日志重建，后续
-Run 生成新的 v3 Checkpoint。
+打开 v1/v2/v3 日志时先在持锁状态下做完整结构验证，再生成对应的只读版本备份，将
+Header 和 Entry 原子重写为 v4 并重新校验。原有 Entry ID、父子关系、消息和 Plugin
+State 不变。旧 Checkpoint 不作为 v4 恢复来源；恢复从事实日志重建，并为最近已闭合
+Run 生成新的 v4 Checkpoint。
 
 ## Compaction
 
@@ -162,8 +181,41 @@ Compaction 只处理当前活动路径，并保持 ToolCall / ToolResult 关系�
 墙钟上限，并记录 `session_compaction_start/end/error`。失败或阻断不会写
 `CompactEntry`，也不改变已完成 Run。
 
-## 隐私与 v3 边界
+## Branch Merge
+
+`SessionManager.prepare_merge()` 固定以当前活动叶为目标，来源必须是另一个现存叶，
+且两条路径都不能包含未闭合 Run。准备阶段计算共同祖先和来源分歧路径；提交阶段重新
+计算并比较目标叶、共同祖先、Entry 数量和 SHA-256，防止自动摘要期间状态漂移。
+
+用户提供摘要时不调用模型。省略摘要时，Harness 使用 `GovernedModelOperation`，只把
+共同路径最后两条消息和来源分歧消息交给模型，Tool 集为空。该操作继续经过 Provider
+Retry、Failover、Abort、120 秒墙钟上限及普通 `before_model_call` Policy。已知
+Context Window 且超过预留输入预算时明确失败，要求用户改用手工摘要，不静默截断。
+
+显式 Merge 先经过 `before_session_merge`。Policy 仅可 allow、block 或请求人工确认；
+阻断、拒绝、模型错误、超时或事实日志写入失败都不会追加 `MergeEntry`。事件和 Trace
+只记录定位字段、计数与摘要哈希，不重复记录完整摘要。
+
+## Checkpoint GC
+
+Checkpoint 是可由事实日志重建的派生缓存。`SessionManager.plan_checkpoint_gc()` 只读
+扫描一个已持锁的持久 Session：对每个现存叶保留路径上最近三份校验有效快照，多个叶的
+共享祖先只计一次；最近七天内的全部 Checkpoint 文件无条件保护。更老且不在保留集中的
+有效快照，以及超过保护期的损坏快照、无日志引用的 UUID 快照和崩溃临时文件进入候选。
+缺失的日志引用会进入计划的可观测项，但不存在文件无需删除。
+
+计划是 `schema_version=1` 的稳定审计工件，绑定 Session ID、Session 路径、事实日志
+SHA-256，以及每个候选的规范化相对路径、文件大小和内容摘要。`apply_checkpoint_gc()`
+在删除第一份文件前先完成全量预检；日志或任一候选发生漂移就整体拒绝。进入删除阶段后，
+单文件失败写入结构化 Report，其余候选可继续处理，且不会把 SessionManager 标记为
+broken。
+
+GC 不追加维护 Entry，也不修改 Session Tree。`session.jsonl`、版本备份、锁、Trace、
+消息、分支和任何非 Checkpoint 文件永不进入候选。CLI 默认 Dry Run，只有 `--apply`
+才永久删除；v1 每次只处理一个显式 Session，不提供后台或批量 GC。
+
+## 隐私与 v4 边界
 
 Session 和 Checkpoint 是本地明文，可能包含 Prompt、模型回复与工具输出。用户应像
-保护 Trace 一样保护 Session 根目录。v3 不做自动脱敏、加密、远程存储、删除/重命名、
-Checkpoint GC、branch merge、运行中继续执行或工具幂等重放。
+保护 Trace 一样保护 Session 根目录。v4 不做自动脱敏、加密、远程存储、删除/重命名、
+Session Log GC、跨 Session Merge、双父 DAG、运行中继续执行或工具幂等重放。

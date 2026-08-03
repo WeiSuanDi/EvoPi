@@ -44,16 +44,23 @@ from evopi.harness.confirmation import (
 from evopi.harness.lifecycle import Lifecycle
 from evopi.harness.model_routing import HarnessModelAttemptRouter
 from evopi.harness.policy_manager import PolicyManager
+from evopi.harness.runtime_state import LifecycleState
 from evopi.harness.tool_manager import ToolManager
 from evopi.policy.approval import ApprovalMode, ApprovalStore
 from evopi.policy.decisions import PolicyEvaluation
 from evopi.policy.registry import PolicyPack
 from evopi.policy.types import Policy, PolicyContext
 from evopi.session import (
+    DEFAULT_MERGE_SETTINGS,
+    MergeSettings,
+    MergeSummaryOrigin,
     RuntimeFingerprint,
     SessionError,
     SessionManager,
+    SessionMergeError,
+    SessionMergeResult,
     build_runtime_fingerprint,
+    generate_merge_summary,
 )
 from evopi.session.compact import (
     DEFAULT_COMPACTION_SETTINGS,
@@ -186,6 +193,7 @@ class BaseHarness:
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
         compaction_settings: CompactionSettings | None = None,
+        merge_settings: MergeSettings | None = None,
         plugin_paths: list[str | Path] | None = None,
         enabled_plugins: set[str] | None = None,
         reserved_plugin_commands: frozenset[str] = frozenset(),
@@ -202,6 +210,7 @@ class BaseHarness:
         self.tool_timeout = tool_timeout
         self.deadline = deadline
         self.compaction_settings = compaction_settings or DEFAULT_COMPACTION_SETTINGS
+        self.merge_settings = merge_settings or DEFAULT_MERGE_SETTINGS
         self.tools = ToolManager()
         self.policies = PolicyManager(
             ApprovalStore(approvals_path, mode=approval_mode)
@@ -466,13 +475,9 @@ class BaseHarness:
 
         if self.is_running:
             raise RuntimeError("Cannot switch Session leaf while the Harness is running")
-        selected = self.session.switch_leaf(leaf_id)
+        selected = self.session.switch_leaf(self.session.resolve_entry_id(leaf_id))
         self._restore_plugin_overrides()
-        restored: list[Message] = []
-        if self.system_prompt:
-            restored.append(SystemMessage(content=self.system_prompt))
-        restored.extend(self.session.messages)
-        self.agent.messages[:] = restored
+        self._restore_session_transcript()
         if self.trace_writer is not None:
             self.trace_writer.write(
                 TraceRecord(
@@ -486,6 +491,180 @@ class BaseHarness:
                 )
             )
         return selected
+
+    async def merge_session_branch(
+        self,
+        source_entry_id: str,
+        *,
+        summary: str | None = None,
+    ) -> SessionMergeResult:
+        """Merge source-branch knowledge into the active Session leaf."""
+
+        if self.is_running:
+            raise SessionMergeError("Cannot merge Session branches while a Run is active")
+        plan = self.session.prepare_merge(
+            source_entry_id,
+            shared_context_messages=self.merge_settings.shared_context_messages,
+        )
+        if (
+            summary is not None
+            and len(summary.strip().encode("utf-8"))
+            > self.merge_settings.max_summary_bytes
+        ):
+            raise SessionMergeError(
+                "Merge summary exceeds the configured size limit"
+            )
+        evaluation = await self._evaluate(
+            PolicyContext(
+                hook="before_session_merge",
+                agent_context=AgentContext(
+                    messages=list(self.agent.messages),
+                    tools=self._active_tools(),
+                ),
+                arguments={
+                    "session_id": self.session.session_id,
+                    "operation_id": plan.operation_id,
+                    "source_entry_id": plan.source_entry_id,
+                    "target_entry_id": plan.target_entry_id,
+                    "common_ancestor_id": plan.common_ancestor_id,
+                    "source_entry_count": plan.source_entry_count,
+                    "source_path_sha256": plan.source_path_sha256,
+                    "summary_origin": "manual" if summary is not None else "model",
+                },
+            )
+        )
+        action = evaluation.final.action
+        if action == "block":
+            raise SessionMergeError(
+                evaluation.final.reason or "Session merge was blocked by Policy"
+            )
+        if action == "require_confirmation":
+            response = await self._request_confirmation(
+                ConfirmationRequest(
+                    hook="before_session_merge",
+                    reason=(
+                        evaluation.final.reason
+                        or "Session branch merge requires confirmation"
+                    ),
+                    risk_level=evaluation.final.risk_level,
+                    arguments=evaluation.arguments,
+                    metadata={
+                        "session_id": self.session.session_id,
+                        "operation_id": plan.operation_id,
+                    },
+                ),
+                signal=self.signal,
+            )
+            if not response.approved:
+                raise SessionMergeError(
+                    response.reason or "Session merge confirmation was denied"
+                )
+        elif action != "allow":
+            raise SessionMergeError(
+                f"Policy action '{action}' is unsupported for before_session_merge"
+            )
+
+        origin: MergeSummaryOrigin = "manual" if summary is not None else "model"
+        await self.agent.emit_event(
+            CoreEvent(
+                type="session_merge_start",
+                data={
+                    "operation_id": plan.operation_id,
+                    "session_id": self.session.session_id,
+                    "source_entry_id": plan.source_entry_id,
+                    "target_entry_id": plan.target_entry_id,
+                    "common_ancestor_id": plan.common_ancestor_id,
+                    "source_entry_count": plan.source_entry_count,
+                    "source_path_sha256": plan.source_path_sha256,
+                    "summary_origin": origin,
+                },
+            )
+        )
+        try:
+            if summary is None:
+                from evopi.harness.model_operation import GovernedModelOperation
+
+                operation = GovernedModelOperation(
+                    parent=self,
+                    model=self.model,
+                    kind="session_merge",
+                    signal_controller=AbortController(
+                        loop=asyncio.get_running_loop()
+                    ),
+                )
+                operation.operation_id = plan.operation_id
+                self._internal_abort_controller = operation.signal_controller
+                try:
+                    async with asyncio.timeout(self.merge_settings.timeout):
+                        final_summary = await generate_merge_summary(
+                            plan,
+                            operation,
+                            settings=self.merge_settings,
+                        )
+                finally:
+                    operation.signal_controller.signal._mark_notified()
+                    self._internal_abort_controller = None
+            else:
+                final_summary = summary
+            entry = self.session.commit_merge(
+                plan,
+                summary=final_summary,
+                origin=origin,
+            )
+        except Exception as exc:
+            await self.agent.emit_event(
+                CoreEvent(
+                    type="session_merge_error",
+                    data={
+                        "operation_id": plan.operation_id,
+                        "session_id": self.session.session_id,
+                        "source_entry_id": plan.source_entry_id,
+                        "target_entry_id": plan.target_entry_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+            if isinstance(exc, SessionMergeError):
+                raise
+            raise SessionMergeError(
+                f"Session merge summary or persistence failed: {exc}"
+            ) from exc
+
+        self._restore_session_transcript()
+        await self.agent.emit_event(
+            CoreEvent(
+                type="session_merge_end",
+                data={
+                    "operation_id": plan.operation_id,
+                    "session_id": self.session.session_id,
+                    "entry_id": entry.entry_id,
+                    "source_entry_id": plan.source_entry_id,
+                    "target_entry_id": plan.target_entry_id,
+                    "common_ancestor_id": plan.common_ancestor_id,
+                    "source_path_sha256": plan.source_path_sha256,
+                    "summary_origin": origin,
+                    "summary_sha256": hashlib.sha256(
+                        entry.summary.encode("utf-8")
+                    ).hexdigest(),
+                },
+            )
+        )
+        return SessionMergeResult(
+            entry_id=entry.entry_id,
+            operation_id=plan.operation_id,
+            source_entry_id=plan.source_entry_id,
+            target_entry_id=plan.target_entry_id,
+            common_ancestor_id=plan.common_ancestor_id,
+            source_path_sha256=plan.source_path_sha256,
+            origin=origin,
+        )
+
+    def _restore_session_transcript(self) -> None:
+        restored: list[Message] = []
+        if self.system_prompt:
+            restored.append(SystemMessage(content=self.system_prompt))
+        restored.extend(self.session.messages)
+        self.agent.messages[:] = restored
 
     def _bind_plugin_api(self, api) -> None:
         from evopi.plugins import PluginRuntimeContext
@@ -1150,7 +1329,11 @@ class BaseHarness:
         *,
         signal: AbortSignal | None,
     ) -> ConfirmationResponse:
-        self.lifecycle.wait_for_confirmation()
+        manages_run_lifecycle = (
+            self.lifecycle.state.status is LifecycleState.RUNNING
+        )
+        if manages_run_lifecycle:
+            self.lifecycle.wait_for_confirmation()
         try:
             await self.agent.emit_event(
                 CoreEvent(type="confirmation_request", data={"request": request})
@@ -1169,7 +1352,8 @@ class BaseHarness:
                     metadata={**response.metadata, "automatic": True, "aborted": True},
                 )
         finally:
-            self.lifecycle.resume()
+            if manages_run_lifecycle:
+                self.lifecycle.resume()
 
         await self.agent.emit_event(
             CoreEvent(type="confirmation_response", data={"response": response})

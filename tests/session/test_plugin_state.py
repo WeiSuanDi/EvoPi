@@ -97,7 +97,7 @@ def test_plugin_state_entry_round_trips_with_optional_run_id() -> None:
     restored = entry_from_dict(entry_to_dict(entry))
 
     assert restored == entry
-    assert restored.schema_version == 3
+    assert restored.schema_version == 4
 
 
 def test_plugin_state_follows_active_session_branch() -> None:

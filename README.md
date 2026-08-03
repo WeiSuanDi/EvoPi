@@ -140,6 +140,8 @@ evopi --session SESSION_ID 'Continue this specific task.'
 evopi --no-session 'Run without disk persistence.'
 evopi session list
 evopi session list --all --json
+evopi session gc SESSION_ID                  # dry-run preview
+evopi session gc SESSION_ID --apply --json   # validated deletion
 ```
 
 Use `--session-root PATH` or `EVOPI_SESSION_DIR` to override the default
@@ -235,10 +237,25 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are available through `Agent.last_run` and `agent_end`, using the reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
 
-Session logs use schema v3. Active-leaf and Plugin-state changes are append-only facts, keeping the Harness
-transcript, Agent context, Checkpoint projection, and restart recovery aligned. Validated v1 logs
-or v2 logs are backed up and atomically migrated. Checkpoint messages and Plugin state are
-discarded whenever they disagree with the authoritative active path.
+Session logs use schema v4. Active-leaf, Plugin-state, and evidence-bound branch-merge changes are
+append-only facts, keeping the Harness transcript, Agent context, Checkpoint projection, and
+restart recovery aligned. Validated v1, v2, or v3 logs are backed up and atomically migrated.
+Checkpoint messages and Plugin state are discarded whenever they disagree with the authoritative
+active path.
+
+Interactive sessions can transfer conclusions from another leaf with
+`/merge <source-leaf-prefix> [manual summary]`. A manual summary performs no model call; when it
+is omitted, EvoPi runs a governed, tool-free model operation over the source divergence. The
+result is a digest-bound summary message on the target branch—source messages, tool executions,
+and Plugin state are never copied or replayed. `/switch` accepts the same unique Entry prefixes,
+and `/leaves` shows names, message previews, and the active leaf.
+
+Run `evopi session gc SESSION_ID|PATH` to preview reclaimable Checkpoint cache files. The
+default policy keeps three valid snapshots per existing leaf and protects every file newer than
+seven days. `--apply` is required for deletion; before deleting anything EvoPi revalidates the
+Session ID, Session Log digest, and every candidate's relative path, size, and digest. Session
+JSONL, branches, messages, version backups, locks, Trace files, and non-Checkpoint files are never
+GC candidates.
 
 Active runs can be stopped cooperatively with `Agent.abort()` or `BaseHarness.abort()`. The call is synchronous, thread-safe, idempotent, and has no effect while idle. Model streams and asynchronous tools are cancelled, a running shell process tree is terminated, and every requested sibling tool still receives a correlated error result. Partial model text is retained, while incomplete tool calls are removed from the committed message and preserved as diagnostic metadata. Use `signal`, `is_running`, and `wait_for_idle()` to integrate cancellation into an application lifecycle.
 

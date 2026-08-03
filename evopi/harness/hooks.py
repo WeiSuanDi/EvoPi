@@ -12,6 +12,7 @@ HOOKS: tuple[HookName, ...] = (
     "before_subagent_spawn",
     "after_subagent_run",
     "before_session_compact",
+    "before_session_merge",
     "before_memory_write",
     "after_memory_write",
     "on_error",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from typing import Any
 
@@ -30,10 +31,13 @@ async def handle_slash_command(harness: CodingHarness, text: str) -> None:
         "/branch": _cmd_branch,
         "/fork": _cmd_fork,
         "/compact": _cmd_compact,
+        "/merge": _cmd_merge,
     }
     handler = handlers.get(cmd)
     if handler is not None:
-        handler(harness, parts, text)
+        result = handler(harness, parts, text)
+        if inspect.isawaitable(result):
+            await result
         return
 
     try:
@@ -70,6 +74,7 @@ def _cmd_help(harness: CodingHarness, parts: list[str], raw: str) -> None:
         ("/switch <id>", "Switch active leaf"),
         ("/fork", "Fork session into a new file"),
         ("/compact <summary>", "Compress conversation history"),
+        ("/merge <leaf> [summary]", "Merge branch knowledge into the active leaf"),
         ("/leaves", "List all branch leaves"),
     ]
     for key, desc in commands:
@@ -171,7 +176,20 @@ def _cmd_leaves(harness: CodingHarness, parts: list[str], raw: str) -> None:
     out = [f"[bold]{len(leaves)} leaf(ves):[/]"]
     for lid in leaves:
         marker = " [bold green]*[/]" if lid == active else ""
-        out.append(f"  {lid[:16]}...{marker}")
+        branch_name = ""
+        preview = ""
+        current: str | None = lid
+        while current is not None:
+            entry = session.get_entry(current)
+            if not preview and getattr(entry, "type", None) == "message":
+                content = getattr(entry, "message").content.replace("\n", " ").strip()
+                preview = content[:48]
+            if not branch_name and getattr(entry, "type", None) == "branch":
+                branch_name = getattr(entry, "branch_name", "")
+            current = entry.parent_id
+        label = f" [{branch_name}]" if branch_name else ""
+        suffix = f" — {preview}" if preview else ""
+        out.append(f"  {lid[:16]}...{label}{marker}{suffix}")
     _console.print(Panel("\n".join(out), border_style="blue"))
 
 
@@ -182,6 +200,25 @@ def _cmd_switch(harness: CodingHarness, parts: list[str], raw: str) -> None:
     try:
         harness.switch_session_leaf(parts[1])
         _console.print(f"[green]Switched to {parts[1][:16]}...[/]")
+    except Exception as exc:
+        _console.print(f"[red]Error: {exc}[/]")
+
+
+async def _cmd_merge(
+    harness: CodingHarness,
+    parts: list[str],
+    raw: str,
+) -> None:
+    if len(parts) < 2:
+        _console.print("[yellow]Usage: /merge <source-leaf> [manual summary][/]")
+        return
+    summary = raw.split(maxsplit=2)[2].strip() if len(parts) > 2 else None
+    try:
+        result = await harness.merge_session_branch(parts[1], summary=summary)
+        _console.print(
+            f"[green]Merged {result.source_entry_id[:16]}... into "
+            f"{result.entry_id[:16]}... ({result.origin}).[/]"
+        )
     except Exception as exc:
         _console.print(f"[red]Error: {exc}[/]")
 

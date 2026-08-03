@@ -107,10 +107,16 @@ after_model_call
 before_tool_call
 after_tool_call
 after_turn
+before_session_merge
 on_error
 ```
 
 Hook 是插槽，不是具体规则。
+
+`before_session_merge` 治理显式的跨分支认知迁移。它只接受 `allow`、`block` 或
+`require_confirmation`；改写、验证和终止等没有 Merge 语义的动作会 fail closed。
+自动摘要复用 `GovernedModelOperation`，因此继续经过 Provider Retry、Failover、Abort、
+超时和普通 `before_model_call` Policy，但 Tool 集固定为空。手工摘要完全跳过模型。
 
 ### Human Confirmation 最小运行协议
 
@@ -261,7 +267,7 @@ BaseHarness 是 `PluginAPI v1` 的宿主，但不把 Plugin 语义下沉到 Core
 
 Plugin 的所有注册先进入暂存装配，完成依赖、重复命令/Tool、显式覆盖和 Handler
 绑定校验后整体提交。运行中禁止 Reload。活动 Tool 集是基础集合与所有插件限制的
-交集，只能收窄；session 作用域覆盖通过 Session schema v3 恢复。
+交集，只能收窄；session 作用域覆盖通过 Session schema v3+ 恢复。
 
 Event Handler 只观察订阅事件，返回值不能修改执行。`allow/block/confirmation/rewrite`
 必须由注册到 Policy Engine 的 Policy 给出。UI 只提供交互，不替代 Tool Confirmation

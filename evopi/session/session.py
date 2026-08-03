@@ -29,12 +29,27 @@ from evopi.session.errors import (
     SessionPersistenceError,
     SessionSerializationError,
 )
+from evopi.session.gc import (
+    DEFAULT_CHECKPOINT_GC_SETTINGS,
+    CheckpointGCPlan,
+    CheckpointGCReport,
+    CheckpointGCSettings,
+    apply_checkpoint_gc,
+    plan_checkpoint_gc,
+)
+from evopi.session.merge import (
+    MergeSummaryOrigin,
+    SessionMergeError,
+    SessionMergePlan,
+)
 from evopi.session.tree import (
     BranchEntry,
     CheckpointEntry,
     CompactEntry,
     LeafSelectedEntry,
     MessageEntry,
+    MergeEntry,
+    MERGE_SUMMARY_LIMIT_BYTES,
     PluginStateEntry,
     RunEndEntry,
     RunStartEntry,
@@ -265,7 +280,7 @@ class SessionManager:
         try:
             header, entries, repaired = _read_session_file(path, repair=True)
             source_version = _session_file_version(path)
-            if source_version < 3:
+            if source_version < 4:
                 backup_path = _migrate_session_file(
                     path,
                     header,
@@ -273,7 +288,7 @@ class SessionManager:
                     source_version=source_version,
                 )
                 manager._recovery.warnings.append(
-                    f"Session schema v{source_version} was migrated to v3; "
+                    f"Session schema v{source_version} was migrated to v4; "
                     f"backup: {backup_path}"
                 )
             manager.header = header
@@ -295,6 +310,42 @@ class SessionManager:
             manager._restore_messages()
             manager._recover_interrupted_run()
             manager._ensure_latest_run_checkpoint()
+        except Exception:
+            manager.close()
+            raise
+        return manager
+
+    @classmethod
+    def open_for_maintenance(
+        cls,
+        reference: str | Path,
+        *,
+        root: str | Path | None = None,
+    ) -> "SessionManager":
+        """Open a current-schema Session under lock without recovery writes."""
+
+        session_root = resolve_session_root(root)
+        path = _resolve_session_reference(reference, session_root)
+        manager = cls(Path.cwd())
+        manager.root = session_root
+        manager.session_path = path
+        manager._lock = _SessionFileLock(path.parent / _LOCK_FILENAME)
+        manager._lock.acquire()
+        manager._recovery = _RecoveryState(reason="open")
+        try:
+            source_version = _session_file_version(path)
+            if source_version != 4:
+                raise SessionFormatError(
+                    "Session maintenance requires schema v4; open the Session "
+                    "normally once to migrate it"
+                )
+            header, entries, _repaired = _read_session_file(path, repair=False)
+            manager.header = header
+            manager._attached_workspace = header.workspace
+            manager._entries = entries
+            manager._entry_index = {entry.entry_id: entry for entry in entries}
+            manager._rebuild_leaf_state()
+            manager._restore_messages()
         except Exception:
             manager.close()
             raise
@@ -680,6 +731,24 @@ class SessionManager:
         self._recovery.checkpoint_id = checkpoint_id
         return checkpoint
 
+    def plan_checkpoint_gc(
+        self,
+        settings: CheckpointGCSettings = DEFAULT_CHECKPOINT_GC_SETTINGS,
+        *,
+        now: datetime | None = None,
+    ) -> CheckpointGCPlan:
+        """Build a read-only plan for reclaiming derived Checkpoint files."""
+
+        return plan_checkpoint_gc(self, settings, now=now)
+
+    def apply_checkpoint_gc(
+        self,
+        plan: CheckpointGCPlan,
+    ) -> CheckpointGCReport:
+        """Apply a previously validated Checkpoint GC plan."""
+
+        return apply_checkpoint_gc(self, plan)
+
     def branch(self, *, from_entry_id: str, branch_name: str = "") -> BranchEntry:
         """Create a new branch from an existing entry.
 
@@ -811,6 +880,153 @@ class SessionManager:
         self._append_entry(entry)
         return entry
 
+    def resolve_entry_id(self, reference: str) -> str:
+        """Resolve a full UUID or an unambiguous hexadecimal Entry prefix."""
+
+        normalized = reference.strip().lower().replace("-", "")
+        try:
+            exact = UUID(reference).hex
+        except ValueError:
+            exact = ""
+        if exact:
+            if exact not in self._entry_index:
+                raise SessionMergeError(f"Session Entry '{reference}' does not exist")
+            return exact
+        if len(normalized) < 8:
+            raise SessionMergeError("Session Entry prefixes must contain at least 8 characters")
+        if any(character not in "0123456789abcdef" for character in normalized):
+            raise SessionMergeError("Session Entry prefixes must be hexadecimal")
+        matches = [
+            entry_id
+            for entry_id in self._entry_index
+            if entry_id.startswith(normalized)
+        ]
+        if not matches:
+            raise SessionMergeError(f"Session Entry '{reference}' does not exist")
+        if len(matches) > 1:
+            raise SessionMergeError(f"Session Entry prefix '{reference}' is ambiguous")
+        return matches[0]
+
+    def prepare_merge(
+        self,
+        source_entry_id: str,
+        *,
+        shared_context_messages: int = 2,
+    ) -> SessionMergePlan:
+        """Prepare an evidence-bound merge from another leaf into the active leaf."""
+
+        self._ensure_available()
+        if shared_context_messages < 0:
+            raise SessionMergeError(
+                "Merge shared_context_messages cannot be negative"
+            )
+        target_id = self.leaf_id
+        if target_id is None:
+            raise SessionMergeError("Cannot merge into an empty Session")
+        source_id = self.resolve_entry_id(source_entry_id)
+        if source_id == target_id:
+            raise SessionMergeError("Merge source and target must be different leaves")
+        if source_id not in self._leaf_ids:
+            raise SessionMergeError("Merge source must be a current Session leaf")
+        target_path = list(self._path_to_entry(target_id))
+        source_path = list(self._path_to_entry(source_id))
+        if _path_has_open_run(target_path) or _path_has_open_run(source_path):
+            raise SessionMergeError("Merge paths cannot contain an open Run")
+
+        target_ids = {entry.entry_id for entry in target_path}
+        common = next(
+            (
+                entry
+                for entry in reversed(source_path)
+                if entry.entry_id in target_ids
+            ),
+            None,
+        )
+        if common is None:
+            raise SessionMergeError("Merge paths do not share a common ancestor")
+        common_index = next(
+            index
+            for index, entry in enumerate(source_path)
+            if entry.entry_id == common.entry_id
+        )
+        divergent = source_path[common_index + 1 :]
+        if not divergent:
+            raise SessionMergeError("Source branch has no divergent evidence to merge")
+
+        divergent_ids = {entry.entry_id for entry in divergent}
+        source_messages = tuple(
+            message
+            for source_id_value, message in _project_messages(source_path)
+            if source_id_value in divergent_ids
+        )
+        common_path = list(self._path_to_entry(common.entry_id))
+        shared_messages = tuple(
+            message
+            for _, message in (
+                _project_messages(common_path)[-shared_context_messages:]
+                if shared_context_messages
+                else ()
+            )
+        )
+        return SessionMergePlan(
+            session_id=self.session_id,
+            target_entry_id=target_id,
+            source_entry_id=source_id,
+            common_ancestor_id=common.entry_id,
+            source_entry_count=len(divergent),
+            source_path_sha256=_entry_path_digest(divergent),
+            shared_context_messages=shared_context_messages,
+            shared_messages=shared_messages,
+            source_messages=source_messages,
+        )
+
+    def commit_merge(
+        self,
+        plan: SessionMergePlan,
+        *,
+        summary: str,
+        origin: MergeSummaryOrigin,
+    ) -> MergeEntry:
+        """Append a prepared MergeEntry after revalidating its evidence."""
+
+        self._ensure_available()
+        if plan.session_id != self.session_id:
+            raise SessionMergeError("Merge plan belongs to another Session")
+        normalized_summary = summary.strip()
+        if not normalized_summary:
+            raise SessionMergeError("Merge summary cannot be empty")
+        if len(normalized_summary.encode("utf-8")) > MERGE_SUMMARY_LIMIT_BYTES:
+            raise SessionMergeError("Merge summary exceeds 64 KiB")
+        if origin not in {"manual", "model"}:
+            raise SessionMergeError("Merge summary origin must be manual or model")
+
+        current = self.prepare_merge(
+            plan.source_entry_id,
+            shared_context_messages=plan.shared_context_messages,
+        )
+        if current.target_entry_id != plan.target_entry_id:
+            raise SessionMergeError("Merge target changed after the plan was prepared")
+        if (
+            current.common_ancestor_id != plan.common_ancestor_id
+            or current.source_entry_count != plan.source_entry_count
+            or current.source_path_sha256 != plan.source_path_sha256
+        ):
+            raise SessionMergeError("Merge source evidence changed after preparation")
+
+        entry = MergeEntry(
+            entry_id=new_id(),
+            parent_id=plan.target_entry_id,
+            operation_id=plan.operation_id,
+            source_entry_id=plan.source_entry_id,
+            common_ancestor_id=plan.common_ancestor_id,
+            source_path_sha256=plan.source_path_sha256,
+            source_entry_count=plan.source_entry_count,
+            summary=normalized_summary,
+            summary_origin=origin,
+        )
+        self._append_entry(entry)
+        return entry
+
     def get_entry(self, entry_id: str) -> SessionEntry:
         try:
             return self._entry_index[_normalize_uuid(entry_id, "entry_id")]
@@ -830,8 +1046,11 @@ class SessionManager:
     def get_active_path(self) -> tuple[SessionEntry, ...]:
         if self.leaf_id is None:
             return ()
+        return self._path_to_entry(self.leaf_id)
+
+    def _path_to_entry(self, entry_id: str) -> tuple[SessionEntry, ...]:
         path: list[SessionEntry] = []
-        current: str | None = self.leaf_id
+        current: str | None = entry_id
         seen: set[str] = set()
         while current is not None:
             if current in seen:
@@ -951,7 +1170,7 @@ class SessionManager:
             self._message_source_ids.append(entry.entry_id)
         elif isinstance(entry, PluginStateEntry):
             self._apply_plugin_state_entry(entry)
-        elif isinstance(entry, (CompactEntry, LeafSelectedEntry)):
+        elif isinstance(entry, (CompactEntry, LeafSelectedEntry, MergeEntry)):
             self._restore_messages()
 
     def _ensure_available(self) -> None:
@@ -1319,9 +1538,65 @@ def _read_session_file(
                     "checkpoint active_entry_id is not an earlier entry",
                     line_number=line_number,
                 )
+        if isinstance(entry, MergeEntry):
+            if (
+                entry.source_entry_id not in known_ids
+                or entry.common_ancestor_id not in known_ids
+            ):
+                raise SessionFormatError(
+                    "merge evidence must reference earlier entries",
+                    line_number=line_number,
+                )
+            if any(
+                previous.parent_id == entry.source_entry_id
+                for previous in entries
+            ):
+                raise SessionFormatError(
+                    "merge source was not a leaf when committed",
+                    line_number=line_number,
+                )
+            source_path = _indexed_path(entry.source_entry_id, entries)
+            target_path = _indexed_path(entry.parent_id, entries)
+            source_ids = [item.entry_id for item in source_path]
+            target_ids = {item.entry_id for item in target_path}
+            if (
+                entry.common_ancestor_id not in source_ids
+                or entry.common_ancestor_id not in target_ids
+            ):
+                raise SessionFormatError(
+                    "merge common ancestor is not on both paths",
+                    line_number=line_number,
+                )
+            common_index = source_ids.index(entry.common_ancestor_id)
+            divergent = source_path[common_index + 1 :]
+            if (
+                len(divergent) != entry.source_entry_count
+                or _entry_path_digest(divergent) != entry.source_path_sha256
+            ):
+                raise SessionFormatError(
+                    "merge source path digest does not match evidence",
+                    line_number=line_number,
+                )
         known_ids.add(entry.entry_id)
         entries.append(entry)
     return header, entries, repaired
+
+
+def _indexed_path(
+    entry_id: str | None,
+    entries: list[SessionEntry],
+) -> list[SessionEntry]:
+    if entry_id is None:
+        return []
+    index = {entry.entry_id: entry for entry in entries}
+    path: list[SessionEntry] = []
+    current: str | None = entry_id
+    while current is not None:
+        entry = index[current]
+        path.append(entry)
+        current = entry.parent_id
+    path.reverse()
+    return path
 
 
 def _session_file_version(path: Path) -> int:
@@ -1377,11 +1652,11 @@ def _migrate_session_file(
             repair=False,
         )
         if (
-            migrated_header.schema_version != 3
-            or any(entry.schema_version != 3 for entry in migrated_entries)
+            migrated_header.schema_version != 4
+            or any(entry.schema_version != 4 for entry in migrated_entries)
         ):
             raise SessionFormatError(
-                "migrated Session did not validate as schema v3"
+                "migrated Session did not validate as schema v4"
             )
     except (OSError, SessionError) as exc:
         temporary_backup.unlink(missing_ok=True)
@@ -1440,6 +1715,32 @@ def _project_messages(
         if isinstance(entry, MessageEntry):
             projected.append((entry.entry_id, entry.message))
             continue
+        if isinstance(entry, MergeEntry):
+            projected.append(
+                (
+                    entry.entry_id,
+                    UserMessage(
+                        id=entry.entry_id,
+                        content=(
+                            "<branch-merge-summary>\n"
+                            f"{entry.summary}\n"
+                            "</branch-merge-summary>\n\n"
+                            "The above is evidence-bound context from another "
+                            "Session branch. Treat it as a summary, not as "
+                            "re-executed tool history."
+                        ),
+                        metadata={
+                            "session_merge_summary": True,
+                            "operation_id": entry.operation_id,
+                            "source_entry_id": entry.source_entry_id,
+                            "common_ancestor_id": entry.common_ancestor_id,
+                            "source_path_sha256": entry.source_path_sha256,
+                            "summary_origin": entry.summary_origin,
+                        },
+                    ),
+                )
+            )
+            continue
         if not isinstance(entry, CompactEntry):
             continue
         compacted = set(entry.compacted_entry_ids)
@@ -1469,6 +1770,30 @@ def _project_messages(
             ),
         )
     return projected
+
+
+def _entry_path_digest(entries: list[SessionEntry]) -> str:
+    payload = json.dumps(
+        [entry_to_dict(entry) for entry in entries],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _path_has_open_run(path: list[SessionEntry]) -> bool:
+    open_run_id: str | None = None
+    for entry in path:
+        if isinstance(entry, RunStartEntry):
+            if open_run_id is not None:
+                return True
+            open_run_id = entry.run_id
+        elif isinstance(entry, RunEndEntry):
+            if open_run_id != entry.run_id:
+                return True
+            open_run_id = None
+    return open_run_id is not None
 
 
 def _project_plugin_state(
