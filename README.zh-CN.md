@@ -15,6 +15,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
 - **通用 PluginAPI** — 通过单一受治理运行时协议扩展工具、Policy、命令、上下文、Prompt、Session 状态、Tool 视图和宿主 UI。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
+- **受治理的 Policy 演进** — 从人工确认模式发现机会，生成证据绑定的非启用候选，并保持审查、批准、启用、重载和回滚相互独立。
 - **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
 
 ## 架构
@@ -408,15 +409,15 @@ Prompt 或参数值复制进报告。每份报告还用聚合输入摘要绑定�
 
 ```bash
 # 先列出机会；每条都会显示带签名前缀的 generate 提示
-evocopi policy discover .evopi/trace.jsonl
+evopi policy discover .evopi/trace.jsonl
 
 # 带显式 Trace 同意边界和终端 y/N 确认生成
-evocopi policy generate <report-id> \
+evopi policy generate <report-id> \
   --opportunity <signature-prefix> \
   --trace .evopi/trace.jsonl
 
 # 脚本流程：显式预授权 + 稳定 JSON 输出
-evocopi policy generate <report-id> \
+evopi policy generate <report-id> \
   --opportunity <signature-prefix> --trace .evopi/trace.jsonl --yes --json
 ```
 

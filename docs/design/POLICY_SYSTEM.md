@@ -392,7 +392,7 @@ Worker、获得人工批准并被显式激活和重载后才可能治理运行�
 CLI 语法：
 
 ```text
-evocopi policy generate REPORT \
+evopi policy generate REPORT \
   --opportunity SIGNATURE_PREFIX \
   --trace TRACE [--trace TRACE ...] \
   [--intent TEXT] [--name NAME] [--path PATH] [--workspace PATH] \
@@ -494,8 +494,9 @@ Evidence、Approval 和 Active Selection 是三个独立事实。`review_require
 运行时 Loader 会在 import 前重新校验目录摘要和 Manifest，import 后校验实例契约，
 再标注 Artifact digest、Activation ID 与 Selection ID。同名覆盖必须显式绑定替换
 名称和被替换 Policy 的当前摘要；缺失或漂移均 fail closed。Coding CLI 默认装配活动
-集，裸 BaseHarness 保持中立。Pattern Discovery 已提供只读机会发现；模型自动生成
-候选与自动 Promotion 仍不属于 v1。
+集，裸 BaseHarness 保持中立。Pattern Discovery 与 Candidate Generation 已分别提供
+只读机会发现和证据绑定的非启用候选生成；自动 Review、自动批准与自动 Promotion
+仍不属于 v1。
 
 ## 通用 Artifact Activation
 

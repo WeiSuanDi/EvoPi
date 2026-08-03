@@ -264,7 +264,7 @@ Opportunity；`policy generate` 生成非启用候选；
 新增生成模块：
 
 ```text
-evocopi/evolution/policy_generation_protocol.py  协议、严格 codec、摘要校验
+evopi/evolution/policy_generation_protocol.py    协议、严格 codec、摘要校验
 policy_generation_evidence.py                    证据重建与确定性均衡选择
 policy_generation.py                            两阶段模型生成服务与候选物化
 policy_generation_store.py                      不可变 Generation Record 存储

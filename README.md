@@ -15,6 +15,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
 - **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
+- **Governed policy evolution** — discover confirmation patterns, generate evidence-bound inactive candidates, and keep review, approval, activation, reload, and rollback explicit.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
 ## Architecture
@@ -425,15 +426,15 @@ directory that is never registered, reviewed, approved, or activated by generati
 
 ```bash
 # List opportunities first; each shows a generate hint with its signature prefix
-evocopi policy discover .evopi/trace.jsonl
+evopi policy discover .evopi/trace.jsonl
 
 # Generate with an explicit Trace consent boundary and terminal y/N confirmation
-evocopi policy generate <report-id> \
+evopi policy generate <report-id> \
   --opportunity <signature-prefix> \
   --trace .evopi/trace.jsonl
 
 # Scripted flow with explicit preauthorization and stable JSON output
-evocopi policy generate <report-id> \
+evopi policy generate <report-id> \
   --opportunity <signature-prefix> --trace .evopi/trace.jsonl --yes --json
 ```
 

@@ -234,8 +234,8 @@ flowchart LR
     Opportunity --> Candidate["候选 Policy / Harness 改动"]
     Candidate --> Schema["Schema Check"]
     Schema --> DryRun["Dry-run / Replay"]
-    DryRun --> Supervisor["Supervisor Agent Review"]
-    Supervisor --> Human["Human Confirmation"]
+    DryRun --> Supervisor["Supervisor Evidence / Review"]
+    Supervisor --> Human["Human Approval"]
     Human --> Approval["Digest-bound Approval"]
     Approval --> Active["Explicit Active Selection"]
     Active --> Registry["Transactional Harness Reload / Rollback"]
@@ -244,10 +244,11 @@ flowchart LR
 原则：
 
 ```text
-执行 Agent 不能自己给自己的演进打分。
+执行 Agent 不能自己给自己的演进授权。
 ```
 
-因此需要隔离的 Supervisor Agent。
+当前 v1 先使用隔离 Worker 与确定性 Supervisor Report 形成技术证据；未来可以在这层之上
+增加模型驱动 Supervisor，但它仍不能替代人工授权。
 
 Policy Evolution v1 已把这条闭环落实为目录候选、非执行式静态检查、隔离 Worker、
 不可变 Evidence、人工批准/拒绝、独立活动指针、Harness 事务装配和回滚。批准不等于
