@@ -19,6 +19,12 @@ Management and automation
 
 `evopi "PROMPT"` remains a compatibility alias for one-shot execution.
 
+The Policy command group exposes a governed lifecycle rather than a single mutation command:
+`discover` creates immutable Opportunities, `generate` creates inactive evidence-bound candidates,
+`review` produces technical evidence, `approve` records human authorization, and `activate`,
+`deactivate`, `rollback`, and REPL `/reload` change runtime selection explicitly. No earlier step
+implicitly performs a later one.
+
 ## Output contract
 
 - Interactive rendering and one-shot model text use the existing Rich/streaming surfaces.

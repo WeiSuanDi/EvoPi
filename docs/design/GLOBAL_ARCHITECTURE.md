@@ -234,8 +234,8 @@ flowchart LR
     Opportunity --> Candidate["候选 Policy / Harness 改动"]
     Candidate --> Schema["Schema Check"]
     Schema --> DryRun["Dry-run / Replay"]
-    DryRun --> Supervisor["Supervisor Agent Review"]
-    Supervisor --> Human["Human Confirmation"]
+    DryRun --> Supervisor["Supervisor Evidence / Review"]
+    Supervisor --> Human["Human Approval"]
     Human --> Approval["Digest-bound Approval"]
     Approval --> Active["Explicit Active Selection"]
     Active --> Registry["Transactional Harness Reload / Rollback"]
@@ -244,10 +244,11 @@ flowchart LR
 原则：
 
 ```text
-执行 Agent 不能自己给自己的演进打分。
+执行 Agent 不能自己给自己的演进授权。
 ```
 
-因此需要隔离的 Supervisor Agent。
+当前 v1 先使用隔离 Worker 与确定性 Supervisor Report 形成技术证据；未来可以在这层之上
+增加模型驱动 Supervisor，但它仍不能替代人工授权。
 
 Policy Evolution v1 已把这条闭环落实为目录候选、非执行式静态检查、隔离 Worker、
 不可变 Evidence、人工批准/拒绝、独立活动指针、Harness 事务装配和回滚。批准不等于
@@ -258,6 +259,13 @@ Pattern Discovery v1 进一步补齐 Trace 到候选之前的只读入口：它�
 `before_tool_call` Policy/Confirmation 证据，以不含原始参数值的语义签名产生不可变
 Opportunity Report。报告标记重复拒绝、决策分歧和重复批准，但不生成候选、不建议
 具体 Policy 动作，也不改变运行时。
+
+Policy Candidate Generation v1 补齐 Opportunity 到候选之间的唯一模型步骤：它从显式
+`--trace` 路径重建所选 Opportunity 引用的原始证据（digest/line/Run/决策/参数结构全量
+复核），分两个语义阶段（Proposal → 用户确认 → Candidate bundle）请求模型 Provider，并
+物化为非启用、带 Host 固定 Manifest 的目录候选。生成绝不审查、批准、激活、重载、注册
+或执行候选；候选继续走既有 Schema / Dry Run / Replay / Supervisor / Approval /
+Activation 人工治理链。Generation Record 不可变且不含原始参数、完整 Prompt 或模型响应。
 
 ## 两种演进形态
 

@@ -236,11 +236,12 @@ SubAgent 也必须受 Harness / Policy 管理。
 - 单 Policy Supervisor 技术审查报告
 
 当前验证层已提供 Policy schema check、隔离 dry-run 和离线工具级 Trace Replay。
-`build_policy_review_report()` 将既有验证证据纯聚合为
-`passed / review_required / failed`，并通过 `evopi policy review MODULE:ATTRIBUTE`
-提供文本或 JSON 输出。Supervisor 不执行 Validator、不调用模型、不修改 Registry
-或候选状态；报告也不是 ApprovalRecord。候选 Policy 必须在独立的 Human /
-Activation Gate 授权后才能启用。
+`PolicyDryRunCase` 支持带期望 action / 期望重写参数的强类型用例；`dry_run_policy()`
+同时接受传统 `PolicyContext` 和强类型用例。`build_policy_review_report()` 将既有验证
+证据纯聚合为 `passed / review_required / failed`，并通过
+`evopi policy review MODULE:ATTRIBUTE` 提供文本或 JSON 输出。Supervisor 不执行
+Validator、不调用模型、不修改 Registry 或候选状态；报告也不是 ApprovalRecord。
+候选 Policy 必须在独立的 Human / Activation Gate 授权后才能启用。
 
 ## evopi/evolution
 
@@ -252,10 +253,22 @@ Activation Gate 授权后才能启用。
 - 保存带摘要校验的不可变 Opportunity / Review Evidence
 - 管理正式 Policy 候选、内容寻址快照和隔离审查
 - 管理人工 Approval、全局活动选择、运行时 Artifact Loader 与回滚
+- 重建 Opportunity 引用的原始证据并生成非启用 Policy 候选（唯一模型步骤）
+- 保存不可变 Generation Record（不含原始参数、完整 Prompt 或模型响应）
 
 它不进入 Core，也不建立第二条运行时裁决链。`evopi policy discover` 只产生待审
-Opportunity；`init/review/approve/deny/activate/deactivate/rollback/list/status`
+Opportunity；`policy generate` 生成非启用候选；
+`init/review/approve/deny/activate/deactivate/rollback/list/status`
 构成后续人工治理链。Coding CLI 通过 Harness 显式接入活动 Policy。
+
+新增生成模块：
+
+```text
+evopi/evolution/policy_generation_protocol.py    协议、严格 codec、摘要校验
+policy_generation_evidence.py                    证据重建与确定性均衡选择
+policy_generation.py                            两阶段模型生成服务与候选物化
+policy_generation_store.py                      不可变 Generation Record 存储
+```
 
 ## evopi/coding
 

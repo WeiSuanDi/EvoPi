@@ -363,6 +363,50 @@ Opportunity 的有效报告。
 `EVOPI_HOME/opportunities/policies/reports/`。Discovery 不运行模型、工具、
 Confirmation Handler、Validator 或候选源码，也不会创建、批准、启用或替换 Policy。
 
+## Policy Candidate Generation v1
+
+`evopi policy generate` 是演进闭环中唯一调用模型的桥接步骤。它把不可变 Opportunity
+Report 变成 evidence-bound 的模型提案，经用户确认后物化为普通、非启用的 Policy 候选：
+
+```text
+Immutable Opportunity Report
+→ 显式 --trace 路径重建原始证据（digest/line/Run/决策/参数结构全量复核）
+→ 确定性均衡选择（approve/deny 优先，再跨 Run，再时间序，受 max_evidence 限制）
+→ 阶段一：模型 Proposal（策略、候选名、fallback、逐样本决策、警告）
+→ 用户确认（终端 y/N，或 --yes 显式预授权）
+→ 阶段二：模型 Candidate bundle（仅 policy.py 与相对 .py 辅助文件）
+→ Host 固定 Manifest/cases/README/test，静态 AST 检查后原子落盘
+→ 不可变 Generation Record（绝不含原始参数、完整 Prompt 或模型响应）
+```
+
+生成候选的 Manifest 固定为：hook `before_tool_call`、version `0.1.0`、priority `100`、
+enabled 实例、`source="generated"`、entrypoint `policy.py:POLICY`、dry-run
+`cases.py:CASES`。additive 候选风险沿用 Opportunity 风险；replacement 候选至少为
+`high`。候选 manifest 与 Policy 实例元数据绑定 generation_id、report digest、语义签名、
+Proposal digest、策略、证据 digest 与可选 replacement target。
+
+生成阶段绝不审查、批准、激活、重载、注册或执行候选。候选只有在通过正式 Review
+Worker、获得人工批准并被显式激活和重载后才可能治理运行时。候选目录是本地明文，可能
+包含证据推导出的敏感值，不应提交或发布。
+
+CLI 语法：
+
+```text
+evopi policy generate REPORT \
+  --opportunity SIGNATURE_PREFIX \
+  --trace TRACE [--trace TRACE ...] \
+  [--intent TEXT] [--name NAME] [--path PATH] [--workspace PATH] \
+  [--max-evidence N] [--yes] [--json] \
+  [--provider P] [--model M] [--fallback P:M ...] [--no-failover] \
+  [--max-retries N] [--no-retry] [--model-timeout SECONDS] \
+  [--max-output-tokens N] [--context-window N] \
+  [--circuit-failure-threshold N] [--circuit-recovery-timeout SECONDS] \
+  [--generation-timeout SECONDS]
+```
+
+退出码：generated 0；declined/deferred 2；error 1；Abort 130。传入 `--trace` 是发送
+选中原始 Tool 参数给模型 Provider 的明确同意边界；不做全局 Trace 扫描。
+
 ## `before_tool_call` Trace Replay
 
 第一版 Trace Replay 是候选 Policy 的离线回归验证层，不是完整 Agent 回放。
@@ -450,8 +494,9 @@ Evidence、Approval 和 Active Selection 是三个独立事实。`review_require
 运行时 Loader 会在 import 前重新校验目录摘要和 Manifest，import 后校验实例契约，
 再标注 Artifact digest、Activation ID 与 Selection ID。同名覆盖必须显式绑定替换
 名称和被替换 Policy 的当前摘要；缺失或漂移均 fail closed。Coding CLI 默认装配活动
-集，裸 BaseHarness 保持中立。Pattern Discovery 已提供只读机会发现；模型自动生成
-候选与自动 Promotion 仍不属于 v1。
+集，裸 BaseHarness 保持中立。Pattern Discovery 与 Candidate Generation 已分别提供
+只读机会发现和证据绑定的非启用候选生成；自动 Review、自动批准与自动 Promotion
+仍不属于 v1。
 
 ## 通用 Artifact Activation
 

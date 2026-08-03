@@ -23,6 +23,7 @@ from evopi.evolution.policy_candidates import (  # noqa: E402
 )
 from evopi.policy.types import Policy, PolicyContext  # noqa: E402
 from evopi.validators import (  # noqa: E402
+    PolicyDryRunCase,
     PolicySchemaValidator,
     ReplayReport,
     ValidationResult,
@@ -92,8 +93,13 @@ async def _review(
             if isinstance(raw_cases, (str, bytes)) or not isinstance(raw_cases, Iterable):
                 raise TypeError("Dry-run entrypoint must return an iterable")
             cases = list(raw_cases)
-            if any(not isinstance(case, PolicyContext) for case in cases):
-                raise TypeError("Dry-run entrypoint must contain PolicyContext objects")
+            if any(
+                not isinstance(case, (PolicyContext, PolicyDryRunCase))
+                for case in cases
+            ):
+                raise TypeError(
+                    "Dry-run entrypoint must contain PolicyContext or PolicyDryRunCase objects"
+                )
         except Exception as exc:
             dry_run = ValidationResult(
                 passed=False,

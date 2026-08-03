@@ -15,6 +15,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
 - **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
+- **Governed policy evolution** — discover confirmation patterns, generate evidence-bound inactive candidates, and keep review, approval, activation, reload, and rollback explicit.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
 ## Architecture
@@ -412,8 +413,35 @@ denials, cancellations, and confirmations outside `before_tool_call` remain diag
 Patterns expose stable semantic signatures derived from Tool, Policy, risk, and argument shape.
 Raw commands, paths, Prompt text, and argument values are not copied into the report. Each report
 binds the normalized input corpus with an aggregate digest and is stored as a digest-protected
-immutable artifact under `EVOPI_HOME/opportunities/policies/`, ready for human review or a future
+immutable artifact under `EVOPI_HOME/opportunities/policies/`, ready for human review or a
 candidate generation stage.
+
+### Policy candidate generation
+
+`evopi policy generate` is the governed bridge between an Opportunity report and an inactive
+Policy candidate. It reconstructs the exact raw evidence referenced by the selected Opportunity
+from explicit `--trace` paths, asks the configured model Provider for a Proposal in two semantic
+phases (Proposal, then Candidate bundle after user confirmation), and materializes a candidate
+directory that is never registered, reviewed, approved, or activated by generation:
+
+```bash
+# List opportunities first; each shows a generate hint with its signature prefix
+evopi policy discover .evopi/trace.jsonl
+
+# Generate with an explicit Trace consent boundary and terminal y/N confirmation
+evopi policy generate <report-id> \
+  --opportunity <signature-prefix> \
+  --trace .evopi/trace.jsonl
+
+# Scripted flow with explicit preauthorization and stable JSON output
+evopi policy generate <report-id> \
+  --opportunity <signature-prefix> --trace .evopi/trace.jsonl --yes --json
+```
+
+Generation never approves, activates, reloads, or registers the candidate. Passing `--trace` is
+the explicit consent for sending selected raw Tool arguments to the configured model Provider;
+no global Trace scan is performed. The generated candidate is inactive until it passes the formal
+Review Worker, receives human approval, and is explicitly activated and reloaded.
 
 ### Offline policy replay
 
