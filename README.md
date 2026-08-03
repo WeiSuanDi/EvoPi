@@ -412,8 +412,35 @@ denials, cancellations, and confirmations outside `before_tool_call` remain diag
 Patterns expose stable semantic signatures derived from Tool, Policy, risk, and argument shape.
 Raw commands, paths, Prompt text, and argument values are not copied into the report. Each report
 binds the normalized input corpus with an aggregate digest and is stored as a digest-protected
-immutable artifact under `EVOPI_HOME/opportunities/policies/`, ready for human review or a future
+immutable artifact under `EVOPI_HOME/opportunities/policies/`, ready for human review or a
 candidate generation stage.
+
+### Policy candidate generation
+
+`evopi policy generate` is the governed bridge between an Opportunity report and an inactive
+Policy candidate. It reconstructs the exact raw evidence referenced by the selected Opportunity
+from explicit `--trace` paths, asks the configured model Provider for a Proposal in two semantic
+phases (Proposal, then Candidate bundle after user confirmation), and materializes a candidate
+directory that is never registered, reviewed, approved, or activated by generation:
+
+```bash
+# List opportunities first; each shows a generate hint with its signature prefix
+evocopi policy discover .evopi/trace.jsonl
+
+# Generate with an explicit Trace consent boundary and terminal y/N confirmation
+evocopi policy generate <report-id> \
+  --opportunity <signature-prefix> \
+  --trace .evopi/trace.jsonl
+
+# Scripted flow with explicit preauthorization and stable JSON output
+evocopi policy generate <report-id> \
+  --opportunity <signature-prefix> --trace .evopi/trace.jsonl --yes --json
+```
+
+Generation never approves, activates, reloads, or registers the candidate. Passing `--trace` is
+the explicit consent for sending selected raw Tool arguments to the configured model Provider;
+no global Trace scan is performed. The generated candidate is inactive until it passes the formal
+Review Worker, receives human approval, and is explicitly activated and reloaded.
 
 ### Offline policy replay
 

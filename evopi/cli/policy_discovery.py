@@ -113,12 +113,16 @@ def render_policy_discovery(report: PolicyDiscoveryReport) -> str:
     ]
     for index, opportunity in enumerate(report.opportunities, start=1):
         policies = ", ".join(opportunity.policy_names) or "unknown"
+        signature_prefix = opportunity.semantic_signature[:12]
         lines.append(
             f"  {index}. {opportunity.theme} "
             f"tool={opportunity.tool_name} policies={policies} "
             f"risk={opportunity.risk_level} occurrences={opportunity.occurrence_count} "
             f"runs={opportunity.run_count}"
         )
+        lines.append(f"     signature={signature_prefix} "
+                     f"generate hint: evopi policy generate <report-id> "
+                     f"--opportunity {signature_prefix} --trace <trace>")
         for evidence in opportunity.evidence[:3]:
             lines.append(
                 f"     trace={evidence.trace_digest[:12]} "

@@ -23,6 +23,7 @@ from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.diagnostics import config_show_main, doctor_main
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
+from evopi.cli.policy_generation import policy_generate_main
 from evopi.cli.policy import policy_init_main, policy_lifecycle_main
 from evopi.cli.policy_discovery import policy_discover_main
 from evopi.cli.plugin import plugin_main
@@ -615,6 +616,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return policy_review_main(raw_args[2:])
     if raw_args[:2] == ["policy", "init"]:
         return policy_init_main(raw_args[2:])
+    if raw_args[:2] == ["policy", "generate"]:
+        return policy_generate_main(raw_args[2:])
     if raw_args[:2] == ["policy", "discover"]:
         return policy_discover_main(raw_args[2:])
     if len(raw_args) >= 2 and raw_args[0] == "policy":

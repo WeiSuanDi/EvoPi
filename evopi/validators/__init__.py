@@ -1,5 +1,5 @@
 from evopi.validators.base import ValidationResult
-from evopi.validators.dry_run import dry_run_policy
+from evopi.validators.dry_run import PolicyDryRunCase, dry_run_policy
 from evopi.validators.replay import (
     ReplayCase,
     ReplayCaseResult,
@@ -23,6 +23,7 @@ from evopi.validators.supervisor import (
 )
 
 __all__ = [
+    "PolicyDryRunCase",
     "PolicySchemaValidator",
     "PolicyCandidateSnapshot",
     "ReplayCase",

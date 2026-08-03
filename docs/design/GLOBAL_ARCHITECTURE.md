@@ -259,6 +259,13 @@ Pattern Discovery v1 进一步补齐 Trace 到候选之前的只读入口：它�
 Opportunity Report。报告标记重复拒绝、决策分歧和重复批准，但不生成候选、不建议
 具体 Policy 动作，也不改变运行时。
 
+Policy Candidate Generation v1 补齐 Opportunity 到候选之间的唯一模型步骤：它从显式
+`--trace` 路径重建所选 Opportunity 引用的原始证据（digest/line/Run/决策/参数结构全量
+复核），分两个语义阶段（Proposal → 用户确认 → Candidate bundle）请求模型 Provider，并
+物化为非启用、带 Host 固定 Manifest 的目录候选。生成绝不审查、批准、激活、重载、注册
+或执行候选；候选继续走既有 Schema / Dry Run / Replay / Supervisor / Approval /
+Activation 人工治理链。Generation Record 不可变且不含原始参数、完整 Prompt 或模型响应。
+
 ## 两种演进形态
 
 ### 持续挂载式演进

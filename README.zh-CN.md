@@ -397,7 +397,32 @@ Policy。默认只有同类决策至少出现 3 次且跨 2 个 Run 才形成 Op
 报告公开由 Tool、Policy、风险和参数结构生成的稳定语义签名，不把原始命令、路径、
 Prompt 或参数值复制进报告。每份报告还用聚合输入摘要绑定规范化后的 Trace 语料，并
 作为带摘要校验的不可变工件保存在
-`EVOPI_HOME/opportunities/policies/`，供人工审查或未来候选生成阶段使用。
+`EVOPI_HOME/opportunities/policies/`，供人工审查或候选生成阶段使用。
+
+### Policy 候选生成
+
+`evopi policy generate` 是 Opportunity Report 与非启用 Policy 候选之间的治理桥接。它从
+显式 `--trace` 路径重建所选 Opportunity 引用的原始证据，分两个语义阶段（Proposal，然后
+人工确认后的 Candidate bundle）请求已配置的模型 Provider，并物化一个绝不注册、审查、
+批准或激活的候选目录：
+
+```bash
+# 先列出机会；每条都会显示带签名前缀的 generate 提示
+evocopi policy discover .evopi/trace.jsonl
+
+# 带显式 Trace 同意边界和终端 y/N 确认生成
+evocopi policy generate <report-id> \
+  --opportunity <signature-prefix> \
+  --trace .evopi/trace.jsonl
+
+# 脚本流程：显式预授权 + 稳定 JSON 输出
+evocopi policy generate <report-id> \
+  --opportunity <signature-prefix> --trace .evopi/trace.jsonl --yes --json
+```
+
+生成阶段绝不批准、激活、重载或注册候选。传入 `--trace` 即明确同意将选中的原始 Tool
+参数发送给已配置的模型 Provider；不做全局 Trace 扫描。生成的候选保持非启用，直到通过
+正式 Review Worker、获得人工批准并被显式激活和重载。
 
 ### 离线 Policy 回放
 
