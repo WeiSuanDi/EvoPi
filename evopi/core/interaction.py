@@ -300,7 +300,7 @@ class InteractionQueueController:
         self,
         *,
         emit: EventListener | None,
-        run_id: str,
+        run_id: str | None,
         signal: AbortSignal | None = None,
         append: Callable[[UserMessage], None],
     ) -> tuple[UserMessage, ...]:
@@ -332,7 +332,7 @@ class InteractionQueueController:
         self,
         *,
         emit: EventListener | None,
-        run_id: str,
+        run_id: str | None,
         reason: str,
         signal: AbortSignal | None = None,
         append: Callable[[UserMessage], None],
@@ -369,7 +369,7 @@ class InteractionQueueController:
         self,
         *,
         emit: EventListener | None,
-        run_id: str,
+        run_id: str | None,
         reason: str,
         signal: AbortSignal | None = None,
     ) -> None:
@@ -407,7 +407,7 @@ class InteractionQueueController:
         count: int,
         *,
         emit: EventListener | None,
-        run_id: str,
+        run_id: str | None,
         signal: AbortSignal | None,
         append: Callable[[UserMessage], None],
     ) -> tuple[UserMessage, ...]:
@@ -436,7 +436,7 @@ class InteractionQueueController:
         item: _PendingInteraction,
         *,
         emit: EventListener | None,
-        run_id: str,
+        run_id: str | None,
         signal: AbortSignal | None,
         append: Callable[[UserMessage], None],
     ) -> UserMessage:
