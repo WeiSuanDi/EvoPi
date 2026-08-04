@@ -128,6 +128,10 @@ ToolConfirmationPolicy(tool_names={"shell_command"})
 Pack 决定，而不是硬编码在通用 Policy 中。当前 Coding Policy Pack 默认对
 `shell_command` 启用确认，工作区内的 `write_file` 不要求交互确认。
 
+Confirmation Broker 与 RPC 只承载这个决定的交互状态，不是新的 Policy。Broker 只能
+接受已存在 pending request 的一次终态响应；它不能创建确认、把 `block` 改为 `allow`、
+绕过参数改写，也不能直接执行 Tool。恢复出的 `orphaned` 请求仅用于审计，不能继续。
+
 `ShellSafetyPolicy` 审查的是模型提交的原始命令，与底层命令传输方式无关。内置规则
 覆盖 POSIX、cmd 与 PowerShell 的明确破坏性形式，包括递归删除、磁盘清理/格式化和
 关机重启；命中后仍以 `block` 优先。未命中的普通命令继续由

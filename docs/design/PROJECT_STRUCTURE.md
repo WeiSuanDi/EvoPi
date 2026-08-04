@@ -319,6 +319,11 @@ REPL `/policies` 展示装配快照，`/reload` 联合刷新 Plugin 与 Policy�
 `evopi policy discover TRACE...` 离线分析显式 Trace，并保存不可变 Opportunity
 Report；它不会构建 CodingHarness、调用模型或改变活动 Policy。
 
+`evopi rpc` 通过 stdio JSONL 暴露固定的本地宿主协议。`evopi/rpc/` 包含严格 Codec、
+有界 Event Stream、方法分派和只依赖 BaseHarness 公共接口的 `HarnessRpcHost`；
+`evopi/cli/rpc.py` 只负责标准输入输出适配。RPC 不提供独立 Tool 执行入口，确认响应也
+只能提交到 Harness 已绑定的 Confirmation Broker。
+
 ## docs
 
 项目设计文档。内部状态、路线和面试资料由本地协作文档维护，不进入公开仓库。

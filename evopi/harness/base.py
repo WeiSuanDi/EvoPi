@@ -33,6 +33,7 @@ from evopi.core.messages import (
 from evopi.core.model import Model
 from evopi.core.model_attempts import ModelAttemptInfo
 from evopi.core.model_errors import ModelErrorInfo, ModelRetryConfig
+from evopi.core.run import AgentRunState
 from evopi.core.tool import Tool, ToolCall, ToolResult
 from evopi.evolution import (
     LoadedPolicyArtifact,
@@ -46,10 +47,13 @@ from evopi.harness.capabilities import (
     ToolCapability,
 )
 from evopi.harness.confirmation import (
+    ConfirmationBrokerClosedError,
+    ConfirmationError,
     ConfirmationHandler,
     ConfirmationRequest,
     ConfirmationResponse,
 )
+from evopi.harness.confirmation_broker import ConfirmationBroker
 from evopi.harness.lifecycle import Lifecycle
 from evopi.harness.model_routing import HarnessModelAttemptRouter
 from evopi.harness.policy_manager import PolicyManager
@@ -207,6 +211,7 @@ class BaseHarness:
         tool_timeout: float | None = None,
         deadline: float | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
+        confirmation_broker: ConfirmationBroker | None = None,
         session_manager: SessionManager | None = None,
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
@@ -327,6 +332,7 @@ class BaseHarness:
         self.trace_path = Path(trace_path).resolve() if trace_path is not None else None
         self.trace_writer = JsonlTraceWriter(trace_path) if trace_path is not None else None
         self.confirmation_handler = confirmation_handler
+        self.confirmation_broker = confirmation_broker
         self._runtime_fingerprint: RuntimeFingerprint | None = None
         self._session_started_emitted = False
         self._session_failure: SessionError | None = None
@@ -463,6 +469,18 @@ class BaseHarness:
     @property
     def is_running(self) -> bool:
         return self.agent.is_running
+
+    @property
+    def current_run_id(self) -> str | None:
+        """Return the active Core Run identifier without exposing Agent internals."""
+
+        return self.agent.current_run_id
+
+    @property
+    def last_run(self) -> AgentRunState | None:
+        """Return the last immutable Core Run snapshot for host integrations."""
+
+        return self.agent.last_run
 
     def plugin_can_override_tool(self, plugin_name: str, tool_name: str) -> bool:
         return (plugin_name, tool_name) in self._plugin_tool_overrides
@@ -1150,7 +1168,19 @@ class BaseHarness:
     def close(self) -> None:
         if self.is_running:
             raise RuntimeError("Cannot close a running Harness")
-        self.session.close()
+        failure: Exception | None = None
+        if self.confirmation_broker is not None:
+            try:
+                self.confirmation_broker.close()
+            except Exception as exc:
+                failure = exc
+        try:
+            self.session.close()
+        except Exception as exc:
+            if failure is None:
+                failure = exc
+        if failure is not None:
+            raise failure
 
     def _install_active_policies(self) -> None:
         next_policies = PolicyManager(self.policies.approval_store)
@@ -1673,6 +1703,10 @@ class BaseHarness:
         *,
         signal: AbortSignal | None,
     ) -> ConfirmationResponse:
+        if request.run_id is None:
+            request.run_id = self.current_run_id
+        if request.session_id is None:
+            request.session_id = self.session.session_id
         manages_run_lifecycle = (
             self.lifecycle.state.status is LifecycleState.RUNNING
         )
@@ -1702,6 +1736,17 @@ class BaseHarness:
         await self.agent.emit_event(
             CoreEvent(type="confirmation_response", data={"response": response})
         )
+        if self.confirmation_broker is not None:
+            status = (
+                "expired"
+                if response.metadata.get("expired") is True
+                else {
+                    "approve": "approved",
+                    "deny": "denied",
+                    "cancelled": "cancelled",
+                }[response.decision]
+            )
+            await self._emit_confirmation_state(request, status=status)
         return response
 
     async def _resolve_confirmation(
@@ -1710,6 +1755,36 @@ class BaseHarness:
         *,
         signal: AbortSignal | None,
     ) -> ConfirmationResponse:
+        if self.confirmation_broker is not None:
+            broker_task = asyncio.create_task(
+                self.confirmation_broker.request(request, signal=signal)
+            )
+            await asyncio.sleep(0)
+            try:
+                pending = self.confirmation_broker.list_pending()
+            except ConfirmationError:
+                pending = ()
+            if any(record.request.id == request.id for record in pending):
+                await self._emit_confirmation_state(request, status="pending")
+            try:
+                return await broker_task
+            except ConfirmationBrokerClosedError:
+                return ConfirmationResponse(
+                    request_id=request.id,
+                    decision="cancelled",
+                    reason="Confirmation broker closed",
+                    metadata={"automatic": True, "closed": True},
+                )
+            except ConfirmationError as exc:
+                return ConfirmationResponse(
+                    request_id=request.id,
+                    decision="deny",
+                    reason="Confirmation broker failed closed",
+                    metadata={
+                        "automatic": True,
+                        "broker_error": exc.code,
+                    },
+                )
         if self.confirmation_handler is None:
             return ConfirmationResponse(
                 request_id=request.id,
@@ -1783,6 +1858,26 @@ class BaseHarness:
                 metadata={"automatic": True, "handler_error": "request_id_mismatch"},
             )
         return response
+
+    async def _emit_confirmation_state(
+        self,
+        request: ConfirmationRequest,
+        *,
+        status: str,
+    ) -> None:
+        """Emit correlation-only Broker state without duplicating raw arguments."""
+
+        await self.agent.emit_event(
+            CoreEvent(
+                type="confirmation_state_changed",
+                run_id=request.run_id,
+                data={
+                    "request_id": request.id,
+                    "status": status,
+                    "session_id": request.session_id,
+                },
+            )
+        )
 
     async def _after_tool_call(
         self,

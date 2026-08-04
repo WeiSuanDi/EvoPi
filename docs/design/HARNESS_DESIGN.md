@@ -123,10 +123,11 @@ Hook 是插槽，不是具体规则。
 自动摘要复用 `GovernedModelOperation`，因此继续经过 Provider Retry、Failover、Abort、
 超时和普通 `before_model_call` Policy，但 Tool 集固定为空。手工摘要完全跳过模型。
 
-### Human Confirmation 最小运行协议
+### Human Confirmation 运行协议
 
 当 Policy 返回 `require_confirmation` 时，由 Harness 负责把结构化请求交给外部
-`ConfirmationHandler`，Core 不参与具体交互。
+`ConfirmationHandler` 或 `ConfirmationBroker`，Core 不参与具体交互。Handler 保持
+进程内兼容路径；Broker 是桌面 UI、IDE 和本地 RPC 的多调用者状态边界。
 
 第一版运行语义：
 
@@ -145,8 +146,13 @@ require_confirmation
 - Handler 异常、返回类型错误或 request ID 不匹配时默认拒绝。
 - 确认请求与响应必须进入 Trace，并与当前 `run_id` 关联。
 - 等待确认期间的 Abort 会取消异步 Handler，并生成可追踪的 `cancelled` Response。
-- 当前只支持进程内等待；跨进程恢复属于后续 Session / Checkpoint 能力。
-- CLI、Web UI 和远程审批只实现 Handler，不改变 Policy 或 Core。
+- Broker 使用 `pending → approved/denied/cancelled/expired/orphaned` 的单向状态机；重复、
+  过期或 revision 漂移的响应明确失败，决不重放 Tool。
+- `confirmation_state_changed` Event 只携带 request、Run、Session 与状态关联字段，不复制
+  原始 Tool 参数；完整本地请求由 Broker Store 持有。
+- 进程异常恢复时，未完成请求标记为 `orphaned`，不会自动重建 Run、Confirmation 等待者
+  或 Tool 执行。优雅关闭则先持久化 `cancelled`，再唤醒等待者。
+- CLI、Web UI 和 RPC 宿主只实现交互或 Broker 响应，不改变 Policy 或 Core。
 
 ### 3. Policy 调度
 
