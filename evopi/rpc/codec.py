@@ -222,7 +222,7 @@ def _decode_event_object(obj: JsonObject) -> RpcEvent:
 
 def _encode(payload: JsonObject) -> str:
     try:
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise RpcCodecError("envelope is not JSON-safe") from exc
 
@@ -269,6 +269,24 @@ def encode_event(event: RpcEvent) -> str:
     )
 
 
+def extract_request_id(line: str) -> str | None:
+    """Return the ``request_id`` of a line that failed envelope validation.
+
+    The connection uses this to answer protocol-invalid requests with an
+    ``invalid_request`` response whenever a request id is present; lines that
+    cannot be parsed at all force a clean connection failure instead.
+    """
+    text = line.strip()
+    try:
+        value, end = _STRICT_DECODER.raw_decode(text)
+    except ValueError:
+        return None
+    if text[end:].strip() or not isinstance(value, dict):
+        return None
+    request_id = value.get("request_id")
+    return request_id if isinstance(request_id, str) else None
+
+
 def to_event_data(value: Any) -> Any:
     """Strictly convert a value to JSON-safe event data.
 
@@ -313,6 +331,7 @@ __all__ = [
     "encode_event",
     "encode_request",
     "encode_response",
+    "extract_request_id",
     "parse_utc_timestamp",
     "to_event_data",
 ]

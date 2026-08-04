@@ -16,10 +16,13 @@ from .codec import (
     encode_event,
     encode_request,
     encode_response,
+    extract_request_id,
     parse_utc_timestamp,
     to_event_data,
 )
+from .connection import AsyncTextReader, AsyncTextWriter, JsonlRpcConnection
 from .event_stream import DEFAULT_CAPACITY, DEFAULT_SUBSCRIBER_QUEUE_CAPACITY, EventStream
+from .server import CONFIRMATION_STATUSES, RpcHost, RpcServer, error_response
 from .errors import (
     EventCursorExpiredError,
     EventCursorInvalidError,
@@ -38,10 +41,18 @@ from .errors import (
 from .protocol import RpcEnvelope, RpcErrorInfo, RpcEvent, RpcRequest, RpcResponse
 
 __all__ = [
+    "CONFIRMATION_STATUSES",
     "DEFAULT_CAPACITY",
     "DEFAULT_SUBSCRIBER_QUEUE_CAPACITY",
     "EventStream",
+    "RpcHost",
+    "RpcServer",
     "SCHEMA_VERSION",
+    "AsyncTextReader",
+    "AsyncTextWriter",
+    "JsonlRpcConnection",
+    "error_response",
+    "extract_request_id",
     "EventCursorExpiredError",
     "EventCursorInvalidError",
     "EventPublishAfterCloseError",
