@@ -11,8 +11,11 @@ from pathlib import Path
 import pytest
 
 from .conformance import (
+    FIXED_TS,
     make_confirmation_request,
+    make_event,
     make_response,
+    make_rpc_request,
     to_json_safe,
 )
 
@@ -40,6 +43,18 @@ def test_confirmation_fixtures_are_synthetic_only() -> None:
     assert response.decision == "approve"
 
 
+def test_rpc_fixtures_are_deterministic_and_json_safe() -> None:
+    first = make_event(event_id="ev-fixture", sequence=1)
+    second = make_event(event_id="ev-fixture", sequence=1)
+    assert first == second
+    encoded = json.dumps(to_json_safe(first), sort_keys=True)
+    assert encoded == json.dumps(to_json_safe(second), sort_keys=True)
+    assert json.loads(encoded)["created_at"] == FIXED_TS.isoformat()
+    first_request = make_rpc_request(request_id="rpc-fixture", method="runtime.status", params={})
+    second_request = make_rpc_request(request_id="rpc-fixture", method="runtime.status", params={})
+    assert first_request == second_request
+
+
 def test_to_json_safe_handles_kit_value_kinds() -> None:
     class Sample(Enum):
         ALPHA = "alpha"
@@ -49,9 +64,8 @@ def test_to_json_safe_handles_kit_value_kinds() -> None:
         name: str
         at: datetime
 
-    fixed_ts = datetime(2026, 1, 1, tzinfo=UTC)
-    converted = to_json_safe(SampleData(name="x", at=fixed_ts))
-    assert converted == {"name": "x", "at": fixed_ts.isoformat()}
+    converted = to_json_safe(SampleData(name="x", at=FIXED_TS))
+    assert converted == {"name": "x", "at": FIXED_TS.isoformat()}
     assert to_json_safe(Path("a/b")) == str(Path("a/b"))
     assert to_json_safe(Sample.ALPHA) == "alpha"
     assert to_json_safe([1, {"x": None}]) == [1, {"x": None}]

@@ -1,19 +1,19 @@
-"""Deliberately broken Confirmation mutant adapters for the kit (HIF-3).
+"""Deliberately broken mutant adapters for the conformance kit (HIF-3).
 
-Each mutant breaks exactly one high-risk Confirmation behavior of the
-reference adapter.  The validity tests prove that (a) the known-good reference
-passes every scenario and (b) every mutant fails only its intended scenario,
-so the kit's scenarios are sharp enough to detect the defect they claim to
-detect.
+Each mutant breaks exactly one high-risk behavior of the reference adapter.
+The validity tests prove that (a) the known-good reference passes every
+scenario and (b) every mutant fails only its intended scenario, so the kit's
+scenarios are sharp enough to detect the defect they claim to detect.
 
-The registry maps each mutant name to its factory and the scenario it must
+The registries map each mutant name to its factory and the scenario it must
 fail.  This mirrors the acceptance matrix in the Task Packet one-to-one.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from .conformance import (
     BatchOutcome,
@@ -23,10 +23,19 @@ from .conformance import (
     ConflictError,
     ExecutedOperation,
     ReopenOutcome,
+    ReplayResult,
     RespondOutcome,
+    RpcAdapter,
+    RpcErrorInfo,
+    RpcEvent,
+    RpcResponse,
     make_response,
 )
-from .reference import ReferenceConfirmationAdapter
+from .reference import ReferenceConfirmationAdapter, ReferenceRpcAdapter
+
+# ---------------------------------------------------------------------------
+# Confirmation mutants (TASK.md Task 2)
+# ---------------------------------------------------------------------------
 
 
 class ReplayOrphanConfirmationMutant(ReferenceConfirmationAdapter):
@@ -150,10 +159,86 @@ class ExpiredResponseAcceptConfirmationMutant(ReferenceConfirmationAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Registry (mutant name -> factory, intended failing scenario)
+# RPC / Event Stream mutants (TASK.md Task 3)
+# ---------------------------------------------------------------------------
+
+
+class SkippedEventRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: silently drops the retained/live boundary event for subscribers."""
+
+    def _retained_for_subscriber(self, after_sequence: int) -> list[RpcEvent]:
+        # broken: the event at the retained/live boundary is never delivered
+        return [
+            event
+            for event in super()._retained_for_subscriber(after_sequence)
+            if event.sequence != self.retained_capacity
+        ]
+
+
+class DuplicateReplayRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: delivers each retained event twice during subscribe replay."""
+
+    def _retained_for_subscriber(self, after_sequence: int) -> list[RpcEvent]:
+        events = super()._retained_for_subscriber(after_sequence)
+        doubled: list[RpcEvent] = []
+        for event in events:
+            doubled.extend([event, event])
+        return doubled
+
+
+class StaleCursorSilentSkipRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: silently returns an empty result for an expired cursor."""
+
+    def replay(self, *, after_sequence: int) -> ReplayResult:
+        result = super().replay(after_sequence=after_sequence)
+        if not result.ok:
+            # broken: the expired cursor yields ok with no events instead of an
+            # explicit cursor-expired error
+            return ReplayResult(ok=True, events=(), error=None)
+        return result
+
+
+class BlockedReaderRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: the publisher awaits slow subscribers, blocking event production."""
+
+    async def publish(self, type_: str, data: dict[str, Any]) -> RpcEvent:
+        # broken: waits for subscriber capacity instead of failing the subscriber
+        for subscriber in self._subscribers:
+            while (
+                not subscriber._closed
+                and subscriber._failure is None
+                and len(subscriber._queue) >= subscriber._max_queue
+            ):
+                await asyncio.sleep(0)
+        return await super().publish(type_, data)
+
+
+class DuplicateDispatchRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: dispatches every request to its handler twice."""
+
+    async def _dispatch(
+        self, request_id: str, method: str, params: dict[str, Any]
+    ) -> RpcResponse:
+        # broken: the handler runs twice per request id
+        await super()._dispatch(request_id, method, params)
+        return await super()._dispatch(request_id, method, params)
+
+
+class ExceptionLeakRpcMutant(ReferenceRpcAdapter):
+    """MUTANT: leaks raw exception text into RPC error responses."""
+
+    @staticmethod
+    def _format_unexpected(exc: Exception) -> RpcErrorInfo:
+        # broken: the exception message (and its secrets) reaches the client
+        return RpcErrorInfo(code="internal_error", message=f"{type(exc).__name__}: {exc}", details=None)
+
+
+# ---------------------------------------------------------------------------
+# Registries (mutant name -> factory, intended failing scenario)
 # ---------------------------------------------------------------------------
 
 ConfirmationMutantFactory: TypeAlias = Callable[[], ConfirmationAdapter]
+RpcMutantFactory: TypeAlias = Callable[[], RpcAdapter]
 
 CONFIRMATION_MUTANTS: dict[str, tuple[ConfirmationMutantFactory, str]] = {
     "replay-orphan": (ReplayOrphanConfirmationMutant, "orphan/no replay"),
@@ -161,4 +246,13 @@ CONFIRMATION_MUTANTS: dict[str, tuple[ConfirmationMutantFactory, str]] = {
     "duplicate-accept": (DuplicateAcceptConfirmationMutant, "duplicate response"),
     "timeout-as-abort": (TimeoutAsAbortConfirmationMutant, "timeout/no execution"),
     "expired-accept": (ExpiredResponseAcceptConfirmationMutant, "stale/expired rejection"),
+}
+
+RPC_MUTANTS: dict[str, tuple[RpcMutantFactory, str]] = {
+    "skipped-event": (SkippedEventRpcMutant, "replay/live handoff"),
+    "duplicate-replay": (DuplicateReplayRpcMutant, "replay/live handoff"),
+    "stale-cursor-silent-skip": (StaleCursorSilentSkipRpcMutant, "cursor expiration"),
+    "blocked-reader": (BlockedReaderRpcMutant, "slow subscriber failure"),
+    "duplicate-dispatch": (DuplicateDispatchRpcMutant, "duplicate request ID"),
+    "exception-leak": (ExceptionLeakRpcMutant, "RPC redaction"),
 }

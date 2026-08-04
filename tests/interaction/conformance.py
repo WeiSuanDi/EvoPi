@@ -1,9 +1,9 @@
-"""Independent host-interaction conformance kit (HIF-3) — Confirmation v2.
+"""Independent host-interaction conformance kit (HIF-3).
 
 This module defines the observable-behavior vocabulary for the Confirmation v2
-contract frozen in the milestone CONTEXT.md section 4: a narrow adapter
-Protocol, result dataclasses, deterministic synthetic fixture builders, and
-reusable async scenario functions.
+and Event Stream / RPC v1 contracts frozen in the milestone CONTEXT.md sections
+4 and 5: narrow adapter Protocols, result dataclasses, deterministic synthetic
+fixture builders, and reusable async scenario functions.
 
 The kit is production-independent: it never imports any production module, it
 describes only observable behavior (no private fields, no implementation class
@@ -21,7 +21,7 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias
@@ -168,8 +168,114 @@ class ConfirmationAdapter(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Event Stream / RPC v1 observable vocabulary (CONTEXT section 5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RpcRequest:
+    request_id: str
+    method: str
+    params: dict[str, Any]
+    schema_version: int = 1
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RpcErrorInfo:
+    code: str
+    message: str
+    details: JsonLike | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RpcResponse:
+    request_id: str
+    ok: bool
+    result: JsonLike | None = None
+    error: RpcErrorInfo | None = None
+    schema_version: int = 1
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RpcEvent:
+    event_id: str
+    sequence: int
+    type: str
+    data: dict[str, Any]
+    run_id: str | None
+    created_at: datetime
+    schema_version: int = 1
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class WireError:
+    """Structured, JSON-safe rejection from the strict wire codec."""
+
+    code: str
+    message: str
+    details: JsonLike | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class WireResult:
+    ok: bool
+    response: RpcResponse | None = None
+    error: WireError | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ReplayResult:
+    ok: bool
+    events: tuple[RpcEvent, ...] = ()
+    error: WireError | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DispatchedCall:
+    """Observable record that a request id was dispatched to a handler."""
+
+    request_id: str
+    method: str
+    params: dict[str, Any]
+
+
+class ProtocolViolationError(Exception):
+    """An adapter violated the RPC protocol (carries a structured WireError)."""
+
+    def __init__(self, error: WireError) -> None:
+        super().__init__(error.message)
+        self.error = error
+
+
+class RpcSubscriber(Protocol):
+    async def next_event(self) -> RpcEvent | None: ...
+    def failure(self) -> WireError | None: ...
+    async def close(self) -> None: ...
+
+
+class RpcAdapter(Protocol):
+    """Observable Event Stream / RPC v1 behavior an implementation must provide."""
+
+    retained_capacity: int
+
+    async def publish(self, type_: str, data: dict[str, Any]) -> RpcEvent: ...
+    def replay(self, *, after_sequence: int) -> ReplayResult: ...
+    async def subscribe(
+        self, *, after_sequence: int, max_queue: int = 64
+    ) -> RpcSubscriber: ...
+    async def call(self, request: RpcRequest) -> RpcResponse: ...
+    async def send_wire(self, line: str) -> WireResult: ...
+    def event_wire(self, event: RpcEvent) -> str | WireError: ...
+    def parse_wire_event(self, line: str) -> RpcEvent | WireError: ...
+    def dispatched(self) -> tuple[DispatchedCall, ...]: ...
+    async def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # Deterministic synthetic fixtures
 # ---------------------------------------------------------------------------
+
+FIXED_TS: datetime = datetime(2026, 1, 1, tzinfo=UTC)
 
 KIT_REDACT_SECRET: str = "kit-redact-secret"
 KIT_REDACT_COMMAND: str = "echo kit-redact-command"
@@ -214,6 +320,42 @@ def make_response(
     base: dict[str, Any] = {"request_id": request_id, "decision": decision}
     base.update(overrides)
     return ConfirmationResponse(**base)
+
+
+def make_event(
+    *,
+    event_id: str = "ev-1",
+    sequence: int = 1,
+    type_: str = "tool_execution_start",
+    data: dict[str, Any] | None = None,
+    run_id: str | None = "run-kit",
+    created_at: datetime = FIXED_TS,
+    schema_version: int = 1,
+) -> RpcEvent:
+    return RpcEvent(
+        event_id=event_id,
+        sequence=sequence,
+        type=type_,
+        data={"n": 1} if data is None else data,
+        run_id=run_id,
+        created_at=created_at,
+        schema_version=schema_version,
+    )
+
+
+def make_rpc_request(
+    *,
+    request_id: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    schema_version: int = 1,
+) -> RpcRequest:
+    return RpcRequest(
+        request_id=request_id,
+        method=method,
+        params={} if params is None else params,
+        schema_version=schema_version,
+    )
 
 
 def to_json_safe(value: Any) -> JsonLike:
@@ -466,10 +608,293 @@ async def run_confirmation_redaction(adapter: ConfirmationAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scenario registry
+# RPC / Event Stream scenarios
+# ---------------------------------------------------------------------------
+
+
+async def run_strict_json(adapter: RpcAdapter) -> None:
+    """The wire codec rejects every malformed envelope with a structured error."""
+    cases: list[tuple[str, str]] = [
+        ('{"request_id": "broken"', "malformed_json"),
+        (
+            '{"request_id":"sj-1","method":"runtime.status","params":{},"schema_version":2}',
+            "invalid_schema_version",
+        ),
+        (
+            '{"request_id":"sj-1","method":"runtime.status","params":{},"schema_version":1,"extra":1}',
+            "invalid_envelope_key",
+        ),
+        (
+            '{"request_id":"sj-1","method":"runtime.status","params":5,"schema_version":1}',
+            "invalid_params",
+        ),
+        (
+            '{"request_id":"sj-1","method":"events.replay","params":{"after_sequence":true},'
+            '"schema_version":1}',
+            "invalid_params",
+        ),
+    ]
+    for line, expected in cases:
+        result = await adapter.send_wire(line)
+        if result.ok:
+            raise ConformanceFailure(f"malformed wire line was accepted: {line!r}")
+        if result.error is None or result.error.code != expected:
+            raise ConformanceFailure(
+                f"expected wire error {expected!r}, got {result.error}"
+            )
+    good = await adapter.send_wire(
+        '{"request_id":"sj-ok","method":"runtime.status","params":{},"schema_version":1}'
+    )
+    if not good.ok or good.response is None or not good.response.ok:
+        raise ConformanceFailure("a well-formed request must be accepted")
+    # event decode rejects malformed timestamps and non-object data
+    bad_ts = adapter.parse_wire_event(
+        '{"event_id":"e-1","sequence":1,"type":"t","data":{},"run_id":null,'
+        '"created_at":"not-a-date","schema_version":1}'
+    )
+    if not isinstance(bad_ts, WireError) or bad_ts.code != "invalid_timestamp":
+        raise ConformanceFailure("malformed event timestamp must be rejected")
+    bad_data = adapter.parse_wire_event(
+        '{"event_id":"e-1","sequence":1,"type":"t","data":[],"run_id":null,'
+        '"created_at":"2026-01-01T00:00:00Z","schema_version":1}'
+    )
+    if not isinstance(bad_data, WireError) or bad_data.code != "invalid_data":
+        raise ConformanceFailure("non-object event data must be rejected")
+    # event encode rejects unsupported values; there is never a repr fallback
+    unsupported = adapter.event_wire(make_event(event_id="ev-bad", sequence=1, data={"obj": object()}))
+    if not isinstance(unsupported, WireError) or unsupported.code != "unsupported_value":
+        raise ConformanceFailure("unsupported event data must be a protocol error")
+    # a valid event encodes to one compact JSON object per line
+    encoded = adapter.event_wire(make_event(event_id="ev-ok", sequence=1))
+    if isinstance(encoded, WireError):
+        raise ConformanceFailure("a valid event must encode to wire text")
+    if "\n" in encoded:
+        raise ConformanceFailure("wire output must be one JSON object per line")
+    payload = json.loads(encoded)
+    if not isinstance(payload, dict) or payload["event_id"] != "ev-ok":
+        raise ConformanceFailure("event wire output must be a JSON object")
+    # publish of unsupported data fails explicitly
+    try:
+        await adapter.publish("type", {"bad": object()})
+    except ProtocolViolationError as violation:
+        if violation.error.code != "unsupported_value":
+            raise ConformanceFailure("publish error must carry unsupported_value")
+    else:
+        raise ConformanceFailure("publish of unsupported data must fail explicitly")
+    # duplicate request ids are rejected at the wire level
+    first = await adapter.send_wire(
+        '{"request_id":"sj-dup","method":"runtime.status","params":{},"schema_version":1}'
+    )
+    if not first.ok:
+        raise ConformanceFailure("first well-formed request must be accepted")
+    second = await adapter.send_wire(
+        '{"request_id":"sj-dup","method":"runtime.status","params":{},"schema_version":1}'
+    )
+    if second.ok or second.error is None or second.error.code != "duplicate_request_id":
+        raise ConformanceFailure("duplicate request id must be rejected at the wire level")
+
+
+async def run_event_ordering(adapter: RpcAdapter) -> None:
+    """Sequences start at 1, are strictly increasing, and replay preserves order."""
+    events: list[RpcEvent] = []
+    for index in range(1, 6):
+        event = await adapter.publish(f"type-{index}", {"n": index})
+        events.append(event)
+    sequences = [event.sequence for event in events]
+    if sequences != [1, 2, 3, 4, 5]:
+        raise ConformanceFailure(f"sequences must be monotonic from 1, got {sequences}")
+    replay = adapter.replay(after_sequence=0)
+    if not replay.ok:
+        raise ConformanceFailure("a fresh replay must succeed")
+    replayed = [event.sequence for event in replay.events]
+    if replayed != [1, 2, 3, 4, 5]:
+        raise ConformanceFailure(
+            f"replay must preserve order without gaps or duplicates, got {replayed}"
+        )
+
+
+async def run_cursor_expiration(adapter: RpcAdapter) -> None:
+    """A cursor older than retained history fails explicitly; never silently skips."""
+    capacity = adapter.retained_capacity
+    for index in range(1, capacity + 3):  # publish capacity+2, evicting the first two
+        await adapter.publish(f"type-{index}", {"n": index})
+    expired = adapter.replay(after_sequence=1)
+    if expired.ok:
+        raise ConformanceFailure("an expired cursor must not be silently skipped")
+    if expired.error is None or expired.error.code != "event_cursor_expired":
+        raise ConformanceFailure("an expired cursor must raise the cursor-expired error")
+    try:
+        await adapter.subscribe(after_sequence=1)
+    except ProtocolViolationError as violation:
+        if violation.error.code != "event_cursor_expired":
+            raise ConformanceFailure("expired subscribe cursor must be cursor-expired")
+    else:
+        raise ConformanceFailure("an expired subscribe cursor must fail explicitly")
+    tail = adapter.replay(after_sequence=capacity)
+    if not tail.ok:
+        raise ConformanceFailure("a valid cursor must still replay")
+    tail_sequences = [event.sequence for event in tail.events]
+    if tail_sequences != [capacity + 1, capacity + 2]:
+        raise ConformanceFailure(
+            f"replay after the retained edge returned {tail_sequences}"
+        )
+
+
+async def run_replay_live_handoff(adapter: RpcAdapter) -> None:
+    """Retained replay hands off to live events without gaps or duplicates."""
+    capacity = adapter.retained_capacity
+    if capacity < 5:
+        raise ConformanceFailure("retained capacity must be at least 5 for this scenario")
+    for index in range(1, capacity + 1):
+        await adapter.publish(f"type-{index}", {"n": index})
+    subscriber = await adapter.subscribe(after_sequence=2, max_queue=64)
+    try:
+        for index in range(capacity + 1, capacity + 3):
+            await adapter.publish(f"type-{index}", {"n": index})
+        received: list[RpcEvent] = []
+        for _ in range(capacity):
+            event = await _await_bounded(subscriber.next_event(), what="subscriber event")
+            if event is None:
+                raise ConformanceFailure("subscriber was dropped before the handoff completed")
+            received.append(event)
+        sequences = [event.sequence for event in received]
+        expected = list(range(3, capacity + 3))
+        if sequences != expected:
+            raise ConformanceFailure(
+                f"replay/live handoff gap, duplicate, or missing boundary: "
+                f"{sequences} != {expected}"
+            )
+        ids = [event.event_id for event in received]
+        if len(set(ids)) != len(ids):
+            raise ConformanceFailure("an event was delivered more than once")
+    finally:
+        await subscriber.close()
+
+
+async def run_slow_subscriber_failure(adapter: RpcAdapter) -> None:
+    """A slow subscriber fails explicitly instead of blocking the publisher."""
+    subscriber = await adapter.subscribe(after_sequence=0, max_queue=1)
+    try:
+        await adapter.publish("type-1", {"n": 1})  # fills the bounded queue
+        task = asyncio.create_task(adapter.publish("type-2", {"n": 2}))
+        await asyncio.sleep(0)  # one event-loop yield, not a timing sleep
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise ConformanceFailure("publisher blocked behind a slow subscriber")
+        first = await subscriber.next_event()
+        if first is None or first.sequence != 1:
+            raise ConformanceFailure(
+                "slow subscriber must still receive queued events before failing"
+            )
+        drained = await subscriber.next_event()
+        if drained is not None:
+            raise ConformanceFailure("an overflowing subscriber did not fail explicitly")
+        failure = subscriber.failure()
+        if failure is None or failure.code != "subscriber_queue_overflow":
+            raise ConformanceFailure(
+                "a dropped subscriber must report a structured overflow error"
+            )
+    finally:
+        await subscriber.close()
+
+
+async def run_unknown_method(adapter: RpcAdapter) -> None:
+    """Unknown methods return a stable method_not_found error, never a crash."""
+    response = await adapter.call(
+        make_rpc_request(request_id="um-1", method="no.such.method", params={})
+    )
+    if response.ok:
+        raise ConformanceFailure("an unknown method must not succeed")
+    if response.error is None or response.error.code != "method_not_found":
+        raise ConformanceFailure(f"unknown method must be method_not_found, got {response.error}")
+    if not response.error.message:
+        raise ConformanceFailure("method_not_found must carry a safe message")
+
+
+async def run_duplicate_request_id(adapter: RpcAdapter) -> None:
+    """A repeated request id is rejected and the handler runs exactly once."""
+    request = make_rpc_request(request_id="dup-id-1", method="runtime.status", params={})
+    first = await adapter.call(request)
+    if not first.ok:
+        raise ConformanceFailure("the first request must succeed")
+    second = await adapter.call(request)
+    if second.ok:
+        raise ConformanceFailure("a duplicate request id must be rejected")
+    if second.error is None or second.error.code != "duplicate_request_id":
+        raise ConformanceFailure(
+            f"duplicate id must be duplicate_request_id, got {second.error}"
+        )
+    dispatches = [call for call in adapter.dispatched() if call.request_id == "dup-id-1"]
+    if len(dispatches) != 1:
+        raise ConformanceFailure(
+            f"handler dispatched {len(dispatches)} times for one request id"
+        )
+
+
+async def run_concurrent_run_rejection(adapter: RpcAdapter) -> None:
+    """V1 permits one active Run; a second start is rejected run_already_active."""
+    first = await adapter.call(
+        make_rpc_request(request_id="run-1", method="run.start", params={"run_id": "run-a"})
+    )
+    if not first.ok:
+        raise ConformanceFailure("the first run.start must succeed")
+    second = await adapter.call(
+        make_rpc_request(request_id="run-2", method="run.start", params={"run_id": "run-b"})
+    )
+    if second.ok:
+        raise ConformanceFailure("a second run.start must be rejected")
+    if second.error is None or second.error.code != "run_already_active":
+        raise ConformanceFailure(
+            f"second run.start must be run_already_active, got {second.error}"
+        )
+    status = await adapter.call(
+        make_rpc_request(request_id="run-3", method="runtime.status", params={})
+    )
+    if not status.ok or status.result is None or status.result.get("active_run_id") != "run-a":
+        raise ConformanceFailure("runtime.status must report the active run")
+    aborted = await adapter.call(
+        make_rpc_request(request_id="run-4", method="run.abort", params={"run_id": "run-a"})
+    )
+    if not aborted.ok:
+        raise ConformanceFailure("run.abort must succeed")
+    third = await adapter.call(
+        make_rpc_request(request_id="run-5", method="run.start", params={"run_id": "run-c"})
+    )
+    if not third.ok:
+        raise ConformanceFailure("run.start after abort must succeed")
+
+
+async def run_rpc_redaction(adapter: RpcAdapter) -> None:
+    """Exceptions never leak tracebacks, arguments, or secrets into RPC errors."""
+    response = await adapter.call(
+        make_rpc_request(
+            request_id="redact-1",
+            method="explode",
+            params={"token": KIT_REDACT_SECRET, "command": "rm -rf /tmp/kit"},
+        )
+    )
+    if response.ok:
+        raise ConformanceFailure("the exploding method must fail")
+    if response.error is None or response.error.code != "internal_error":
+        raise ConformanceFailure(
+            f"an unexpected exception must map to internal_error, got {response.error}"
+        )
+    text = response.error.message
+    if response.error.details is not None:
+        text += json.dumps(to_json_safe(response.error.details), sort_keys=True)
+    for leaked in (KIT_REDACT_SECRET, "rm -rf", "RuntimeError", "Traceback"):
+        if leaked in text:
+            raise ConformanceFailure("RPC error leaked exception or argument content")
+
+
+# ---------------------------------------------------------------------------
+# Scenario registries
 # ---------------------------------------------------------------------------
 
 ConfirmationScenarioFn: TypeAlias = Callable[[ConfirmationAdapter], Awaitable[None]]
+RpcScenarioFn: TypeAlias = Callable[[RpcAdapter], Awaitable[None]]
 
 CONFIRMATION_SCENARIOS: dict[str, ConfirmationScenarioFn] = {
     "timeout/no execution": run_timeout_no_execution,
@@ -479,4 +904,16 @@ CONFIRMATION_SCENARIOS: dict[str, ConfirmationScenarioFn] = {
     "atomic batch": run_atomic_batch,
     "orphan/no replay": run_orphan_no_replay,
     "confirmation redaction": run_confirmation_redaction,
+}
+
+RPC_SCENARIOS: dict[str, RpcScenarioFn] = {
+    "strict JSON": run_strict_json,
+    "event ordering": run_event_ordering,
+    "cursor expiration": run_cursor_expiration,
+    "replay/live handoff": run_replay_live_handoff,
+    "slow subscriber failure": run_slow_subscriber_failure,
+    "unknown method": run_unknown_method,
+    "duplicate request ID": run_duplicate_request_id,
+    "concurrent Run rejection": run_concurrent_run_rejection,
+    "RPC redaction": run_rpc_redaction,
 }

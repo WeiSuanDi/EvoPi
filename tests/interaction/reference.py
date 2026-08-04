@@ -1,9 +1,9 @@
-"""Known-good reference Confirmation adapter for the conformance kit (HIF-3).
+"""Known-good reference adapters for the interaction conformance kit (HIF-3).
 
-This adapter implements the observable Confirmation v2 semantics frozen in the
-milestone CONTEXT.md section 4 with minimal, self-contained machinery.  It
-never imports production modules; Integration binds the approved production
-components to the kit Protocols instead.
+These adapters implement the observable Confirmation v2 and Event Stream / RPC
+v1 semantics frozen in the milestone CONTEXT.md sections 4 and 5 with minimal,
+self-contained machinery.  They never import production modules; Integration
+binds the approved production components to the kit Protocols instead.
 
 The kit drives time explicitly (``advance_time``) so every scenario is
 deterministic and never depends on real timing.
@@ -12,7 +12,9 @@ deterministic and never depends on real timing.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from typing import Any, Awaitable, Callable
 
 from .conformance import (
     AbortToken,
@@ -21,13 +23,50 @@ from .conformance import (
     ConfirmationRecord,
     ConfirmationRequest,
     ConfirmationResponse,
+    DispatchedCall,
     ExecutedOperation,
+    ProtocolViolationError,
     ReopenOutcome,
+    ReplayResult,
     RequestOutcome,
     RespondOutcome,
+    RpcErrorInfo,
+    RpcEvent,
+    RpcRequest,
+    RpcResponse,
+    RpcSubscriber,
+    WireError,
+    WireResult,
+    to_json_safe,
 )
 
 KIT_EPOCH: datetime = datetime(2026, 1, 1, tzinfo=UTC)
+
+_REQUEST_ENVELOPE_KEYS = frozenset({"request_id", "method", "params", "schema_version"})
+_EVENT_ENVELOPE_KEYS = frozenset(
+    {"event_id", "sequence", "type", "data", "run_id", "created_at", "schema_version"}
+)
+_PARAM_SCHEMAS: dict[str, dict[str, type]] = {
+    "run.start": {"run_id": str},
+    "run.abort": {"run_id": str},
+    "events.replay": {"after_sequence": int},
+    "confirmation.respond": {"request_id": str, "decision": str},
+    "confirmation.respond_batch": {"responses": list},
+}
+
+
+class _MethodError(Exception):
+    """Controlled method-level error with a stable code and safe message."""
+
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class _PendingRecord:
@@ -254,3 +293,353 @@ class ReferenceConfirmationAdapter:
                 )
         self._runtime_id = runtime_id
         return ReopenOutcome(orphaned=tuple(orphaned))
+
+
+class _ReferenceSubscriber:
+    """Bounded-queue subscriber: overflows fail explicitly, never block."""
+
+    def __init__(self, retained: list[RpcEvent], max_queue: int) -> None:
+        self._queue: list[RpcEvent] = list(retained)
+        self._max_queue = max_queue
+        self._failure: WireError | None = None
+        self._closed = False
+        self._wake = asyncio.Event()
+
+    def failure(self) -> WireError | None:
+        return self._failure
+
+    def mark_failed(self, error: WireError) -> None:
+        if self._failure is None:
+            self._failure = error
+            self._wake.set()
+
+    async def next_event(self) -> RpcEvent | None:
+        while True:
+            if self._queue:
+                return self._queue.pop(0)
+            if self._failure is not None or self._closed:
+                return None
+            self._wake.clear()
+            await self._wake.wait()
+
+    async def close(self) -> None:
+        self._closed = True
+        self._wake.set()
+
+    def append_live(self, event: RpcEvent) -> bool:
+        """Append a live event; return False when the bounded queue is full."""
+        if self._closed or self._failure is not None:
+            return False
+        if len(self._queue) >= self._max_queue:
+            self.mark_failed(
+                WireError(code="subscriber_queue_overflow", message="subscriber too slow; dropped")
+            )
+            return False
+        self._queue.append(event)
+        self._wake.set()
+        return True
+
+
+class ReferenceRpcAdapter:
+    """Known-good Event Stream / RPC v1 adapter (strict codec, bounded queues)."""
+
+    def __init__(self, *, retained_capacity: int = 8) -> None:
+        self.retained_capacity = retained_capacity
+        self._sequence = 0
+        self._retained: list[RpcEvent] = []
+        self._subscribers: list[_ReferenceSubscriber] = []
+        self._active_run: str | None = None
+        self._seen_request_ids: set[str] = set()
+        self._dispatched: list[DispatchedCall] = []
+        self._closed = False
+        self._methods: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+            "initialize": self._h_initialize,
+            "runtime.status": self._h_runtime_status,
+            "run.start": self._h_run_start,
+            "run.abort": self._h_run_abort,
+            "events.replay": self._h_events_replay,
+            "confirmation.list": self._h_confirmation_list,
+            "confirmation.respond": self._h_confirmation_respond,
+            "confirmation.respond_batch": self._h_confirmation_respond_batch,
+            "shutdown": self._h_shutdown,
+            # kit-defined probe: always raises, used to prove RPC redaction
+            "explode": self._h_explode,
+        }
+
+    # -- handlers --
+    async def _h_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"protocol": "evopi.rpc.v1", "schema_version": 1}
+
+    async def _h_runtime_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"active_run_id": self._active_run}
+
+    async def _h_run_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        run_id = params["run_id"]
+        if self._active_run is not None and self._active_run != run_id:
+            raise _MethodError("run_already_active", "another run is already active")
+        self._active_run = run_id
+        return {"run_id": run_id}
+
+    async def _h_run_abort(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._active_run = None
+        return {"aborted": True, "run_id": params["run_id"]}
+
+    async def _h_events_replay(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self.replay(after_sequence=params["after_sequence"])
+        if not result.ok:
+            assert result.error is not None
+            raise _MethodError(result.error.code, result.error.message)
+        return {"events": [self._event_payload(event) for event in result.events]}
+
+    async def _h_confirmation_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"pending": []}
+
+    async def _h_confirmation_respond(self, params: dict[str, Any]) -> dict[str, Any]:
+        # The reference server hosts no pending confirmations, so every
+        # response is a structured conflict; correlation semantics live in the
+        # Confirmation kit.
+        raise _MethodError("no_matching_pending_request", "no pending request matches")
+
+    async def _h_confirmation_respond_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        raise _MethodError("no_matching_pending_request", "no pending request matches")
+
+    async def _h_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
+        await self.close()
+        return {"closed": True}
+
+    async def _h_explode(self, params: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError(f"boom: token={params.get('token')!r}")
+
+    # -- wire payloads --
+    def _event_payload(self, event: RpcEvent) -> dict[str, Any]:
+        return {
+            "event_id": event.event_id,
+            "sequence": event.sequence,
+            "type": event.type,
+            "data": to_json_safe(event.data),
+            "run_id": event.run_id,
+            "created_at": event.created_at.isoformat().replace("+00:00", "Z"),
+            "schema_version": event.schema_version,
+        }
+
+    def _decode_request(self, line: str) -> RpcRequest | WireError:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return WireError(code="malformed_json", message="invalid JSON")
+        if not isinstance(obj, dict):
+            return WireError(code="invalid_envelope", message="envelope must be a JSON object")
+        unknown = set(obj) - _REQUEST_ENVELOPE_KEYS
+        if unknown:
+            return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
+        request_id = obj.get("request_id")
+        method = obj.get("method")
+        if not isinstance(request_id, str) or not isinstance(method, str):
+            return WireError(code="invalid_envelope", message="request_id and method must be strings")
+        schema_version = obj.get("schema_version", 1)
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        ):
+            return WireError(code="invalid_schema_version", message="unsupported schema version")
+        params = obj.get("params")
+        if isinstance(params, bool) or not isinstance(params, dict):
+            return WireError(code="invalid_params", message="params must be a JSON object")
+        for key, expected in _PARAM_SCHEMAS.get(method, {}).items():
+            if key not in params:
+                continue
+            value = params[key]
+            if expected is int:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return WireError(code="invalid_params", message=f"param {key!r} must be an integer")
+            elif not isinstance(value, expected):
+                return WireError(code="invalid_params", message=f"param {key!r} must be a {expected.__name__}")
+        return RpcRequest(
+            request_id=request_id, method=method, params=params, schema_version=1
+        )
+
+    def _decode_event(self, line: str) -> RpcEvent | WireError:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return WireError(code="malformed_json", message="invalid JSON")
+        if not isinstance(obj, dict):
+            return WireError(code="invalid_envelope", message="envelope must be a JSON object")
+        unknown = set(obj) - _EVENT_ENVELOPE_KEYS
+        if unknown:
+            return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
+        created_at = self._parse_timestamp(obj.get("created_at"))
+        if created_at is None:
+            return WireError(code="invalid_timestamp", message="created_at must be an RFC-3339 timestamp")
+        data = obj.get("data")
+        if isinstance(data, bool) or not isinstance(data, dict):
+            return WireError(code="invalid_data", message="data must be a JSON object")
+        sequence = obj.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            return WireError(code="invalid_event", message="sequence must be an integer")
+        event_id = obj.get("event_id")
+        type_ = obj.get("type")
+        if not isinstance(event_id, str) or not isinstance(type_, str):
+            return WireError(code="invalid_event", message="event_id and type must be strings")
+        run_id = obj.get("run_id")
+        if run_id is not None and not isinstance(run_id, str):
+            return WireError(code="invalid_event", message="run_id must be a string or null")
+        schema_version = obj.get("schema_version", 1)
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        ):
+            return WireError(code="invalid_schema_version", message="unsupported schema version")
+        return RpcEvent(
+            event_id=event_id,
+            sequence=sequence,
+            type=type_,
+            data=data,
+            run_id=run_id,
+            created_at=created_at,
+            schema_version=schema_version,
+        )
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    # -- event stream --
+    async def publish(self, type_: str, data: dict[str, Any]) -> RpcEvent:
+        if self._closed:
+            raise ProtocolViolationError(WireError(code="closed", message="stream is closed"))
+        try:
+            safe_data = to_json_safe(data)
+        except ValueError:
+            raise ProtocolViolationError(
+                WireError(code="unsupported_value", message="event data contains unsupported values")
+            ) from None
+        self._sequence += 1
+        event = RpcEvent(
+            event_id=f"ev-{self._sequence}",
+            sequence=self._sequence,
+            type=type_,
+            data=safe_data,
+            run_id=None,
+            created_at=_utc_now(),
+            schema_version=1,
+        )
+        self._retained.append(event)
+        while len(self._retained) > self.retained_capacity:
+            self._retained.pop(0)
+        for subscriber in list(self._subscribers):
+            subscriber.append_live(event)  # bounded and non-blocking
+        return event
+
+    def replay(self, *, after_sequence: int) -> ReplayResult:
+        first_retained = self._retained[0].sequence if self._retained else self._sequence + 1
+        if after_sequence < 0 or after_sequence < first_retained - 1:
+            return ReplayResult(
+                ok=False, error=WireError(code="event_cursor_expired", message="cursor older than retained history")
+            )
+        return ReplayResult(
+            ok=True,
+            events=tuple(event for event in self._retained if event.sequence > after_sequence),
+        )
+
+    def _retained_for_subscriber(self, after_sequence: int) -> list[RpcEvent]:
+        return [event for event in self._retained if event.sequence > after_sequence]
+
+    async def subscribe(self, *, after_sequence: int, max_queue: int = 64) -> RpcSubscriber:
+        first_retained = self._retained[0].sequence if self._retained else self._sequence + 1
+        if after_sequence < 0 or after_sequence < first_retained - 1:
+            raise ProtocolViolationError(
+                WireError(code="event_cursor_expired", message="cursor older than retained history")
+            )
+        subscriber = _ReferenceSubscriber(self._retained_for_subscriber(after_sequence), max_queue)
+        self._subscribers.append(subscriber)
+        return subscriber
+
+    # -- server dispatch --
+    async def call(self, request: RpcRequest) -> RpcResponse:
+        if isinstance(request.schema_version, bool) or request.schema_version != 1:
+            return RpcResponse(
+                request_id=request.request_id,
+                ok=False,
+                error=RpcErrorInfo(code="invalid_schema_version", message="unsupported schema version"),
+            )
+        if request.request_id in self._seen_request_ids:
+            return RpcResponse(
+                request_id=request.request_id,
+                ok=False,
+                error=RpcErrorInfo(code="duplicate_request_id", message="request id already used"),
+            )
+        self._seen_request_ids.add(request.request_id)
+        return await self._dispatch(request.request_id, request.method, request.params)
+
+    async def _dispatch(
+        self, request_id: str, method: str, params: dict[str, Any]
+    ) -> RpcResponse:
+        handler = self._methods.get(method)
+        if handler is None:
+            return RpcResponse(
+                request_id=request_id,
+                ok=False,
+                error=RpcErrorInfo(code="method_not_found", message=f"unknown method: {method}"),
+            )
+        self._dispatched.append(
+            DispatchedCall(request_id=request_id, method=method, params=to_json_safe(params))
+        )
+        try:
+            result = await handler(params)
+        except _MethodError as error:
+            return RpcResponse(
+                request_id=request_id,
+                ok=False,
+                error=RpcErrorInfo(code=error.code, message=error.message, details=error.details),
+            )
+        except Exception as exc:
+            return RpcResponse(request_id=request_id, ok=False, error=self._format_unexpected(exc))
+        return RpcResponse(request_id=request_id, ok=True, result=result)
+
+    @staticmethod
+    def _format_unexpected(exc: Exception) -> RpcErrorInfo:
+        # Never leak tracebacks, prompts, tool arguments, or provider state.
+        return RpcErrorInfo(code="internal_error", message="internal error", details=None)
+
+    # -- wire surface --
+    async def send_wire(self, line: str) -> WireResult:
+        decoded = self._decode_request(line)
+        if isinstance(decoded, WireError):
+            return WireResult(ok=False, error=decoded)
+        response = await self.call(decoded)
+        if response.ok:
+            return WireResult(ok=True, response=response)
+        error = response.error
+        wire_error = (
+            WireError(code=error.code, message=error.message, details=error.details)
+            if error is not None
+            else WireError(code="internal_error", message="internal error")
+        )
+        return WireResult(ok=False, response=response, error=wire_error)
+
+    def event_wire(self, event: RpcEvent) -> str | WireError:
+        try:
+            payload = self._event_payload(event)
+        except ValueError:
+            return WireError(code="unsupported_value", message="event contains unsupported values")
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    def parse_wire_event(self, line: str) -> RpcEvent | WireError:
+        return self._decode_event(line)
+
+    def dispatched(self) -> tuple[DispatchedCall, ...]:
+        return tuple(self._dispatched)
+
+    async def close(self) -> None:
+        self._closed = True
+        for subscriber in list(self._subscribers):
+            await subscriber.close()
