@@ -36,28 +36,33 @@ def test_request_defaults_and_roundtrip() -> None:
     assert decoded == request
 
 
-def test_response_ok_roundtrip_omits_none_fields() -> None:
+def test_response_ok_roundtrip_canonical_shape() -> None:
     response = RpcResponse(
         request_id=str(uuid4()),
         ok=True,
         result={"status": "running"},
     )
     line = encode_response(response)
-    assert "result" in line
-    assert "error" not in line
-    assert decode_response(line) == response
+    # Canonical wire shape: all five response keys are always present.
+    assert '"result"' in line
+    assert '"error":null' in line
+    decoded = decode_response(line)
+    assert decoded == response
+    assert decoded.result == {"status": "running"}
+    assert decoded.error is None
 
 
-def test_response_error_roundtrip_omits_none_fields() -> None:
+def test_response_error_roundtrip_canonical_shape() -> None:
     response = RpcResponse(
         request_id=str(uuid4()),
         ok=False,
         error=RpcErrorInfo(code="method_not_found", message="unknown method", details={"method": "nope"}),
     )
     line = encode_response(response)
-    assert "result" not in line
+    assert '"result":null' in line
     decoded = decode_response(line)
     assert decoded == response
+    assert decoded.result is None
     assert decoded.error == RpcErrorInfo(
         code="method_not_found", message="unknown method", details={"method": "nope"}
     )

@@ -1,11 +1,18 @@
 """Strict JSON codecs for the RPC v1 wire envelopes.
 
-The codec is deliberately exact. It rejects duplicate JSON keys, NaN and
-Infinity, unknown schema versions, unknown or missing envelope keys,
-non-object params/data, booleans used as integers, malformed or non-UTC
-timestamps, invalid UUIDs, and multi-object or trailing input. Event data
-conversion accepts a fixed JSON-safe value set and never falls back to
-``repr``. Wire output is one compact UTF-8 JSON object per line.
+The codec is deliberately exact, and validation is symmetric: the same rules
+apply on encode and decode, so the encoder never emits a payload the decoder
+rejects. It rejects duplicate JSON keys, NaN and Infinity, unknown schema
+versions, unknown or missing envelope keys, non-object params/data/result,
+booleans used as integers, malformed or non-UTC timestamps, invalid UUIDs,
+empty request IDs/method names/error codes/event types, sequence numbers
+below 1, and multi-object or trailing input.
+
+The response envelope is canonical: all five keys are always present.
+``ok=true`` requires an object ``result`` and ``error=null``; ``ok=false``
+requires ``result=null`` and exactly one error object. Event data conversion
+accepts a fixed JSON-safe value set and never falls back to ``repr``. Wire
+output is one compact UTF-8 JSON object per line.
 """
 
 from __future__ import annotations
@@ -31,7 +38,6 @@ _RESPONSE_KEYS = frozenset({"request_id", "ok", "result", "error", "schema_versi
 _EVENT_KEYS = frozenset(
     {"event_id", "sequence", "type", "data", "run_id", "created_at", "schema_version"}
 )
-_RESPONSE_REQUIRED = frozenset({"request_id", "ok", "schema_version"})
 _ERROR_INFO_KEYS = frozenset({"code", "message", "details"})
 
 _UUID_RE = re.compile(
@@ -69,11 +75,18 @@ def _is_bool(value: Any) -> bool:
     return type(value) is bool
 
 
-def _check_str(obj: JsonObject, key: str) -> str:
-    value = obj[key]
-    if not isinstance(value, str):
-        raise RpcCodecError(f"{key} must be a string")
+def _require_nonempty_str(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise RpcCodecError("expected a non-empty string")
     return value
+
+
+def _is_utc_datetime(value: Any) -> bool:
+    return isinstance(value, datetime) and value.utcoffset() == timedelta(0)
+
+
+def _check_nonempty_str(obj: JsonObject, key: str) -> str:
+    return _require_nonempty_str(obj[key])
 
 
 def _check_int(obj: JsonObject, key: str) -> int:
@@ -98,8 +111,11 @@ def _check_dict(obj: JsonObject, key: str) -> JsonObject:
 
 
 def _check_version(obj: JsonObject) -> int:
-    version = _check_int(obj, "schema_version")
-    if version != SCHEMA_VERSION:
+    return _check_version_value(_check_int(obj, "schema_version"))
+
+
+def _check_version_value(version: Any) -> int:
+    if not _is_int(version) or version != SCHEMA_VERSION:
         raise RpcCodecError("unknown schema version")
     return version
 
@@ -134,13 +150,126 @@ def _parse_line(line: str) -> JsonObject:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Encoding: validate the dataclass instance, build the canonical payload, and
+# only then emit the wire line. A crafted invalid instance fails before output.
+# ---------------------------------------------------------------------------
+
+
+def _require_dict(value: Any) -> JsonObject:
+    if not isinstance(value, dict):
+        raise RpcCodecError("expected an object")
+    return value
+
+
+def _request_payload(request: RpcRequest) -> JsonObject:
+    return {
+        "request_id": _require_nonempty_str(request.request_id),
+        "method": _require_nonempty_str(request.method),
+        "params": _require_dict(request.params),
+        "schema_version": _check_version_value(request.schema_version),
+    }
+
+
+def _error_info_payload(info: RpcErrorInfo) -> JsonObject:
+    if not isinstance(info, RpcErrorInfo):
+        raise RpcCodecError("error must be an error info object")
+    return {
+        "code": _require_nonempty_str(info.code),
+        "message": _check_str_type(info.message),
+        "details": _require_dict(info.details),
+    }
+
+
+def _check_str_type(value: Any) -> str:
+    if not isinstance(value, str):
+        raise RpcCodecError("expected a string")
+    return value
+
+
+def _response_payload(response: RpcResponse) -> JsonObject:
+    """Validate the canonical ok/result/error invariant and build the payload."""
+    request_id = _require_nonempty_str(response.request_id)
+    if not _is_bool(response.ok):
+        raise RpcCodecError("response ok must be a boolean")
+    schema_version = _check_version_value(response.schema_version)
+    if response.ok:
+        if not isinstance(response.result, dict):
+            raise RpcCodecError("successful response requires an object result")
+        if response.error is not None:
+            raise RpcCodecError("successful response cannot carry an error")
+        return {
+            "request_id": request_id,
+            "ok": True,
+            "result": response.result,
+            "error": None,
+            "schema_version": schema_version,
+        }
+    if response.result is not None:
+        raise RpcCodecError("failed response cannot carry a result")
+    if not isinstance(response.error, RpcErrorInfo):
+        raise RpcCodecError("failed response requires an error")
+    return {
+        "request_id": request_id,
+        "ok": False,
+        "result": None,
+        "error": _error_info_payload(response.error),
+        "schema_version": schema_version,
+    }
+
+
+def _event_payload(event: RpcEvent) -> JsonObject:
+    if not isinstance(event.event_id, str) or not _UUID_RE.fullmatch(event.event_id):
+        raise RpcCodecError("invalid event id")
+    if not _is_int(event.sequence) or event.sequence < 1:
+        raise RpcCodecError("event sequence must be a positive integer")
+    if not _is_utc_datetime(event.created_at):
+        raise RpcCodecError("event timestamp must be a UTC datetime")
+    run_id = event.run_id
+    if run_id is not None and not isinstance(run_id, str):
+        raise RpcCodecError("run_id must be a string or null")
+    return {
+        "event_id": event.event_id,
+        "sequence": event.sequence,
+        "type": _require_nonempty_str(event.type),
+        "data": _require_dict(event.data),
+        "run_id": run_id,
+        "created_at": event.created_at.isoformat(),
+        "schema_version": _check_version_value(event.schema_version),
+    }
+
+
+def _encode(payload: JsonObject) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise RpcCodecError("envelope is not JSON-safe") from exc
+
+
+def encode_request(request: RpcRequest) -> str:
+    return _encode(_request_payload(request))
+
+
+def encode_response(response: RpcResponse) -> str:
+    return _encode(_response_payload(response))
+
+
+def encode_event(event: RpcEvent) -> str:
+    return _encode(_event_payload(event))
+
+
+# ---------------------------------------------------------------------------
+# Decoding: the same rules, applied to parsed JSON objects.
+# ---------------------------------------------------------------------------
+
+
 def decode_envelope(line: str) -> RpcEnvelope:
     """Decode one wire line, discriminating the envelope by its exact key set."""
     obj = _parse_line(line)
     keys = frozenset(obj)
     if keys == _REQUEST_KEYS:
         return _decode_request_object(obj)
-    if keys <= _RESPONSE_KEYS and _RESPONSE_REQUIRED <= keys:
+    if keys == _RESPONSE_KEYS:
         return _decode_response_object(obj)
     if keys == _EVENT_KEYS:
         return _decode_event_object(obj)
@@ -170,49 +299,57 @@ def decode_event(line: str) -> RpcEvent:
 
 def _decode_request_object(obj: JsonObject) -> RpcRequest:
     return RpcRequest(
-        request_id=_check_str(obj, "request_id"),
-        method=_check_str(obj, "method"),
+        request_id=_check_nonempty_str(obj, "request_id"),
+        method=_check_nonempty_str(obj, "method"),
         params=_check_dict(obj, "params"),
         schema_version=_check_version(obj),
     )
 
 
 def _decode_response_object(obj: JsonObject) -> RpcResponse:
-    result = obj.get("result")
-    if result is not None and not isinstance(result, dict):
-        raise RpcCodecError("result must be an object or null")
-    error = _decode_error_info(obj["error"]) if obj.get("error") is not None else None
-    return RpcResponse(
-        request_id=_check_str(obj, "request_id"),
-        ok=_check_bool(obj, "ok"),
-        result=result,
-        error=error,
-        schema_version=_check_version(obj),
-    )
+    request_id = _check_nonempty_str(obj, "request_id")
+    ok = _check_bool(obj, "ok")
+    _check_version(obj)
+    result = obj["result"]
+    error = obj["error"]
+    if ok:
+        if not isinstance(result, dict):
+            raise RpcCodecError("successful response requires an object result")
+        if error is not None:
+            raise RpcCodecError("successful response cannot carry an error")
+        return RpcResponse(request_id=request_id, ok=True, result=result)
+    if result is not None:
+        raise RpcCodecError("failed response cannot carry a result")
+    if error is None:
+        raise RpcCodecError("failed response requires an error")
+    return RpcResponse(request_id=request_id, ok=False, error=_decode_error_info(error))
 
 
 def _decode_error_info(value: Any) -> RpcErrorInfo:
     if not isinstance(value, dict) or frozenset(value) != _ERROR_INFO_KEYS:
         raise RpcCodecError("malformed error info")
-    code = value["code"]
+    code = _require_nonempty_str(value["code"])
     message = value["message"]
     details = value["details"]
-    if not isinstance(code, str) or not isinstance(message, str) or not isinstance(details, dict):
+    if not isinstance(message, str) or not isinstance(details, dict):
         raise RpcCodecError("malformed error info")
     return RpcErrorInfo(code=code, message=message, details=details)
 
 
 def _decode_event_object(obj: JsonObject) -> RpcEvent:
-    event_id = _check_str(obj, "event_id")
+    event_id = _check_nonempty_str(obj, "event_id")
     if not _UUID_RE.fullmatch(event_id):
         raise RpcCodecError("invalid event id")
+    sequence = _check_int(obj, "sequence")
+    if sequence < 1:
+        raise RpcCodecError("event sequence must be a positive integer")
     run_id = obj["run_id"]
     if run_id is not None and not isinstance(run_id, str):
         raise RpcCodecError("run_id must be a string or null")
     return RpcEvent(
         event_id=event_id,
-        sequence=_check_int(obj, "sequence"),
-        type=_check_str(obj, "type"),
+        sequence=sequence,
+        type=_check_nonempty_str(obj, "type"),
         data=_check_dict(obj, "data"),
         run_id=run_id,
         created_at=parse_utc_timestamp(obj["created_at"]),
@@ -220,61 +357,12 @@ def _decode_event_object(obj: JsonObject) -> RpcEvent:
     )
 
 
-def _encode(payload: JsonObject) -> str:
-    try:
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise RpcCodecError("envelope is not JSON-safe") from exc
-
-
-def encode_request(request: RpcRequest) -> str:
-    return _encode(
-        {
-            "request_id": request.request_id,
-            "method": request.method,
-            "params": request.params,
-            "schema_version": request.schema_version,
-        }
-    )
-
-
-def encode_response(response: RpcResponse) -> str:
-    payload: JsonObject = {
-        "request_id": response.request_id,
-        "ok": response.ok,
-        "schema_version": response.schema_version,
-    }
-    if response.result is not None:
-        payload["result"] = response.result
-    if response.error is not None:
-        payload["error"] = {
-            "code": response.error.code,
-            "message": response.error.message,
-            "details": response.error.details,
-        }
-    return _encode(payload)
-
-
-def encode_event(event: RpcEvent) -> str:
-    return _encode(
-        {
-            "event_id": event.event_id,
-            "sequence": event.sequence,
-            "type": event.type,
-            "data": event.data,
-            "run_id": event.run_id,
-            "created_at": event.created_at.isoformat(),
-            "schema_version": event.schema_version,
-        }
-    )
-
-
 def extract_request_id(line: str) -> str | None:
     """Return the ``request_id`` of a line that failed envelope validation.
 
     The connection uses this to answer protocol-invalid requests with an
-    ``invalid_request`` response whenever a request id is present; lines that
-    cannot be parsed at all force a clean connection failure instead.
+    ``invalid_request`` response whenever a usable request id is present;
+    lines that cannot be parsed at all force a clean connection failure.
     """
     text = line.strip()
     try:
@@ -284,7 +372,9 @@ def extract_request_id(line: str) -> str | None:
     if text[end:].strip() or not isinstance(value, dict):
         return None
     request_id = value.get("request_id")
-    return request_id if isinstance(request_id, str) else None
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    return request_id
 
 
 def to_event_data(value: Any) -> Any:
