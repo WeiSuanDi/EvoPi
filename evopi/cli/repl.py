@@ -15,6 +15,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from evopi.cli.product import resolve_interaction_modes
 from evopi.coding import CodingHarness
 from evopi.rpc.harness_host import InteractionHarness
 
@@ -48,6 +49,8 @@ class ReplStartupConfig:
     shell_mode: str = "auto"
     shell_kind: str = "-"
     shell_executable: str = "-"
+    steering_mode: str = "one-at-a-time"
+    follow_up_mode: str = "one-at-a-time"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -112,6 +115,7 @@ def build_repl_startup_config(
         if route is not None
         else ()
     )
+    steering_mode, follow_up_mode = resolve_interaction_modes(args)
     return ReplStartupConfig(
         provider=provider,
         model=harness.model.name,
@@ -132,6 +136,8 @@ def build_repl_startup_config(
         shell_mode=harness.shell_environment.requested_mode,
         shell_kind=harness.shell_environment.kind,
         shell_executable=harness.shell_environment.executable,
+        steering_mode=steering_mode,
+        follow_up_mode=follow_up_mode,
     )
 
 
@@ -493,6 +499,10 @@ def startup_panel(context: ReplCommandContext) -> Panel:
             f"{len(resources.skills)} Skills · "
             f"SubAgent {'on' if resources.subagent_enabled else 'off'}"
         ),
+        (
+            f"Interactions: steer {context.startup.steering_mode} · "
+            f"follow-up {context.startup.follow_up_mode}"
+        ),
     ]
     return Panel(
         "\n".join(lines),
@@ -614,6 +624,14 @@ def _status(context: ReplCommandContext, arguments: str, raw: str) -> ReplComman
     table.add_row("Memory", f"{resources.memory.entry_count} entries")
     table.add_row("Skills", str(len(resources.skills)))
     table.add_row("SubAgent", "enabled" if resources.subagent_enabled else "disabled")
+    table.add_row("Steering mode", context.startup.steering_mode)
+    table.add_row("Follow-up mode", context.startup.follow_up_mode)
+    # Pending counts come from the live queue snapshot when the Lane 1
+    # interaction surface is present; nothing here carries message content.
+    snapshot = getattr(harness, "interaction_snapshot", None)
+    if snapshot is not None:
+        table.add_row("Pending steering", str(snapshot.pending_steering_count))
+        table.add_row("Pending follow-up", str(snapshot.pending_follow_up_count))
     table.add_row("Warnings", str(len(capabilities.warnings)))
     context.console.print(table)
     for warning in capabilities.warnings:
@@ -643,6 +661,8 @@ def _settings(context: ReplCommandContext, arguments: str, raw: str) -> ReplComm
         ("Fallbacks", ", ".join(value.fallbacks) or "none"),
         ("Tool allowlist", ", ".join(value.included_tools or ()) or "none"),
         ("Tool exclusions", ", ".join(value.excluded_tools or ()) or "none"),
+        ("Steering mode", value.steering_mode),
+        ("Follow-up mode", value.follow_up_mode),
     )
     for key, item in rows:
         table.add_row(key, item)

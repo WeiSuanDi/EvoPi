@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -32,6 +33,7 @@ from evopi.cli.product import (
     build_run_result,
     compose_run_prompt,
     format_management_help,
+    resolve_interaction_modes,
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
@@ -75,6 +77,7 @@ _UNREVIEWED_PLUGIN_WARNING = (
     "use plugin review -> approve -> reload for product use"
 )
 _DEFAULT_CONFIRMATION_HANDLER = object()
+_INTERACTION_CONSTRUCTOR_SUPPORTED: frozenset[str] | None = None
 
 
 def _non_negative_int(value: str) -> int:
@@ -205,6 +208,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable these registered Tools",
     )
 
+    interactions_group = parser.add_argument_group("Interactions")
+    interactions_group.add_argument(
+        "--steering-mode",
+        choices=["one-at-a-time", "all"],
+        default=None,
+        help=(
+            "Queue mode for steering input while a Run is active "
+            "(default: EVOPI_STEERING_MODE or one-at-a-time)"
+        ),
+    )
+    interactions_group.add_argument(
+        "--follow-up-mode",
+        choices=["one-at-a-time", "all"],
+        default=None,
+        help=(
+            "Queue mode for follow-up input at a terminal candidate "
+            "(default: EVOPI_FOLLOW_UP_MODE or one-at-a-time)"
+        ),
+    )
+
     governance_group = parser.add_argument_group("Governance")
     governance_group.add_argument(
         "--approvals-path", type=Path, metavar="PATH",
@@ -289,6 +312,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _interaction_constructor_kwargs(
+    steering_mode: str,
+    follow_up_mode: str,
+) -> dict[str, str]:
+    """Pass the frozen interaction constructor names when the local Harness
+    already accepts them. Lane 1 introduces ``steering_mode`` and
+    ``follow_up_mode`` on BaseHarness; until both Lanes are integrated, the
+    Harness defaults (``one-at-a-time``) apply and the resolved values are
+    still shown by the REPL startup/status/settings surfaces.
+    """
+    global _INTERACTION_CONSTRUCTOR_SUPPORTED
+    if _INTERACTION_CONSTRUCTOR_SUPPORTED is None:
+        _INTERACTION_CONSTRUCTOR_SUPPORTED = frozenset(
+            inspect.signature(CodingHarness).parameters
+        )
+    supported = _INTERACTION_CONSTRUCTOR_SUPPORTED
+    kwargs: dict[str, str] = {}
+    if "steering_mode" in supported:
+        kwargs["steering_mode"] = steering_mode
+    if "follow_up_mode" in supported:
+        kwargs["follow_up_mode"] = follow_up_mode
+    return kwargs
+
+
 def _build_harness(
     args: argparse.Namespace,
     *,
@@ -340,6 +387,7 @@ def _build_harness(
 
     # SubAgent — explicit opt-in only
     enable_subagent = getattr(args, "enable_subagent", False)
+    steering_mode, follow_up_mode = resolve_interaction_modes(args)
 
     return CodingHarness(
         model=model,
@@ -373,6 +421,10 @@ def _build_harness(
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
         shell_environment=shell_environment,
+        # Lane 1 introduces the frozen interaction constructor names; the
+        # signature guard above keeps this call valid until both Lanes
+        # integrate, after which the cast is a plain passthrough.
+        **cast(Any, _interaction_constructor_kwargs(steering_mode, follow_up_mode)),
     )
 
 
