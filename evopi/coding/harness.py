@@ -28,6 +28,7 @@ from evopi.core.events import CoreEvent
 from evopi.core.messages import SystemMessage
 from evopi.core.model import Model
 from evopi.core.model_attempts import ModelAttemptInfo
+from evopi.core.interaction import InteractionLimits, InteractionQueueMode
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.evolution import PolicyActivationService
 from evopi.harness.base import BaseHarness
@@ -88,6 +89,9 @@ class CodingHarness(BaseHarness):
         resource_warnings: tuple[str, ...] = (),
         policy_activation_service: PolicyActivationService | None = None,
         shell_environment: ShellEnvironment | None = None,
+        steering_mode: InteractionQueueMode = "one-at-a-time",
+        follow_up_mode: InteractionQueueMode = "one-at-a-time",
+        interaction_limits: InteractionLimits | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.shell_environment = (
@@ -214,6 +218,9 @@ class CodingHarness(BaseHarness):
             assembly_warnings=tuple(assembly_warnings),
             policy_activation_service=policy_activation_service,
             defer_policy_activation=True,
+            steering_mode=steering_mode,
+            follow_up_mode=follow_up_mode,
+            interaction_limits=interaction_limits,
         )
 
         # ------------------------------------------------------------------ #

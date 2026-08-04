@@ -7,9 +7,9 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer
@@ -32,6 +32,7 @@ from evopi.cli.product import (
     build_run_result,
     compose_run_prompt,
     format_management_help,
+    resolve_interaction_modes,
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
@@ -40,6 +41,8 @@ from evopi.cli.repl import (
     ReplCommandContext,
     ReplCommandRegistry,
     ReplCompleter,
+    ReplInputPreempted,
+    ReplRunner,
     build_repl_startup_config,
     startup_panel,
 )
@@ -58,6 +61,7 @@ from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness import (
     ConfirmationBroker,
     ConfirmationHandler,
+    ConfirmationResponse,
     InMemoryConfirmationStore,
 )
 from evopi.rpc import RpcError
@@ -73,6 +77,7 @@ _UNREVIEWED_PLUGIN_WARNING = (
     "use plugin review -> approve -> reload for product use"
 )
 _DEFAULT_CONFIRMATION_HANDLER = object()
+_ModalResult = TypeVar("_ModalResult")
 
 
 def _non_negative_int(value: str) -> int:
@@ -201,6 +206,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude-tools",
         metavar="NAME,...",
         help="Disable these registered Tools",
+    )
+
+    interactions_group = parser.add_argument_group("Interactions")
+    interactions_group.add_argument(
+        "--steering-mode",
+        choices=["one-at-a-time", "all"],
+        default=None,
+        help=(
+            "Queue mode for steering input while a Run is active "
+            "(default: EVOPI_STEERING_MODE or one-at-a-time)"
+        ),
+    )
+    interactions_group.add_argument(
+        "--follow-up-mode",
+        choices=["one-at-a-time", "all"],
+        default=None,
+        help=(
+            "Queue mode for follow-up input at a terminal candidate "
+            "(default: EVOPI_FOLLOW_UP_MODE or one-at-a-time)"
+        ),
     )
 
     governance_group = parser.add_argument_group("Governance")
@@ -338,6 +363,7 @@ def _build_harness(
 
     # SubAgent — explicit opt-in only
     enable_subagent = getattr(args, "enable_subagent", False)
+    steering_mode, follow_up_mode = resolve_interaction_modes(args)
 
     return CodingHarness(
         model=model,
@@ -371,6 +397,8 @@ def _build_harness(
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
         shell_environment=shell_environment,
+        steering_mode=steering_mode,
+        follow_up_mode=follow_up_mode,
     )
 
 
@@ -507,17 +535,110 @@ async def _run_one_shot(
             harness.close()
 
 
+class _TerminalEditor:
+    """Preemptible single-owner terminal coordinator.
+
+    Ordinary queue editing remains active while a Run streams. Confirmation
+    and Plugin UI calls acquire modal ownership: they cancel the ordinary
+    PromptToolkit read, wait for its cleanup, perform exactly one modal read,
+    then let the REPL recreate its editor. No two terminal readers overlap.
+    """
+
+    def __init__(self) -> None:
+        self._session: PromptSession[str] | None = None
+        self._state_lock = asyncio.Lock()
+        self._modal_lock = asyncio.Lock()
+        self._modal_complete = asyncio.Event()
+        self._modal_complete.set()
+        self._active_read: asyncio.Task[str] | None = None
+        self._preempted: set[asyncio.Task[str]] = set()
+
+    def attach(self, session: PromptSession[str]) -> None:
+        if self._session is not None:
+            raise RuntimeError("Terminal editor already has a PromptSession")
+        self._session = session
+
+    def _require_session(self) -> PromptSession[str]:
+        if self._session is None:
+            raise RuntimeError("Terminal editor is not attached")
+        return self._session
+
+    async def read(self, label: str) -> str:
+        session = self._require_session()
+        while True:
+            await self._modal_complete.wait()
+            async with self._state_lock:
+                if not self._modal_complete.is_set():
+                    continue
+                task = asyncio.create_task(session.prompt_async(label))
+                self._active_read = task
+            try:
+                return await task
+            except asyncio.CancelledError as exc:
+                if task not in self._preempted:
+                    raise
+                raise ReplInputPreempted from exc
+            finally:
+                async with self._state_lock:
+                    if self._active_read is task:
+                        self._active_read = None
+                    self._preempted.discard(task)
+
+    async def modal_read(self, label: str) -> str:
+        session = self._require_session()
+        return await self.run_modal(lambda: session.prompt_async(label))
+
+    async def run_modal(
+        self,
+        operation: Callable[[], Awaitable[_ModalResult]],
+    ) -> _ModalResult:
+        async with self._modal_lock:
+            self._modal_complete.clear()
+            async with self._state_lock:
+                active = self._active_read
+                if active is not None and not active.done():
+                    self._preempted.add(active)
+                    active.cancel()
+            if active is not None:
+                await asyncio.gather(active, return_exceptions=True)
+            try:
+                return await operation()
+            finally:
+                self._modal_complete.set()
+
+
+def _gated_confirmation_handler(editor: _TerminalEditor) -> ConfirmationHandler:
+    """Give Confirmation modal ownership over the active REPL editor."""
+
+    async def handler(
+        request: Any,
+        *,
+        signal: Any = None,
+    ) -> ConfirmationResponse:
+        async def operation() -> ConfirmationResponse:
+            return await async_terminal_confirmation_handler(
+                request,
+                signal=signal,
+            )
+
+        return await editor.run_modal(operation)
+
+    return handler
+
+
 async def _run_repl(
     args: argparse.Namespace,
     *,
     initial_prompt: str | None = None,
 ) -> int:
-    """Multi-turn REPL: prompt → response → prompt → ..."""
+    """Multi-turn REPL: one coordinated reader, concurrent Run and input."""
     console = Console(file=sys.stderr)
-    harness: CodingHarness | None = None
+    editor = _TerminalEditor()
+    harness = _build_harness(
+        args,
+        confirmation_handler=_gated_confirmation_handler(editor),
+    )
     try:
-        harness = _build_harness(args)
-
         display = ReplDisplay()
         display.set_status(
             f"Model: {harness.model.name} | "
@@ -538,6 +659,7 @@ async def _run_repl(
                 context=command_context,
             )
         )
+        editor.attach(session)
         console.print(startup_panel(command_context))
         for warning in harness.capabilities.warnings:
             console.print(f"[yellow]Warning: {warning}[/]")
@@ -546,55 +668,22 @@ async def _run_repl(
         harness.attach_plugin_ui(
             ReplPluginUI(
                 display=display,
-                prompt=session.prompt_async,
+                prompt=editor.modal_read,
                 console=console,
             )
         )
-        pending_input = initial_prompt
-        while True:
-            if pending_input is not None:
-                user_input = pending_input.strip()
-                pending_input = None
-            else:
-                try:
-                    user_input = (await session.prompt_async("> ")).strip()
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]Aborted.[/]")
-                    return 130
-                except EOFError:
-                    console.print("\n[dim]Goodbye.[/]")
-                    return 0
-
-            if not user_input:
-                continue
-
-            if user_input.startswith("/"):
-                result = await registry.dispatch(command_context, user_input)
-                if result.action == "quit":
-                    console.print("[dim]Goodbye.[/]")
-                    return result.exit_code
-                if result.action != "retry" or result.prompt is None:
-                    continue
-                user_input = result.prompt
-                console.print(f"[dim]Retrying: {user_input[:80]}...[/]")
-
-            command_context.recent_prompt = user_input
-
-            try:
-                display.show_user_message(user_input)
-                display.start_run()
-                await harness.prompt(user_input)
-                display.end_run()
-            except (ValueError, RuntimeError) as exc:
-                display.end_run()
-                console.print(f"[red]Error: {exc}[/]")
-                continue
-            except KeyboardInterrupt:
-                display.end_run()
-                console.print("[yellow][aborted][/]")
-                continue
+        runner = ReplRunner(
+            harness=harness,
+            display=display,
+            console=console,
+            registry=registry,
+            context=command_context,
+            read=editor.read,
+            initial_prompt=initial_prompt,
+        )
+        return await runner.run()
     finally:
-        if harness is not None and not harness.is_running:
+        if not harness.is_running:
             harness.close()
 
 

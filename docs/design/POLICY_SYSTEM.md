@@ -142,6 +142,10 @@ Confirmation Broker 与 RPC 只承载这个决定的交互状态，不是新的 
 因此默认 Policy Pack 不额外请求 Confirmation。它不能写批准快照、活动目录或触发
 Reload；后续 Shell 测试仍按普通 Shell 规则确认，人工 Activation 边界保持不变。
 
+Steering/follow-up 是真人向同一 Run 追加的消息，不新增 Policy Hook，也不代表对任何
+Tool 的授权。输入只在安全点提交为 `UserMessage`；由新上下文产生的 ToolCall 仍按
+`block > require_confirmation > rewrite_args > trigger_validation > allow` 重新裁决。
+
 ## 第一版 Policy 边界
 
 第一版 Policy 系统固定包含 6 项能力：

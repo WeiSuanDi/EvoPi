@@ -170,6 +170,18 @@ are included in the model's dynamic Tool guidance.
 
 On PowerShell, single quotes are recommended when a prompt contains spaces or quotation marks.
 
+While an interactive Run is active, plain submitted text is queued as steering input instead of
+starting a second Run. Use `/steer TEXT` for the same behavior explicitly, `/followup TEXT` to
+continue only when the Run would otherwise finish, and `/abort` to cancel. Steering is delivered
+after a complete model/tool Turn; sibling Tool calls are never split. Follow-up is delivered only
+at a terminal candidate. `--steering-mode` and `--follow-up-mode` select `one-at-a-time` or `all`
+queue draining, with matching `EVOPI_STEERING_MODE` and `EVOPI_FOLLOW_UP_MODE` settings.
+
+The same host-neutral surface is available through Python (`BaseHarness.steer()` and
+`BaseHarness.follow_up()`) and RPC (`run.steer` and `run.follow_up`). Accepted input becomes a
+normal committed `UserMessage`, so Session and model context remain aligned; subsequent Tool
+calls still pass through the existing Policy and Confirmation chain.
+
 ### Sessions
 
 The CLI automatically continues the most recently updated Session for the current workspace.

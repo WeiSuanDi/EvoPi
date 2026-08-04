@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
+import os
+from typing import Any, cast
 
 from evopi import __version__
 from evopi.core.messages import AssistantMessage
+from evopi.core.interaction import InteractionQueueMode
 from evopi.core.model_errors import ModelErrorInfo
+
+_QUEUE_MODES = frozenset({"one-at-a-time", "all"})
 
 
 _MANAGEMENT_ACTIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -156,6 +160,42 @@ def build_run_result(
     }
 
 
+def _resolve_queue_mode(
+    env_name: str,
+    cli_value: str | None,
+) -> InteractionQueueMode:
+    """Strict CLI > environment > ``one-at-a-time`` resolution for one mode."""
+    if cli_value is not None:
+        return cast(InteractionQueueMode, cli_value)
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        if env_value not in _QUEUE_MODES:
+            raise ValueError(f"{env_name} must be one of: one-at-a-time, all")
+        return cast(InteractionQueueMode, env_value)
+    return "one-at-a-time"
+
+
+def resolve_interaction_modes(
+    args: Any,
+) -> tuple[InteractionQueueMode, InteractionQueueMode]:
+    """Resolve ``(steering_mode, follow_up_mode)`` with CLI > env > default.
+
+    CLI values are exact argparse choices; environment values are validated
+    strictly and raise ``ValueError`` when unknown. Modes are startup
+    settings only — there is no live setter in v1.
+    """
+    return (
+        _resolve_queue_mode(
+            "EVOPI_STEERING_MODE",
+            getattr(args, "steering_mode", None),
+        ),
+        _resolve_queue_mode(
+            "EVOPI_FOLLOW_UP_MODE",
+            getattr(args, "follow_up_mode", None),
+        ),
+    )
+
+
 def run_exit_code(end_reason: str) -> int:
     """Map a Core end reason to the public automation exit contract."""
 
@@ -171,6 +211,7 @@ __all__ = [
     "build_run_result",
     "compose_run_prompt",
     "format_management_help",
+    "resolve_interaction_modes",
     "run_exit_code",
     "safe_error_info",
 ]

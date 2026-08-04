@@ -95,13 +95,17 @@ skill
 context compact
 subagent
 policy 复杂治理
-用户插话 / steering / follow-up
 任务树
 trace replay
 supervisor
 ```
 
 它们属于 Harness / Policy / Evolution。
+
+Core 只包含宿主无关的 Run 内消息调度原语：`InteractionQueueController` 负责严格入队、
+原子关闭和安全点投递，AgentLoop 在完整 Turn/兄弟 Tool 批次之后消费 steering，并仅在
+Run 原本即将结束时消费 follow-up。终端编辑器、RPC、持久恢复、授权 UI 和领域规则仍在
+Harness/Host；Core 不识别 slash command，也不建立新的 Tool 或 Policy 执行通道。
 
 ## Lifecycle v2 与四层终止协议
 

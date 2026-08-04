@@ -339,8 +339,13 @@ CodingHarness 的产品宿主：`evopi`/`chat` 负责持续交互，`run` 提供
 终端、桌面 UI、IDE 或未来 RPC 宿主都位于 Harness 外侧。当前本地 Host Integration
 Foundation 由三部分组成：Confirmation Broker 负责可恢复的确认状态，Event Stream
 负责严格编码、递增序号和有界回放，`HarnessRpcHost` 只通过 BaseHarness 公共接口编排
-Run、Abort 和状态查询。它们不下沉到 Core，也不建立第二条 Tool 或 Policy 执行通道。
+Run、Abort、steering、follow-up 和状态查询。Core 仅提供 Run 内、安全点驱动的通用消息
+调度原语；宿主交互和治理仍不下沉，也不建立第二条 Tool 或 Policy 执行通道。
 
 RPC 客户端只能答复由 Policy 创建的 pending request；不能自行创建 Confirmation、
 越过 `block` 或直接调用 Tool。当前 JSONL stdio 传输只面向同机受信宿主，不包含网络
 监听、认证或多租户隔离。
+
+Steering 与 follow-up 都是直接用户输入而非 Policy 决策：前者在完整 Turn 后继续当前
+Run，后者只在终止候选点继续。投递后形成正常 `UserMessage` 并进入 Session；由它触发的
+后续 ToolCall 仍经过原有 Policy、Confirmation、Trace 与 Deadline 链。

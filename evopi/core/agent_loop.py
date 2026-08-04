@@ -12,6 +12,7 @@ from uuid import uuid4
 from evopi.core.cancellation import AbortSignal, call_with_optional_signal
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener, notify
+from evopi.core.interaction import InteractionQueueController
 from evopi.core.messages import AssistantMessage, ToolResultMessage
 from evopi.core.model import Model
 from evopi.core.model_attempts import (
@@ -116,6 +117,7 @@ class AgentLoop:
         run_id: str | None = None,
         signal: AbortSignal | None = None,
         model_attempt_router: ModelAttemptRouter | None = None,
+        interaction_queue: InteractionQueueController | None = None,
     ) -> AssistantMessage:
         result = await self.run_with_result(
             model=model,
@@ -130,6 +132,7 @@ class AgentLoop:
             run_id=run_id,
             signal=signal,
             model_attempt_router=model_attempt_router,
+            interaction_queue=interaction_queue,
         )
         return result.message
 
@@ -148,6 +151,7 @@ class AgentLoop:
         run_id: str | None = None,
         signal: AbortSignal | None = None,
         model_attempt_router: ModelAttemptRouter | None = None,
+        interaction_queue: InteractionQueueController | None = None,
     ) -> AgentLoopResult:
         deadline_event: asyncio.Event | None = None
         deadline_task: asyncio.Task[None] | None = None
@@ -169,6 +173,15 @@ class AgentLoop:
                     return AgentLoopResult(
                         message=self._last_assistant(context),
                         end_reason="deadline_exceeded",
+                    )
+                # Initial safe point: steering queued after the initial Prompt
+                # message and before the first model attempt joins the context.
+                if turn == 1 and interaction_queue is not None:
+                    await interaction_queue.drain_steering(
+                        emit=emit,
+                        run_id=run_id,
+                        signal=signal,
+                        append=context.append,
                     )
                 await notify(
                     emit,
@@ -268,6 +281,19 @@ class AgentLoop:
                         return AgentLoopResult(
                             message=assistant, end_reason="deadline_exceeded"
                         )
+                    if interaction_queue is not None:
+                        continued = await self._settle_interactions_at_turn_end(
+                            interaction_queue,
+                            context=context,
+                            emit=emit,
+                            run_id=run_id,
+                            turn=turn,
+                            signal=signal,
+                            terminal=True,
+                            end_reason="terminated" if should_stop else "completed",
+                        )
+                        if continued:
+                            continue
                     return AgentLoopResult(
                         message=assistant,
                         end_reason="terminated" if should_stop else "completed",
@@ -343,7 +369,34 @@ class AgentLoop:
                         message=assistant, end_reason="deadline_exceeded"
                     )
                 if terminate or should_stop:
+                    if interaction_queue is not None:
+                        continued = await self._settle_interactions_at_turn_end(
+                            interaction_queue,
+                            context=context,
+                            emit=emit,
+                            run_id=run_id,
+                            turn=turn,
+                            signal=signal,
+                            terminal=True,
+                            end_reason="terminated",
+                        )
+                        if continued:
+                            continue
                     return AgentLoopResult(message=assistant, end_reason="terminated")
+                # Safe point for ordinary Tool continuation: steering queued
+                # during this Turn's model stream or Tool batch is delivered
+                # before the next model request.
+                if interaction_queue is not None:
+                    await self._settle_interactions_at_turn_end(
+                        interaction_queue,
+                        context=context,
+                        emit=emit,
+                        run_id=run_id,
+                        turn=turn,
+                        signal=signal,
+                        terminal=False,
+                        end_reason="",
+                    )
 
             raise TurnLimitError(f"Agent loop exceeded {self.max_turns} turns")
         finally:
@@ -397,6 +450,55 @@ class AgentLoop:
         if not isinstance(should_stop, bool):
             raise TypeError("should_stop_after_turn must return bool")
         return should_stop
+
+    async def _settle_interactions_at_turn_end(
+        self,
+        interaction_queue: InteractionQueueController,
+        *,
+        context: AgentContext,
+        emit: EventListener | None,
+        run_id: str | None,
+        turn: int,
+        signal: AbortSignal | None,
+        terminal: bool,
+        end_reason: str,
+    ) -> bool:
+        """Run the safe point after ``turn_end`` / ``after_turn`` processing.
+
+        Steering has priority; at a terminal candidate the runtime atomically
+        drains follow-up or seals admission.  Returns True when the Run must
+        continue with a next model Turn.
+        """
+        if turn >= self.max_turns:
+            # A delivered interaction needs a following model request.  With
+            # no Turn budget left, seal the gate and clear items fail closed
+            # instead of making a max_turns + 1 request.
+            await interaction_queue.seal(
+                emit=emit,
+                run_id=run_id,
+                reason="turn_limit",
+                signal=signal,
+            )
+            return False
+        delivered = await interaction_queue.drain_steering(
+            emit=emit,
+            run_id=run_id,
+            signal=signal,
+            append=context.append,
+        )
+        if delivered:
+            return True
+        if not terminal:
+            return False
+        return bool(
+            await interaction_queue.drain_follow_up_at_terminal(
+                emit=emit,
+                run_id=run_id,
+                reason=end_reason,
+                signal=signal,
+                append=context.append,
+            )
+        )
 
     async def _call_model_with_retry(
         self,

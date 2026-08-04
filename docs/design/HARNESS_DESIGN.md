@@ -259,6 +259,7 @@ Context Provider
 阈值式 Compaction 调度
 Child Harness Factory
 Plugin 能力快照与事务式重装配
+Run 内 steering / follow-up 公共入口与只读队列快照
 ```
 
 Memory 内容策略、Skill 选择、Coding 工具集合和安全 Policy Pack 仍属于 Domain
@@ -269,6 +270,11 @@ Plugin、SubAgent 或 Session 语义塞回 Core。
 收集内置和已授权扩展，校验冲突/依赖，生成最终 System Prompt，创建 Agent 并冻结
 本次 Run 的能力。运行期间禁止 Reload；空闲 Reload 必须先在临时注册表验证，成功后
 整体替换。
+
+`BaseHarness.steer()` 与 `follow_up()` 只是受控宿主输入入口。入队阶段验证 Run、内容、
+容量和模式；投递由 Core 安全点调度。成功投递的内容通过标准 `message_start/end` 进入
+Agent Context 与 Session，失败或未投递内容不会持久化。Harness 不把它们转换成 Tool，
+也不会绕过之后的 Policy/Confirmation。
 
 ## 通用 Plugin Runtime
 
