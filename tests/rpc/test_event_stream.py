@@ -410,3 +410,60 @@ class TestCrossThreadPublish:
         stream.publish(_event(i=1))
         assert len(stream._subscribers) == 0
         stream.close()
+
+
+class TestUnstartedSubscription:
+    def test_aclose_before_iteration_unregisters_deterministically(self) -> None:
+        async def scenario() -> None:
+            stream = EventStream(capacity=10)
+            try:
+                iterator = await stream.subscribe(after_sequence=0)
+                assert len(stream._subscribers) == 1
+                await iterator.aclose()
+                assert len(stream._subscribers) == 0
+                await iterator.aclose()  # idempotent
+                # Publishing after aclose must never error or redeliver.
+                stream.publish(_event(i=1))
+                assert len(stream.replay(after_sequence=0)) == 1
+            finally:
+                stream.close()
+
+        asyncio.run(scenario())
+
+    def test_aclosed_iterator_yields_nothing(self) -> None:
+        async def scenario() -> None:
+            stream = EventStream(capacity=10)
+            try:
+                stream.publish(_event(i=1))
+                iterator = await stream.subscribe(after_sequence=0)
+                await iterator.aclose()
+                consumed = [event.sequence async for event in iterator]
+                assert consumed == []
+            finally:
+                stream.close()
+
+        asyncio.run(scenario())
+
+    def test_aclose_mid_iteration_unregisters(self) -> None:
+        async def scenario() -> None:
+            stream = EventStream(capacity=10)
+            received: list[int] = []
+
+            async def consume() -> None:
+                iterator = await stream.subscribe(after_sequence=0)
+                async for event in iterator:
+                    received.append(event.sequence)
+                    if event.sequence == 1:
+                        await iterator.aclose()  # deterministic mid-iteration close
+                        return
+
+            try:
+                stream.publish(_event(i=1))
+                task = asyncio.create_task(consume())
+                await asyncio.wait_for(task, timeout=2.0)
+                assert received == [1]
+                assert len(stream._subscribers) == 0
+            finally:
+                stream.close()
+
+        asyncio.run(scenario())

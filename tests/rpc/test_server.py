@@ -336,3 +336,106 @@ def test_decision_terminology_matches_confirmation_v2() -> None:
     import evopi.rpc as rpc
 
     assert not hasattr(rpc, "CONFIRMATION_STATUSES")
+
+
+def test_negative_replay_cursor_rejected_before_host() -> None:
+    async def scenario() -> None:
+        host = FakeHost()
+        server = RpcServer(host)
+        response = await server.dispatch(
+            RpcRequest(request_id=_ID, method="events.replay", params={"after_sequence": -1})
+        )
+        assert response.ok is False
+        assert response.error is not None
+        assert response.error.code == "invalid_params"
+        assert host.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_unsafe_host_error_details_redacted_as_internal_error() -> None:
+    async def scenario() -> None:
+        host = FakeHost()
+        host.failures["confirmation.respond"] = RpcHostError(
+            "no_pending_request",
+            "safe message",
+            details={"bad": object()},
+        )
+        server = RpcServer(host)
+        response = await server.dispatch(
+            RpcRequest(
+                request_id=_ID,
+                method="confirmation.respond",
+                params={"request_id": "req-9", "decision": "approve"},
+            )
+        )
+        assert response.ok is False
+        assert response.error is not None
+        assert response.error.code == "internal_error"
+        assert response.error.message == "internal error"
+        assert "object" not in str(response.error)
+        assert "0x" not in str(response.error)
+        # The redacted response must still be wire-encodable.
+        from evopi.rpc import encode_response
+
+        encode_response(response)
+
+    asyncio.run(scenario())
+
+
+def test_invalid_host_error_fields_redacted_as_internal_error() -> None:
+    async def scenario() -> None:
+        bad_errors = [
+            RpcHostError("", "safe message"),  # empty code
+            RpcHostError("boom", ""),  # empty message
+            RpcHostError("boom", "safe message", details=[]),  # non-object details
+            RpcHostError("boom", "safe message", details={"x": float("nan")}),  # non-JSON-safe details
+            RpcHostError(5, "safe message"),  # non-string code
+        ]
+        for failure in bad_errors:
+            host = FakeHost()
+            host.failures["runtime.status"] = failure
+            server = RpcServer(host)
+            response = await server.dispatch(
+                RpcRequest(request_id=_ID, method="runtime.status", params={})
+            )
+            assert response.ok is False
+            assert response.error is not None
+            assert response.error.code == "internal_error"
+            assert response.error.message == "internal error"
+            assert str(response.error) != str(failure)
+            from evopi.rpc import encode_response
+
+            encode_response(response)  # always encodable
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_rejects_codec_invalid_requests_before_host() -> None:
+    async def scenario() -> None:
+        host = FakeHost()
+        server = RpcServer(host)
+        cases = [
+            RpcRequest(request_id=_ID, method="", params={}),  # empty method
+            RpcRequest(request_id=_ID, method="initialize", params=[]),  # type: ignore[arg-type]  # non-object params
+            RpcRequest(request_id=_ID, method="initialize", params={}, schema_version=2),  # bad version
+            RpcRequest(request_id=_ID, method="initialize", params={"x": object()}),  # not JSON-safe
+        ]
+        for request in cases:
+            response = await server.dispatch(request)
+            assert response.ok is False
+            assert response.error is not None
+            assert response.error.code == "invalid_request"
+        assert host.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_with_unusable_request_id_raises_codec_error() -> None:
+    async def scenario() -> None:
+        server = RpcServer(FakeHost())
+        with pytest.raises(Exception) as excinfo:
+            await server.dispatch(RpcRequest(request_id="", method="initialize", params={}))
+        assert excinfo.type.__name__ in ("RpcCodecError", "RpcProtocolError", "RpcError")
+
+    asyncio.run(scenario())

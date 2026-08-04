@@ -23,7 +23,7 @@ import asyncio
 import threading
 import uuid as uuid_module
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from itertools import count
 from typing import TypeAlias
 
@@ -56,6 +56,53 @@ class _Subscriber:
         self.loop = loop
         self.queue: _SubscriberQueue = asyncio.Queue(maxsize=queue_capacity)
         self.failed = False
+
+
+class _Subscription:
+    """Explicit async iterator that unregisters deterministically on ``aclose``.
+
+    Registration happens at subscribe time to preserve the snapshot-at-subscribe
+    replay/live handoff, but ``aclose()`` must work even before the first
+    ``anext()`` — an unstarted subscription would otherwise leak its queue and
+    subscriber entry forever.
+    """
+
+    def __init__(
+        self,
+        stream: EventStream,
+        subscriber: _Subscriber,
+        replayed: tuple[RpcEvent, ...],
+    ) -> None:
+        self._stream = stream
+        self._subscriber = subscriber
+        self._replayed = replayed
+        self._iterator: AsyncGenerator[RpcEvent, None] | None = None
+        self._closed = False
+
+    def __aiter__(self) -> _Subscription:
+        return self
+
+    async def __anext__(self) -> RpcEvent:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._iterator is None:
+            self._iterator = self._stream._iterate(self._subscriber, self._replayed)
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._iterator is not None:
+            await self._iterator.aclose()
+        else:
+            # Never started: unregister directly so nothing leaks.
+            with self._stream._lock:
+                self._stream._subscribers.pop(self._subscriber.subscription_id, None)
 
 
 class EventStream:
@@ -121,7 +168,9 @@ class EventStream:
 
         Registration snapshots retained history and the live cursor under the
         same lock, so the handoff has no gap and no duplicate. Returns an
-        async iterator; callers iterate ``await stream.subscribe(...)``.
+        explicit async iterator whose ``aclose()`` unregisters the subscriber
+        even before the first ``anext()``; callers iterate
+        ``await stream.subscribe(...)``.
         """
         self._check_cursor(after_sequence)
         with self._lock:
@@ -134,13 +183,13 @@ class EventStream:
                 queue_capacity=self._subscriber_queue_capacity,
             )
             self._subscribers[subscriber.subscription_id] = subscriber
-        return self._iterate(subscriber, replayed)
+        return _Subscription(self, subscriber, replayed)
 
     async def _iterate(
         self,
         subscriber: _Subscriber,
         replayed: tuple[RpcEvent, ...],
-    ) -> AsyncIterator[RpcEvent]:
+    ) -> AsyncGenerator[RpcEvent, None]:
         try:
             for event in replayed:
                 yield event

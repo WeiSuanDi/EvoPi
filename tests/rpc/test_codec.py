@@ -169,6 +169,15 @@ class TestStrictDecoding:
             decode_response(
                 _response_line(ok=False, result=None, error={"code": "", "message": "m", "details": {}})
             )
+        # CONTEXT v3: error code, message, and details are all non-empty/non-null.
+        with pytest.raises(RpcCodecError):
+            decode_response(
+                _response_line(ok=False, result=None, error={"code": "c", "message": "", "details": {}})
+            )
+        with pytest.raises(RpcCodecError):
+            decode_response(
+                _response_line(ok=False, result=None, error={"code": "c", "message": "m", "details": None})
+            )
 
     def test_sequence_zero_rejected(self) -> None:
         with pytest.raises(RpcCodecError):
@@ -334,6 +343,8 @@ class TestEncodeValidation:
             self._valid_response(ok="yes"),  # type: ignore[arg-type]  # ok not boolean
             self._valid_response(request_id=""),  # empty request id
             self._valid_response(ok=False, error=RpcErrorInfo(code="", message="m", details={})),
+            self._valid_response(ok=False, error=RpcErrorInfo(code="c", message="", details={})),
+            self._valid_response(ok=False, error=RpcErrorInfo(code="c", message="m", details=[])),  # type: ignore[arg-type]
         ]
         for case in cases:
             with pytest.raises(RpcCodecError):

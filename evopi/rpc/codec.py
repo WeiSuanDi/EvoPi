@@ -176,15 +176,9 @@ def _error_info_payload(info: RpcErrorInfo) -> JsonObject:
         raise RpcCodecError("error must be an error info object")
     return {
         "code": _require_nonempty_str(info.code),
-        "message": _check_str_type(info.message),
+        "message": _require_nonempty_str(info.message),
         "details": _require_dict(info.details),
     }
-
-
-def _check_str_type(value: Any) -> str:
-    if not isinstance(value, str):
-        raise RpcCodecError("expected a string")
-    return value
 
 
 def _response_payload(response: RpcResponse) -> JsonObject:
@@ -329,9 +323,9 @@ def _decode_error_info(value: Any) -> RpcErrorInfo:
     if not isinstance(value, dict) or frozenset(value) != _ERROR_INFO_KEYS:
         raise RpcCodecError("malformed error info")
     code = _require_nonempty_str(value["code"])
-    message = value["message"]
+    message = _require_nonempty_str(value["message"])
     details = value["details"]
-    if not isinstance(message, str) or not isinstance(details, dict):
+    if not isinstance(details, dict):
         raise RpcCodecError("malformed error info")
     return RpcErrorInfo(code=code, message=message, details=details)
 
@@ -358,11 +352,13 @@ def _decode_event_object(obj: JsonObject) -> RpcEvent:
 
 
 def extract_request_id(line: str) -> str | None:
-    """Return the ``request_id`` of a line that failed envelope validation.
+    """Return the ``request_id`` of a request-shaped line that failed validation.
 
-    The connection uses this to answer protocol-invalid requests with an
-    ``invalid_request`` response whenever a usable request id is present;
-    lines that cannot be parsed at all force a clean connection failure.
+    Only request-shaped input (an object containing the request ``method``
+    discriminator) may be answered with ``invalid_request``; response- and
+    event-shaped lines return ``None`` so the connection closes with a
+    structured protocol error instead of entering a response loop. Lines that
+    cannot be parsed at all also return ``None``.
     """
     text = line.strip()
     try:
@@ -371,10 +367,25 @@ def extract_request_id(line: str) -> str | None:
         return None
     if text[end:].strip() or not isinstance(value, dict):
         return None
+    if "method" not in value:
+        return None  # response/event-shaped or unrecognized: never reply invalid_request
     request_id = value.get("request_id")
     if not isinstance(request_id, str) or not request_id:
         return None
     return request_id
+
+
+def validate_request(request: RpcRequest) -> None:
+    """Enforce the wire request invariants on a dataclass instance.
+
+    Used by the generic server at its public dispatch boundary so crafted
+    instances the codec would reject never reach the Host.
+    """
+    payload = _request_payload(request)
+    try:
+        json.dumps(payload, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise RpcCodecError("request is not JSON-safe") from exc
 
 
 def to_event_data(value: Any) -> Any:
@@ -424,4 +435,5 @@ __all__ = [
     "extract_request_id",
     "parse_utc_timestamp",
     "to_event_data",
+    "validate_request",
 ]

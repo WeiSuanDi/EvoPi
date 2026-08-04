@@ -543,3 +543,42 @@ class TestFailClosedEndings:
             await asyncio.sleep(0)
 
         asyncio.run(scenario())
+
+
+def test_malformed_response_line_closes_without_response_loop() -> None:
+    """A response-shaped line must never receive an invalid_request reply."""
+
+    async def scenario() -> None:
+        server = RpcServer(FakeHost())
+        # Response-shaped (has ok, no method) but schema_version is invalid.
+        reader = FakeReader(['{"request_id":"r-1","ok":true,"result":{"n":1},"error":null,"schema_version":2}'])
+        writer = FakeWriter()
+        connection = JsonlRpcConnection(reader, writer, server)
+        with pytest.raises(RpcConnectionProtocolError):
+            await asyncio.wait_for(connection.run(), timeout=2.0)
+        assert connection.closed is True
+        assert writer.lines == []  # no invalid_request response loop
+
+    asyncio.run(scenario())
+
+
+def test_negative_replay_cursor_rejected_on_the_wire() -> None:
+    async def scenario() -> None:
+        host = FakeHost()
+        server = RpcServer(host)
+        reader = BlockingReader(
+            [encode_request(_request("events.replay", params={"after_sequence": -1}))]
+        )
+        writer = FakeWriter()
+        connection = JsonlRpcConnection(reader, writer, server)
+        run_task = asyncio.create_task(connection.run())
+        await _wait_for(lambda: len(writer.lines) == 1)
+        reader.release()
+        await asyncio.wait_for(run_task, timeout=2.0)
+        response = decode_response(writer.lines[0].rstrip("\n"))
+        assert response.ok is False
+        assert response.error is not None
+        assert response.error.code == "invalid_params"
+        assert host.calls == []
+
+    asyncio.run(scenario())

@@ -18,7 +18,8 @@ from typing import Any, Callable, Protocol
 
 from evopi.core.types import JsonObject
 
-from .errors import RpcConnectionClosedError, RpcHostError
+from .codec import validate_request
+from .errors import RpcCodecError, RpcConnectionClosedError, RpcHostError
 from .protocol import RpcErrorInfo, RpcRequest, RpcResponse
 
 CONFIRMATION_DECISIONS = frozenset({"approve", "deny", "cancelled"})
@@ -56,7 +57,7 @@ _PARAM_SCHEMAS: dict[str, dict[str, tuple[str, bool]]] = {
         "responses": ("responses", True),
     },
     "events.replay": {
-        "after_sequence": ("int", True),
+        "after_sequence": ("nonnegative_int", True),
     },
     "shutdown": {},
 }
@@ -101,6 +102,8 @@ def _field_error(kind: str, value: Any) -> str | None:
         return None if isinstance(value, str) else "expected_string"
     if kind == "int":
         return None if type(value) is int else "expected_integer"
+    if kind == "nonnegative_int":
+        return None if type(value) is int and value >= 0 else "expected_nonnegative_integer"
     if kind == "dict":
         return None if isinstance(value, dict) else "expected_object"
     if kind == "decision":
@@ -157,6 +160,17 @@ def _is_json_safe(value: Any) -> bool:
     return True
 
 
+def _safe_host_error(exc: RpcHostError) -> bool:
+    """A Host error may cross the wire only with encodable, non-empty fields."""
+    if not isinstance(exc.code, str) or not exc.code:
+        return False
+    if not isinstance(exc.message, str) or not exc.message:
+        return False
+    if not isinstance(exc.details, dict):
+        return False
+    return _is_json_safe(exc.details)
+
+
 class RpcServer:
     """Validates requests, tracks accepted request IDs, and maps Host failures safely."""
 
@@ -170,6 +184,20 @@ class RpcServer:
         """Handle one request and return its response (Host failures redacted)."""
         if self._closing:
             raise RpcConnectionClosedError("rpc server is closed")
+        try:
+            validate_request(request)
+        except RpcCodecError:
+            # A usable correlated ID may receive invalid_request; an unusable
+            # ID fails with the structured codec error. Either way the Host
+            # never sees the crafted envelope.
+            if isinstance(request.request_id, str) and request.request_id:
+                return error_response(
+                    request.request_id,
+                    "invalid_request",
+                    "invalid request envelope",
+                    {"request_id": request.request_id},
+                )
+            raise
         handler = self._resolve_handler(request.method)
         if handler is None:
             return error_response(
@@ -236,6 +264,15 @@ class RpcServer:
         try:
             result = await handler(request.params)
         except RpcHostError as exc:
+            if not _safe_host_error(exc):
+                # A controlled error that cannot be encoded safely becomes a
+                # redacted internal_error; no raw value enters the response.
+                return error_response(
+                    request.request_id,
+                    "internal_error",
+                    "internal error",
+                    {"method": request.method},
+                )
             return error_response(request.request_id, exc.code, exc.message, exc.details)
         except asyncio.CancelledError:
             raise
