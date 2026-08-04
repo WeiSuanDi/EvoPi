@@ -12,8 +12,6 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import pytest
-
 from evopi.core.context import AgentContext
 from evopi.core.messages import AssistantMessage, UserMessage
 from evopi.core.stream import ModelComplete, ModelStreamEvent
