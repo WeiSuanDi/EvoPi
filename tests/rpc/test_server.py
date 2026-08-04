@@ -73,13 +73,18 @@ class FakeHost:
 _METHODS: list[tuple[str, JsonObject]] = [
     ("initialize", {}),
     ("runtime.status", {}),
-    ("run.start", {}),
+    ("run.start", {"prompt": "hello"}),
     ("run.abort", {}),
     ("confirmation.list", {}),
-    ("confirmation.respond", {"request_id": "req-1", "status": "approved"}),
+    ("confirmation.respond", {"request_id": "req-1", "decision": "approve"}),
     (
         "confirmation.respond_batch",
-        {"responses": [{"request_id": "req-1", "status": "denied"}, {"request_id": "req-2", "status": "approved", "metadata": {"note": "ok"}}]},
+        {
+            "responses": [
+                {"request_id": "req-1", "decision": "deny", "reason": "no"},
+                {"request_id": "req-2", "decision": "approve", "metadata": {"note": "ok"}},
+            ]
+        },
     ),
     ("events.replay", {"after_sequence": 5}),
     ("shutdown", {}),
@@ -118,13 +123,20 @@ def test_invalid_params_rejected_and_host_not_called() -> None:
         server = RpcServer(host)
         cases: list[tuple[str, JsonObject]] = [
             ("run.start", {"extra": 1}),  # unknown key
-            ("confirmation.respond", {"status": "approved"}),  # missing required
-            ("confirmation.respond", {"request_id": "r", "status": "pending"}),  # bad status
-            ("confirmation.respond", {"request_id": "r", "status": "approved", "metadata": []}),  # wrong type
+            ("run.start", {}),  # missing prompt
+            ("run.start", {"prompt": ""}),  # empty prompt
+            ("confirmation.respond", {"decision": "approve"}),  # missing required
+            ("confirmation.respond", {"request_id": "r", "decision": "pending"}),  # old status term
+            ("confirmation.respond", {"request_id": "", "decision": "approve"}),  # empty request id
+            ("confirmation.respond", {"request_id": "r", "decision": "approve", "reason": 5}),  # non-string reason
+            ("confirmation.respond", {"request_id": "r", "decision": "approve", "metadata": []}),  # wrong type
+            ("confirmation.respond", {"request_id": "r", "status": "approved"}),  # status key unknown
             ("events.replay", {"after_sequence": True}),  # boolean as integer
             ("events.replay", {"after_sequence": "5"}),  # string as integer
-            ("confirmation.respond_batch", {"responses": [{"status": "approved"}]}),  # missing batch field
-            ("confirmation.respond_batch", {"responses": [{"request_id": "r", "status": "approved", "extra": 1}]}),  # extra batch field
+            ("confirmation.respond_batch", {"responses": [{"decision": "approve"}]}),  # missing batch field
+            ("confirmation.respond_batch", {"responses": [{"request_id": "", "decision": "approve"}]}),  # empty batch id
+            ("confirmation.respond_batch", {"responses": [{"request_id": "r", "decision": "approve", "reason": 5}]}),  # bad batch reason
+            ("confirmation.respond_batch", {"responses": [{"request_id": "r", "status": "approved"}]}),  # status key in batch
             ("confirmation.respond_batch", {"responses": "nope"}),  # wrong shape
         ]
         for method, params in cases:
@@ -142,7 +154,7 @@ def test_duplicate_request_id_rejected_and_host_called_once() -> None:
         host = FakeHost()
         host.delays["run.start"] = 0.05
         server = RpcServer(host)
-        request = RpcRequest(request_id="dup-1", method="run.start", params={})
+        request = RpcRequest(request_id="dup-1", method="run.start", params={"prompt": "hello"})
         first = asyncio.create_task(server.dispatch(request))
         await asyncio.sleep(0)  # let the first dispatch register as in-flight
         duplicate = await server.dispatch(request)
@@ -159,9 +171,9 @@ def test_concurrent_run_rejection_maps_to_run_already_active() -> None:
     async def scenario() -> None:
         host = FakeHost()
         server = RpcServer(host)
-        first = await server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={}))
+        first = await server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={"prompt": "hello"}))
         assert first.ok is True
-        second = await server.dispatch(RpcRequest(request_id="other", method="run.start", params={}))
+        second = await server.dispatch(RpcRequest(request_id="other", method="run.start", params={"prompt": "hello"}))
         assert second.ok is False
         assert second.error is not None
         assert second.error.code == "run_already_active"
@@ -197,7 +209,11 @@ def test_host_error_code_message_and_details_are_echoed() -> None:
         )
         server = RpcServer(host)
         response = await server.dispatch(
-            RpcRequest(request_id=_ID, method="confirmation.respond", params={"request_id": "req-9", "status": "approved"})
+            RpcRequest(
+                request_id=_ID,
+                method="confirmation.respond",
+                params={"request_id": "req-9", "decision": "approve"},
+            )
         )
         assert response.ok is False
         assert response.error == RpcErrorInfo(
@@ -242,7 +258,7 @@ def test_close_cancels_inflight_and_is_idempotent() -> None:
         host = FakeHost()
         host.delays["run.start"] = 5.0
         server = RpcServer(host)
-        task = asyncio.create_task(server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={})))
+        task = asyncio.create_task(server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={"prompt": "hello"})))
         await asyncio.sleep(0)  # dispatch registered and running
         await server.close()
         await asyncio.sleep(0)
@@ -257,6 +273,66 @@ def test_dispatch_after_close_is_rejected() -> None:
         server = RpcServer(FakeHost())
         await server.close()
         with pytest.raises(RpcConnectionClosedError):
-            await server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={}))
+            await server.dispatch(RpcRequest(request_id=_ID, method="run.start", params={"prompt": "hello"}))
 
     asyncio.run(scenario())
+
+
+def test_duplicate_request_id_rejected_after_completion() -> None:
+    """Reuse after completion is still a duplicate for the server lifetime."""
+
+    async def scenario() -> None:
+        host = FakeHost()
+        server = RpcServer(host)
+        request = RpcRequest(request_id="seq-1", method="run.start", params={"prompt": "hello"})
+        first = await server.dispatch(request)
+        assert first.ok is True
+        second = await server.dispatch(request)  # sequential reuse
+        assert second.ok is False
+        assert second.error is not None
+        assert second.error.code == "duplicate_request"
+        assert len(host.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_request_id_rejected_after_failure() -> None:
+    """Reuse after a failed dispatch is also rejected; the Host never runs twice."""
+
+    async def scenario() -> None:
+        host = FakeHost()
+        host.failures["runtime.status"] = RuntimeError("boom")
+        server = RpcServer(host)
+        request = RpcRequest(request_id="fail-1", method="runtime.status", params={})
+        first = await server.dispatch(request)
+        assert first.ok is False
+        assert first.error is not None
+        assert first.error.code == "internal_error"
+        second = await server.dispatch(request)
+        assert second.ok is False
+        assert second.error is not None
+        assert second.error.code == "duplicate_request"
+        assert len(host.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_seen_request_ids_released_only_on_close() -> None:
+    async def scenario() -> None:
+        server = RpcServer(FakeHost())
+        await server.dispatch(RpcRequest(request_id="x-1", method="initialize", params={}))
+        assert "x-1" in server._seen_ids
+        await server.close()
+        assert server._seen_ids == set()
+
+    asyncio.run(scenario())
+
+
+def test_decision_terminology_matches_confirmation_v2() -> None:
+    from evopi.rpc import CONFIRMATION_DECISIONS
+
+    assert CONFIRMATION_DECISIONS == frozenset({"approve", "deny", "cancelled"})
+    # The legacy status alias must not exist in the v1 public surface.
+    import evopi.rpc as rpc
+
+    assert not hasattr(rpc, "CONFIRMATION_STATUSES")
