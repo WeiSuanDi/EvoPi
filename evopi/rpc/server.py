@@ -28,6 +28,8 @@ _METHOD_HANDLERS: dict[str, str] = {
     "initialize": "initialize",
     "runtime.status": "runtime_status",
     "run.start": "run_start",
+    "run.steer": "run_steer",
+    "run.follow_up": "run_follow_up",
     "run.abort": "run_abort",
     "confirmation.list": "confirmation_list",
     "confirmation.respond": "confirmation_respond",
@@ -44,6 +46,12 @@ _PARAM_SCHEMAS: dict[str, dict[str, tuple[str, bool]]] = {
     "runtime.status": {},
     "run.start": {
         "prompt": ("nonempty_str", True),
+    },
+    "run.steer": {
+        "content": ("nonempty_str", True),
+    },
+    "run.follow_up": {
+        "content": ("nonempty_str", True),
     },
     "run.abort": {},
     "confirmation.list": {},
@@ -73,6 +81,8 @@ class RpcHost(Protocol):
     async def initialize(self, params: JsonObject) -> JsonObject: ...
     async def runtime_status(self, params: JsonObject) -> JsonObject: ...
     async def run_start(self, params: JsonObject) -> JsonObject: ...
+    async def run_steer(self, params: JsonObject) -> JsonObject: ...
+    async def run_follow_up(self, params: JsonObject) -> JsonObject: ...
     async def run_abort(self, params: JsonObject) -> JsonObject: ...
     async def confirmation_list(self, params: JsonObject) -> JsonObject: ...
     async def confirmation_respond(self, params: JsonObject) -> JsonObject: ...
