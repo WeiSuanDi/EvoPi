@@ -401,3 +401,151 @@ def test_expired_timestamp_is_preserved() -> None:
     original = _request(expires_at=expires)
     restored = decode_request(encode_request(original))
     assert restored.expires_at == expires
+
+
+# ---------------------------------------------------------------------------
+# Finding A (rev 2): terminal state and response semantics
+# ---------------------------------------------------------------------------
+
+
+def test_decode_rejects_pending_record_with_response() -> None:
+    payload = encode_record(_record())
+    payload["response"] = encode_response(_response())
+    with pytest.raises(ConfirmationFormatError, match="must not carry a response"):
+        decode_record(payload)
+
+
+def test_decode_rejects_orphaned_record_with_response() -> None:
+    payload = encode_record(_record(status="orphaned"))
+    payload["response"] = encode_response(_response())
+    with pytest.raises(ConfirmationFormatError, match="must not carry a response"):
+        decode_record(payload)
+
+
+def test_decode_rejects_approved_with_deny_decision() -> None:
+    payload = encode_record(_record(status="approved", response=_response()))
+    payload["response"]["decision"] = "deny"
+    with pytest.raises(ConfirmationFormatError, match="requires decision 'approve'"):
+        decode_record(payload)
+
+
+def test_decode_rejects_cancelled_with_approve_decision() -> None:
+    payload = encode_record(_record(status="cancelled", response=_response(decision="cancelled")))
+    payload["response"]["decision"] = "approve"
+    with pytest.raises(ConfirmationFormatError, match="requires decision 'cancelled'"):
+        decode_record(payload)
+
+
+def test_decode_rejects_human_decision_without_response() -> None:
+    payload = encode_record(_record(status="denied", response=_response(decision="deny")))
+    payload["response"] = None
+    with pytest.raises(ConfirmationFormatError, match="requires a correlated response"):
+        decode_record(payload)
+
+
+def _expired_payload() -> dict[str, object]:
+    return encode_record(
+        _record(
+            status="expired",
+            response=_response(
+                decision="deny", metadata={"automatic": True, "expired": True}
+            ),
+        )
+    )
+
+
+def test_decode_rejects_expired_without_response() -> None:
+    payload = _expired_payload()
+    payload["response"] = None
+    with pytest.raises(ConfirmationFormatError, match="requires a correlated response"):
+        decode_record(payload)
+
+
+def test_decode_rejects_expired_with_approve_decision() -> None:
+    payload = _expired_payload()
+    payload["response"]["decision"] = "approve"
+    with pytest.raises(ConfirmationFormatError, match="deny decision"):
+        decode_record(payload)
+
+
+def test_decode_rejects_expired_without_automatic_metadata() -> None:
+    payload = _expired_payload()
+    payload["response"]["metadata"] = {"expired": True}
+    with pytest.raises(ConfirmationFormatError, match="metadata.automatic"):
+        decode_record(payload)
+
+
+def test_decode_rejects_expired_without_expired_metadata() -> None:
+    payload = _expired_payload()
+    payload["response"]["metadata"] = {"automatic": True}
+    with pytest.raises(ConfirmationFormatError, match="metadata.expired"):
+        decode_record(payload)
+
+
+def test_decode_rejects_uncorrelated_response() -> None:
+    payload = encode_record(_record(status="approved", response=_response()))
+    payload["response"]["request_id"] = "b" * 32
+    with pytest.raises(ConfirmationFormatError, match="does not correlate"):
+        decode_record(payload)
+
+
+def test_decode_rejects_zero_revision() -> None:
+    payload = encode_record(_record())
+    payload["revision"] = 0
+    with pytest.raises(ConfirmationFormatError, match="positive"):
+        decode_record(payload)
+
+
+def test_encode_rejects_invalid_record_invariants() -> None:
+    # Encoders must reject what the decoder would reject (Finding F).
+    with pytest.raises(ConfirmationFormatError, match="requires a correlated response"):
+        encode_record(_record(status="approved"))
+    with pytest.raises(ConfirmationFormatError, match="must not carry a response"):
+        encode_record(_record(status="orphaned", response=_response()))
+    with pytest.raises(ConfirmationFormatError, match="positive"):
+        encode_record(_record(revision=0))
+
+
+# ---------------------------------------------------------------------------
+# Finding F (rev 2): UTC offset zero and encoder strictness
+# ---------------------------------------------------------------------------
+
+
+def test_nonzero_utc_offset_datetime_is_rejected() -> None:
+    payload = encode_request(_request())
+    payload["created_at"] = "2026-08-04T10:00:00+05:00"
+    with pytest.raises(ConfirmationFormatError, match="UTC"):
+        decode_request(payload)
+
+
+def test_zero_utc_offset_datetime_is_accepted() -> None:
+    payload = encode_request(_request())
+    payload["created_at"] = "2026-08-04T10:00:00+00:00"
+    restored = decode_request(payload)
+    assert restored.created_at.utcoffset() == timedelta(0)
+
+
+def test_encode_rejects_non_string_policy_names() -> None:
+    with pytest.raises(ConfirmationFormatError, match="policy_names"):
+        encode_request(_request(policy_names=("ok", 42)))  # type: ignore[arg-type]
+
+
+def test_encode_rejects_non_object_arguments() -> None:
+    with pytest.raises(ConfirmationFormatError, match="must be an object"):
+        encode_request(_request(arguments=["not", "an", "object"]))  # type: ignore[arg-type]
+
+
+def test_encode_rejects_non_object_metadata() -> None:
+    with pytest.raises(ConfirmationFormatError, match="must be an object"):
+        encode_request(_request(metadata=["not", "an", "object"]))  # type: ignore[arg-type]
+
+
+def test_settings_rejects_non_positive_timeout() -> None:
+    for bad in (0, -1, 0.0, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            ConfirmationSettings(timeout_seconds=bad)  # type: ignore[arg-type]
+
+
+def test_settings_accepts_positive_or_none_timeout() -> None:
+    assert ConfirmationSettings().timeout_seconds is None
+    assert ConfirmationSettings(timeout_seconds=5.0).timeout_seconds == 5.0

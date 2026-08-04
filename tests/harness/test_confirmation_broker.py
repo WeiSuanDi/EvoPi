@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -15,6 +16,7 @@ from evopi.harness.confirmation import (
     ConfirmationRequest,
     ConfirmationResponse,
     ConfirmationSettings,
+    ConfirmationStoreClosedError,
     ConfirmationUnknownRequestError,
 )
 from evopi.harness.confirmation_broker import ConfirmationBroker
@@ -27,6 +29,18 @@ from evopi.harness.confirmation_store import (
 def _request(request_id: str) -> ConfirmationRequest:
     return ConfirmationRequest(
         hook="before_tool_call", reason="requires approval", id=request_id
+    )
+
+
+def _expiring_request(request_id: str) -> ConfirmationRequest:
+    # A past deadline fires the timeout on the first loop pass, keeping the
+    # race deterministic without wall-clock sleeps (Finding F: timeout_seconds
+    # must be strictly positive, so settings cannot express an instant fire).
+    return ConfirmationRequest(
+        hook="before_tool_call",
+        reason="requires approval",
+        id=request_id,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
 
 
@@ -82,10 +96,8 @@ def test_signal_without_abort_waits_for_submit() -> None:
 def test_timeout_persists_expired_and_returns_automatic_deny() -> None:
     async def scenario() -> None:
         store = InMemoryConfirmationStore()
-        broker = ConfirmationBroker(
-            store, settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
-        result = await broker.request(_request("req-1"))
+        broker = ConfirmationBroker(store)
+        result = await broker.request(_expiring_request("req-1"))
 
         assert result.decision == "deny"
         assert result.metadata == {"automatic": True, "expired": True}
@@ -102,10 +114,8 @@ def test_timeout_persists_expired_and_returns_automatic_deny() -> None:
 def test_timeout_is_not_an_abort() -> None:
     async def scenario() -> None:
         store = InMemoryConfirmationStore()
-        broker = ConfirmationBroker(
-            store, settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
-        result = await broker.request(_request("req-1"))
+        broker = ConfirmationBroker(store)
+        result = await broker.request(_expiring_request("req-1"))
         record = store.get("req-1")
         assert result.decision == "deny"
         assert record is not None and record.status == "expired"
@@ -117,10 +127,8 @@ def test_timeout_is_not_an_abort() -> None:
 def test_committed_response_beats_timeout_with_one_transition() -> None:
     async def scenario() -> None:
         store = InMemoryConfirmationStore()
-        broker = ConfirmationBroker(
-            store, settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
-        task = asyncio.create_task(broker.request(_request("req-1")))
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_expiring_request("req-1")))
         await asyncio.sleep(0)  # record created, race (with timeout) awaiting
 
         # The commit completes before the race round, so the response wins.
@@ -140,11 +148,9 @@ def test_abort_beats_timeout() -> None:
     async def scenario() -> None:
         controller = AbortController(loop=asyncio.get_running_loop())
         store = InMemoryConfirmationStore()
-        broker = ConfirmationBroker(
-            store, settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
+        broker = ConfirmationBroker(store)
         task = asyncio.create_task(
-            broker.request(_request("req-1"), signal=controller.signal)
+            broker.request(_expiring_request("req-1"), signal=controller.signal)
         )
         await asyncio.sleep(0)
         controller.abort()
@@ -242,10 +248,8 @@ def test_unknown_request_rejected() -> None:
 
 def test_submit_after_timeout_raises_expired() -> None:
     async def scenario() -> None:
-        broker = ConfirmationBroker(
-            InMemoryConfirmationStore(), settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
-        result = await broker.request(_request("req-1"))
+        broker = ConfirmationBroker(InMemoryConfirmationStore())
+        result = await broker.request(_expiring_request("req-1"))
         assert result.decision == "deny"
 
         with pytest.raises(ConfirmationExpiredError):
@@ -344,7 +348,9 @@ def test_closed_broker_rejects_requests_and_submits() -> None:
             )
         with pytest.raises(ConfirmationBrokerClosedError):
             broker.list_pending()
-        assert store.get("req-1") is None  # nothing was created
+        # Nothing was created, and the closed store rejects reads too.
+        with pytest.raises(ConfirmationStoreClosedError):
+            store.get("req-1")
 
     asyncio.run(scenario())
 
@@ -383,15 +389,96 @@ def test_default_settings_waits_forever_until_close() -> None:
 
 def test_no_unresolved_tasks_after_timeout() -> None:
     async def scenario() -> None:
-        broker = ConfirmationBroker(
-            InMemoryConfirmationStore(), settings=ConfirmationSettings(timeout_seconds=0.0)
-        )
-        result = await broker.request(_request("req-1"))
+        broker = ConfirmationBroker(InMemoryConfirmationStore())
+        result = await broker.request(_expiring_request("req-1"))
         assert result.decision == "deny"
 
         current = asyncio.current_task()
         pending = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
         assert pending == []
+
+    asyncio.run(scenario())
+
+
+def test_settings_timeout_must_be_finite_and_positive() -> None:
+    for bad in (0, -1, 0.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            ConfirmationSettings(timeout_seconds=bad)  # type: ignore[arg-type]
+    assert ConfirmationSettings(timeout_seconds=0.001).timeout_seconds == 0.001
+    assert ConfirmationSettings().timeout_seconds is None
+
+
+def test_external_cancellation_persists_cancelled_and_cleans_up() -> None:
+    async def scenario() -> None:
+        store = InMemoryConfirmationStore()
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_request("req-1")))
+        await asyncio.sleep(0)
+
+        task.cancel()
+        try:
+            await task
+            raise AssertionError("expected CancelledError")
+        except asyncio.CancelledError:
+            pass
+
+        record = store.get("req-1")
+        assert record is not None
+        assert record.status == "cancelled"
+        assert record.response is not None
+        assert record.response.decision == "cancelled"
+        assert record.response.metadata == {"automatic": True, "cancelled": True}
+
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+        assert pending == []
+
+    asyncio.run(scenario())
+
+
+def test_external_cancellation_with_timeout_cleans_race_tasks() -> None:
+    async def scenario() -> None:
+        store = InMemoryConfirmationStore()
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_expiring_request("req-1")))
+        await asyncio.sleep(0)  # race created with a timeout task
+
+        task.cancel()
+        try:
+            await task
+            raise AssertionError("expected CancelledError")
+        except asyncio.CancelledError:
+            pass
+
+        record = store.get("req-1")
+        assert record is not None
+        assert record.status == "cancelled"
+        assert record.response is not None
+        assert record.response.metadata == {"automatic": True, "cancelled": True}
+
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+        assert pending == []
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_wait_rejects_late_response() -> None:
+    async def scenario() -> None:
+        store = InMemoryConfirmationStore()
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_request("req-1")))
+        await asyncio.sleep(0)
+
+        task.cancel()
+        await asyncio.sleep(0)  # cancellation handler persists `cancelled`
+        with pytest.raises(ConfirmationDuplicateResponseError):
+            await broker.submit(_response("req-1"))
+
+        record = store.get("req-1")
+        assert record is not None
+        assert record.status == "cancelled"
+        assert record.revision == 2  # exactly one terminal transition
 
     asyncio.run(scenario())
 
