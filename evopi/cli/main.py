@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer
@@ -42,6 +41,7 @@ from evopi.cli.repl import (
     ReplCommandContext,
     ReplCommandRegistry,
     ReplCompleter,
+    ReplInputPreempted,
     ReplRunner,
     build_repl_startup_config,
     startup_panel,
@@ -77,7 +77,7 @@ _UNREVIEWED_PLUGIN_WARNING = (
     "use plugin review -> approve -> reload for product use"
 )
 _DEFAULT_CONFIRMATION_HANDLER = object()
-_INTERACTION_CONSTRUCTOR_SUPPORTED: frozenset[str] | None = None
+_ModalResult = TypeVar("_ModalResult")
 
 
 def _non_negative_int(value: str) -> int:
@@ -312,30 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _interaction_constructor_kwargs(
-    steering_mode: str,
-    follow_up_mode: str,
-) -> dict[str, str]:
-    """Pass the frozen interaction constructor names when the local Harness
-    already accepts them. Lane 1 introduces ``steering_mode`` and
-    ``follow_up_mode`` on BaseHarness; until both Lanes are integrated, the
-    Harness defaults (``one-at-a-time``) apply and the resolved values are
-    still shown by the REPL startup/status/settings surfaces.
-    """
-    global _INTERACTION_CONSTRUCTOR_SUPPORTED
-    if _INTERACTION_CONSTRUCTOR_SUPPORTED is None:
-        _INTERACTION_CONSTRUCTOR_SUPPORTED = frozenset(
-            inspect.signature(CodingHarness).parameters
-        )
-    supported = _INTERACTION_CONSTRUCTOR_SUPPORTED
-    kwargs: dict[str, str] = {}
-    if "steering_mode" in supported:
-        kwargs["steering_mode"] = steering_mode
-    if "follow_up_mode" in supported:
-        kwargs["follow_up_mode"] = follow_up_mode
-    return kwargs
-
-
 def _build_harness(
     args: argparse.Namespace,
     *,
@@ -421,10 +397,8 @@ def _build_harness(
         resource_warnings=resource_warnings,
         policy_activation_service=_policy_activation_service_from_args(args),
         shell_environment=shell_environment,
-        # Lane 1 introduces the frozen interaction constructor names; the
-        # signature guard above keeps this call valid until both Lanes
-        # integrate, after which the cast is a plain passthrough.
-        **cast(Any, _interaction_constructor_kwargs(steering_mode, follow_up_mode)),
+        steering_mode=steering_mode,
+        follow_up_mode=follow_up_mode,
     )
 
 
@@ -562,37 +536,92 @@ async def _run_one_shot(
 
 
 class _TerminalEditor:
-    """One terminal reader at a time: REPL input, Confirmation, and Plugin UI.
+    """Preemptible single-owner terminal coordinator.
 
-    All prompt reads serialize on one lock so two terminal readers never run
-    concurrently; a modal prompt (Confirmation/Plugin UI) waits for the active
-    input read to finish and vice versa. Queue editing is therefore suspended
-    before a modal prompt and recreated after it; a partially typed line is
-    never split between readers.
+    Ordinary queue editing remains active while a Run streams. Confirmation
+    and Plugin UI calls acquire modal ownership: they cancel the ordinary
+    PromptToolkit read, wait for its cleanup, perform exactly one modal read,
+    then let the REPL recreate its editor. No two terminal readers overlap.
     """
 
-    def __init__(self, session: PromptSession[str], lock: asyncio.Lock) -> None:
+    def __init__(self) -> None:
+        self._session: PromptSession[str] | None = None
+        self._state_lock = asyncio.Lock()
+        self._modal_lock = asyncio.Lock()
+        self._modal_complete = asyncio.Event()
+        self._modal_complete.set()
+        self._active_read: asyncio.Task[str] | None = None
+        self._preempted: set[asyncio.Task[str]] = set()
+
+    def attach(self, session: PromptSession[str]) -> None:
+        if self._session is not None:
+            raise RuntimeError("Terminal editor already has a PromptSession")
         self._session = session
-        self._lock = lock
+
+    def _require_session(self) -> PromptSession[str]:
+        if self._session is None:
+            raise RuntimeError("Terminal editor is not attached")
+        return self._session
 
     async def read(self, label: str) -> str:
-        async with self._lock:
-            return await self._session.prompt_async(label)
+        session = self._require_session()
+        while True:
+            await self._modal_complete.wait()
+            async with self._state_lock:
+                if not self._modal_complete.is_set():
+                    continue
+                task = asyncio.create_task(session.prompt_async(label))
+                self._active_read = task
+            try:
+                return await task
+            except asyncio.CancelledError as exc:
+                if task not in self._preempted:
+                    raise
+                raise ReplInputPreempted from exc
+            finally:
+                async with self._state_lock:
+                    if self._active_read is task:
+                        self._active_read = None
+                    self._preempted.discard(task)
+
+    async def modal_read(self, label: str) -> str:
+        session = self._require_session()
+        return await self.run_modal(lambda: session.prompt_async(label))
+
+    async def run_modal(
+        self,
+        operation: Callable[[], Awaitable[_ModalResult]],
+    ) -> _ModalResult:
+        async with self._modal_lock:
+            self._modal_complete.clear()
+            async with self._state_lock:
+                active = self._active_read
+                if active is not None and not active.done():
+                    self._preempted.add(active)
+                    active.cancel()
+            if active is not None:
+                await asyncio.gather(active, return_exceptions=True)
+            try:
+                return await operation()
+            finally:
+                self._modal_complete.set()
 
 
-def _gated_confirmation_handler(lock: asyncio.Lock) -> ConfirmationHandler:
-    """Serialize terminal confirmation reads with the REPL input reader."""
+def _gated_confirmation_handler(editor: _TerminalEditor) -> ConfirmationHandler:
+    """Give Confirmation modal ownership over the active REPL editor."""
 
     async def handler(
         request: Any,
         *,
         signal: Any = None,
     ) -> ConfirmationResponse:
-        async with lock:
+        async def operation() -> ConfirmationResponse:
             return await async_terminal_confirmation_handler(
                 request,
                 signal=signal,
             )
+
+        return await editor.run_modal(operation)
 
     return handler
 
@@ -604,10 +633,10 @@ async def _run_repl(
 ) -> int:
     """Multi-turn REPL: one coordinated reader, concurrent Run and input."""
     console = Console(file=sys.stderr)
-    reader_lock = asyncio.Lock()
+    editor = _TerminalEditor()
     harness = _build_harness(
         args,
-        confirmation_handler=_gated_confirmation_handler(reader_lock),
+        confirmation_handler=_gated_confirmation_handler(editor),
     )
     try:
         display = ReplDisplay()
@@ -630,7 +659,7 @@ async def _run_repl(
                 context=command_context,
             )
         )
-        editor = _TerminalEditor(session=session, lock=reader_lock)
+        editor.attach(session)
         console.print(startup_panel(command_context))
         for warning in harness.capabilities.warnings:
             console.print(f"[yellow]Warning: {warning}[/]")
@@ -639,7 +668,7 @@ async def _run_repl(
         harness.attach_plugin_ui(
             ReplPluginUI(
                 display=display,
-                prompt=editor.read,
+                prompt=editor.modal_read,
                 console=console,
             )
         )

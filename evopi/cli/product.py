@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Any
+from typing import Any, cast
 
 from evopi import __version__
 from evopi.core.messages import AssistantMessage
+from evopi.core.interaction import InteractionQueueMode
 from evopi.core.model_errors import ModelErrorInfo
 
 _QUEUE_MODES = frozenset({"one-at-a-time", "all"})
@@ -159,19 +160,24 @@ def build_run_result(
     }
 
 
-def _resolve_queue_mode(env_name: str, cli_value: str | None) -> str:
+def _resolve_queue_mode(
+    env_name: str,
+    cli_value: str | None,
+) -> InteractionQueueMode:
     """Strict CLI > environment > ``one-at-a-time`` resolution for one mode."""
     if cli_value is not None:
-        return cli_value
+        return cast(InteractionQueueMode, cli_value)
     env_value = os.getenv(env_name)
     if env_value is not None:
         if env_value not in _QUEUE_MODES:
             raise ValueError(f"{env_name} must be one of: one-at-a-time, all")
-        return env_value
+        return cast(InteractionQueueMode, env_value)
     return "one-at-a-time"
 
 
-def resolve_interaction_modes(args: Any) -> tuple[str, str]:
+def resolve_interaction_modes(
+    args: Any,
+) -> tuple[InteractionQueueMode, InteractionQueueMode]:
     """Resolve ``(steering_mode, follow_up_mode)`` with CLI > env > default.
 
     CLI values are exact argparse choices; environment values are validated

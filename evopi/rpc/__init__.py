@@ -1,8 +1,8 @@
 """Host-neutral RPC v1: strict JSONL envelopes, bounded Event Stream, generic server.
 
-This package is transport-neutral and process-local. It must not be connected
-to BaseHarness or the top-level CLI within lane scope; that wiring is reserved
-for Integration (``evopi/rpc/harness_host.py`` and the CLI route).
+This package is transport-neutral and process-local. ``HarnessRpcHost`` binds
+the protocol to the public ``BaseHarness`` surface without creating a second
+Tool, Policy, or Session execution path.
 """
 
 from __future__ import annotations

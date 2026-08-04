@@ -81,6 +81,13 @@ Session operations (`/new`, `/branch`, `/switch`, `/merge`, `/compact`) always c
 APIs. `/reload` transactionally refreshes approved Plugin and Policy artifacts and retains the old
 snapshot on failure.
 
+During an active Run, ordinary submitted text is steering. `/steer TEXT` makes that intent
+explicit, `/followup TEXT` queues terminal-only continuation, and `/abort` remains immediate
+cancellation. The editor keeps accepting input while the Run streams; modal Confirmation or
+Plugin UI preempts the background read, owns the terminal exclusively, and then restores it.
+Queue modes are selected at startup and status surfaces expose only counts and receipts, never
+queued content.
+
 ## Dynamic Coding prompt
 
 `CodingHarness` builds a compact System Prompt from the final active Tool view. Each Tool may

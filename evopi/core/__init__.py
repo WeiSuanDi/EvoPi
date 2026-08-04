@@ -5,6 +5,20 @@ from evopi.core.agent_loop import AgentLoop, ShouldStopAfterTurn
 from evopi.core.cancellation import AbortSignal
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent
+from evopi.core.interaction import (
+    InteractionContentError,
+    InteractionContentTooLargeError,
+    InteractionError,
+    InteractionKind,
+    InteractionLimits,
+    InteractionModeError,
+    InteractionOrigin,
+    InteractionQueueClosedError,
+    InteractionQueueFullError,
+    InteractionQueueMode,
+    InteractionQueueSnapshot,
+    InteractionReceipt,
+)
 from evopi.core.messages import (
     AssistantMessage,
     Message,
@@ -38,6 +52,18 @@ __all__ = [
     "AgentRunState",
     "AssistantMessage",
     "CoreEvent",
+    "InteractionContentError",
+    "InteractionContentTooLargeError",
+    "InteractionError",
+    "InteractionKind",
+    "InteractionLimits",
+    "InteractionModeError",
+    "InteractionOrigin",
+    "InteractionQueueClosedError",
+    "InteractionQueueFullError",
+    "InteractionQueueMode",
+    "InteractionQueueSnapshot",
+    "InteractionReceipt",
     "Message",
     "Model",
     "ModelAttemptInfo",

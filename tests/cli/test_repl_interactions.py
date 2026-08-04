@@ -1,9 +1,8 @@
 """Concurrent REPL controller tests (SFU-2 Task 2).
 
 The runner drives a structural fake Harness so the busy/idle state machine,
-command gating, single-render queueing, and Task settling are tested without
-Lane 1 production symbols. The real CodingHarness binding is proven in
-Integration.
+command gating, single-render queueing, and Task settling stay isolated from
+model and Session behavior. Core and Harness suites cover the real binding.
 """
 
 from __future__ import annotations
@@ -12,18 +11,21 @@ import asyncio
 from io import StringIO
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 
+from evopi.cli.main import _TerminalEditor
 from evopi.cli.repl import (
     ReplCommandContext,
     ReplCommandRegistry,
+    ReplInputPreempted,
     ReplRunner,
     ReplStartupConfig,
 )
 
 
 class FakeReplHarness:
-    """Structural stand-in for a Lane 1 interaction-enabled CodingHarness."""
+    """Structural stand-in for an interaction-enabled CodingHarness."""
 
     def __init__(self) -> None:
         self.prompted: list[str] = []
@@ -45,6 +47,10 @@ class FakeReplHarness:
             memory=SimpleNamespace(entry_count=0),
             skills=(),
             subagent_enabled=False,
+        )
+        self.interaction_snapshot = SimpleNamespace(
+            pending_steering_count=0,
+            pending_follow_up_count=0,
         )
 
     async def prompt(self, content: str) -> object:
@@ -346,3 +352,45 @@ def test_blank_input_is_ignored(tmp_path) -> None:
     assert asyncio.run(runner.run()) == 0
     assert harness.prompted == []
     assert harness.steered == []
+
+
+def test_modal_prompt_preempts_and_then_restores_background_editor() -> None:
+    class FakePromptSession:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.first_started = asyncio.Event()
+            self.never = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def prompt_async(self, label: str) -> str:
+            self.calls.append(label)
+            call_number = len(self.calls)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                if call_number == 1:
+                    self.first_started.set()
+                    await self.never.wait()
+                if call_number == 2:
+                    return "modal answer"
+                return "resumed answer"
+            finally:
+                self.active -= 1
+
+    async def scenario() -> None:
+        session = FakePromptSession()
+        editor = _TerminalEditor()
+        editor.attach(session)  # type: ignore[arg-type]
+
+        background = asyncio.create_task(editor.read("> "))
+        await session.first_started.wait()
+
+        assert await editor.modal_read("Confirm: ") == "modal answer"
+        with pytest.raises(ReplInputPreempted):
+            await background
+        assert await editor.read("> ") == "resumed answer"
+        assert session.calls == ["> ", "Confirm: ", "> "]
+        assert session.max_active == 1
+
+    asyncio.run(scenario())

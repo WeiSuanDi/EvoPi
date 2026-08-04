@@ -169,6 +169,18 @@ PowerShell。`config show`、`doctor` 和 REPL 设置会展示解析后的可执
 
 在 PowerShell 中，当 Prompt 含空格或引号时，建议使用单引号包裹整个 Prompt。
 
+交互式 Run 正在执行时，用户直接提交的文本会作为 steering 排队，而不会启动第二个
+Run；也可用 `/steer TEXT` 显式插话，用 `/followup TEXT` 在当前 Run 原本即将结束时追加
+任务，用 `/abort` 取消。Steering 只会在完整模型/工具 Turn 结束后投递，不会拆开同批兄弟
+Tool；Follow-up 只会在终止候选点投递。`--steering-mode` 与 `--follow-up-mode` 可选择
+`one-at-a-time` 或 `all`，对应环境变量为 `EVOPI_STEERING_MODE` 与
+`EVOPI_FOLLOW_UP_MODE`。
+
+Python API（`BaseHarness.steer()`、`BaseHarness.follow_up()`）与 RPC（`run.steer`、
+`run.follow_up`）复用同一个宿主无关协议。成功投递的输入会成为普通、正式提交的
+`UserMessage`，因此 Session 与模型 Context 保持一致；之后产生的 ToolCall 仍完整经过
+既有 Policy 与 Confirmation 链。
+
 ### Session
 
 CLI 默认自动继续当前工作区最近更新的 Session。需要时可以显式选择：

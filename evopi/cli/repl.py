@@ -22,6 +22,10 @@ from evopi.rpc.harness_host import InteractionHarness
 ReplCommandAction = Literal["continue", "retry", "quit"]
 
 
+class ReplInputPreempted(Exception):
+    """The background editor yielded terminal ownership to a modal prompt."""
+
+
 class ReplDisplayHost(Protocol):
     def pause(self) -> None: ...
 
@@ -358,6 +362,10 @@ class ReplRunner:
                 else:
                     try:
                         text = (await self._read("> ")).strip()
+                    except ReplInputPreempted:
+                        # Confirmation or Plugin UI temporarily took terminal
+                        # ownership. Recreate the ordinary editor afterwards.
+                        continue
                     except EOFError:
                         break
                     except KeyboardInterrupt:
@@ -365,6 +373,7 @@ class ReplRunner:
                         break
                 if not text:
                     continue
+                await self._reap_finished_run()
                 if text.startswith("/"):
                     outcome = await self._dispatch_command(text)
                     if outcome == "quit":
@@ -452,7 +461,7 @@ class ReplRunner:
         self._display.start_run()
         try:
             await self._harness.prompt(text)
-        except (ValueError, RuntimeError) as exc:
+        except Exception as exc:
             self._console.print(f"[red]Error: {exc}[/]")
         except KeyboardInterrupt:
             self._console.print("[yellow][aborted][/]")
@@ -467,6 +476,18 @@ class ReplRunner:
         if not task.done():
             self._harness.abort()
         await asyncio.gather(task, return_exceptions=True)
+        if self._run_task is task:
+            self._run_task = None
+
+    async def _reap_finished_run(self) -> None:
+        """Observe a completed Run before replacing its Task reference."""
+
+        task = self._run_task
+        if task is None or not task.done():
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._run_task is task:
+            self._run_task = None
 
 
 def startup_panel(context: ReplCommandContext) -> Panel:
@@ -626,12 +647,10 @@ def _status(context: ReplCommandContext, arguments: str, raw: str) -> ReplComman
     table.add_row("SubAgent", "enabled" if resources.subagent_enabled else "disabled")
     table.add_row("Steering mode", context.startup.steering_mode)
     table.add_row("Follow-up mode", context.startup.follow_up_mode)
-    # Pending counts come from the live queue snapshot when the Lane 1
-    # interaction surface is present; nothing here carries message content.
-    snapshot = getattr(harness, "interaction_snapshot", None)
-    if snapshot is not None:
-        table.add_row("Pending steering", str(snapshot.pending_steering_count))
-        table.add_row("Pending follow-up", str(snapshot.pending_follow_up_count))
+    # The public snapshot contains queue metadata only, never message content.
+    snapshot = harness.interaction_snapshot
+    table.add_row("Pending steering", str(snapshot.pending_steering_count))
+    table.add_row("Pending follow-up", str(snapshot.pending_follow_up_count))
     table.add_row("Warnings", str(len(capabilities.warnings)))
     context.console.print(table)
     for warning in capabilities.warnings:
@@ -925,6 +944,7 @@ __all__ = [
     "ReplCommandRegistry",
     "ReplCommandResult",
     "ReplCommandSpec",
+    "ReplInputPreempted",
     "ReplCompleter",
     "ReplRunner",
     "ReplRunnerDisplay",

@@ -179,16 +179,10 @@ def test_status_and_settings_show_modes(tmp_path) -> None:
     assert "one-at-a-time" in rendered
 
 
-def test_status_pending_counts_require_interaction_snapshot(tmp_path) -> None:
+def test_status_shows_interaction_snapshot_counts(tmp_path) -> None:
     registry = ReplCommandRegistry()
     output = StringIO()
     harness = CodingHarness(model=_Model(), workspace=tmp_path, memory_path=None)
-    # The Lane 1 interaction surface is absent on the current BaseHarness; an
-    # instance attribute stands in for the frozen property until Integration.
-    harness.interaction_snapshot = SimpleNamespace(  # type: ignore[attr-defined]
-        pending_steering_count=2,
-        pending_follow_up_count=1,
-    )
     context = ReplCommandContext(
         harness=harness,
         startup=_startup_config(tmp_path),
@@ -200,22 +194,7 @@ def test_status_pending_counts_require_interaction_snapshot(tmp_path) -> None:
     rendered = output.getvalue()
     assert "Pending steering" in rendered
     assert "Pending follow-up" in rendered
-    assert "2" in rendered
-
-
-def test_status_omits_pending_counts_without_snapshot(tmp_path) -> None:
-    registry = ReplCommandRegistry()
-    output = StringIO()
-    harness = CodingHarness(model=_Model(), workspace=tmp_path, memory_path=None)
-    context = ReplCommandContext(
-        harness=harness,
-        startup=_startup_config(tmp_path),
-        display=None,
-        console=Console(file=output, force_terminal=False, width=120),
-    )
-
-    asyncio.run(registry.dispatch(context, "/status"))
-    assert "Pending steering" not in output.getvalue()
+    assert "0" in rendered
 
 
 def test_mode_flags_reach_every_product_route(monkeypatch) -> None:

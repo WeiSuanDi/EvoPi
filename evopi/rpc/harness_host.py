@@ -1,7 +1,7 @@
 """Public BaseHarness binding for the local RPC v1 protocol.
 
 The Host exposes the frozen interaction methods ``run.steer`` and
-``run.follow_up``: it awaits the Lane 1 Harness interaction surface with
+``run.follow_up``: it awaits the public Harness interaction surface with
 ``origin="rpc"``, returns the exact receipt shape, and maps structured
 interaction errors to the frozen safe codes. No content ever enters a
 response, status, or error.
@@ -14,6 +14,12 @@ from collections.abc import Callable
 from typing import Any, Protocol, cast
 
 from evopi.core.events import CoreEvent
+from evopi.core.interaction import (
+    InteractionContentError,
+    InteractionContentTooLargeError,
+    InteractionQueueClosedError,
+    InteractionQueueFullError,
+)
 from evopi.core.types import JsonObject
 from evopi.harness import BaseHarness
 from evopi.harness.confirmation import (
@@ -54,13 +60,7 @@ class InteractionSnapshotView(Protocol):
 
 
 class InteractionHarness(Protocol):
-    """Harness interaction surface introduced by Lane 1 (frozen contract).
-
-    Lane 1 implements these methods on ``BaseHarness``. Until both Lanes are
-    integrated, the Host binds this structural Protocol and Integration proves
-    the real binding; the protocol keeps typos against the frozen surface out
-    of this Lane.
-    """
+    """Minimal structural view of the public Harness interaction surface."""
 
     async def steer(self, content: str, *, origin: str) -> InteractionReceiptView: ...
     async def follow_up(self, content: str, *, origin: str) -> InteractionReceiptView: ...
@@ -69,33 +69,33 @@ class InteractionHarness(Protocol):
     def interaction_snapshot(self) -> InteractionSnapshotView: ...
 
 
-# Structured interaction errors are mapped to the frozen safe RPC codes by
-# their exact class names, which are part of the public contract
-# (CONTEXT.md sections 3 and 6). Queue modes are construction-time settings
-# with no live setter, so InteractionModeError and the abstract base never
-# surface through RPC; they fall through to the generic redacted
-# internal_error like any unexpected Harness failure.
-_INTERACTION_ERRORS: dict[str, tuple[str, str]] = {
-    "InteractionQueueClosedError": ("interaction_closed", "interaction queue is closed"),
-    "InteractionQueueFullError": ("interaction_queue_full", "interaction queue is full"),
-    "InteractionContentTooLargeError": (
-        "interaction_content_too_large",
-        "interaction content is too large",
-    ),
-    "InteractionContentError": (
-        "interaction_content_invalid",
-        "interaction content is invalid",
-    ),
-}
-
-
 def _interaction_host_error(exc: Exception) -> RpcHostError | None:
     """Map a structured interaction error to its frozen safe RPC code."""
-    mapped = _INTERACTION_ERRORS.get(type(exc).__name__)
-    if mapped is None:
-        return None
-    code, message = mapped
-    return RpcHostError(code=code, message=message, details={})
+    if isinstance(exc, InteractionQueueClosedError):
+        return RpcHostError(
+            code="interaction_closed",
+            message="interaction queue is closed",
+            details={},
+        )
+    if isinstance(exc, InteractionQueueFullError):
+        return RpcHostError(
+            code="interaction_queue_full",
+            message="interaction queue is full",
+            details={},
+        )
+    if isinstance(exc, InteractionContentTooLargeError):
+        return RpcHostError(
+            code="interaction_content_too_large",
+            message="interaction content is too large",
+            details={},
+        )
+    if isinstance(exc, InteractionContentError):
+        return RpcHostError(
+            code="interaction_content_invalid",
+            message="interaction content is invalid",
+            details={},
+        )
+    return None
 
 
 class HarnessRpcHost:
@@ -138,16 +138,14 @@ class HarnessRpcHost:
             "active_tool_names": list(capabilities.active_tool_names),
             "policy_names": list(capabilities.policy_names),
         }
-        surface = self._interaction_surface()
-        if surface is not None:
-            snapshot = surface.interaction_snapshot
-            result.update(
-                {
-                    "capabilities": {"text_steering": True, "text_follow_up": True},
-                    "steering_mode": snapshot.steering_mode,
-                    "follow_up_mode": snapshot.follow_up_mode,
-                }
-            )
+        snapshot = self._interaction_surface().interaction_snapshot
+        result.update(
+            {
+                "capabilities": {"text_steering": True, "text_follow_up": True},
+                "steering_mode": snapshot.steering_mode,
+                "follow_up_mode": snapshot.follow_up_mode,
+            }
+        )
         return result
 
     async def runtime_status(self, params: JsonObject) -> JsonObject:
@@ -160,17 +158,15 @@ class HarnessRpcHost:
             "last_end_reason": last_run.end_reason if last_run is not None else None,
             "last_run_error": self._last_run_error,
         }
-        surface = self._interaction_surface()
-        if surface is not None:
-            snapshot = surface.interaction_snapshot
-            result.update(
-                {
-                    "steering_mode": snapshot.steering_mode,
-                    "follow_up_mode": snapshot.follow_up_mode,
-                    "pending_steering_count": snapshot.pending_steering_count,
-                    "pending_follow_up_count": snapshot.pending_follow_up_count,
-                }
-            )
+        snapshot = self._interaction_surface().interaction_snapshot
+        result.update(
+            {
+                "steering_mode": snapshot.steering_mode,
+                "follow_up_mode": snapshot.follow_up_mode,
+                "pending_steering_count": snapshot.pending_steering_count,
+                "pending_follow_up_count": snapshot.pending_follow_up_count,
+            }
+        )
         return result
 
     async def run_steer(self, params: JsonObject) -> JsonObject:
@@ -211,17 +207,9 @@ class HarnessRpcHost:
             "position": receipt.position,
         }
 
-    def _interaction_surface(self) -> InteractionHarness | None:
-        """Return the Lane 1 interaction surface when the Harness has it.
+    def _interaction_surface(self) -> InteractionHarness:
+        """Return the frozen interaction surface implemented by BaseHarness."""
 
-        Lane 1 introduces ``steer``/``follow_up``/``interaction_snapshot`` on
-        BaseHarness. Until both Lanes are integrated, the Host serves the
-        frozen pre-milestone v1 wire contract (no interaction fields) so
-        existing Host bindings keep working; the interaction methods
-        themselves fail closed through the ordinary redacted path.
-        """
-        if not hasattr(self.harness, "interaction_snapshot"):
-            return None
         return cast(InteractionHarness, self.harness)
 
     async def run_start(self, params: JsonObject) -> JsonObject:

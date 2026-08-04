@@ -39,6 +39,30 @@ from evopi.core.tool import Tool, ToolCall, ToolResult
 # ---------------------------------------------------------------------------
 
 
+def test_interaction_contract_is_exported_from_public_packages() -> None:
+    import evopi
+    import evopi.core
+
+    public_names = {
+        "InteractionContentError",
+        "InteractionContentTooLargeError",
+        "InteractionError",
+        "InteractionKind",
+        "InteractionLimits",
+        "InteractionModeError",
+        "InteractionOrigin",
+        "InteractionQueueClosedError",
+        "InteractionQueueFullError",
+        "InteractionQueueMode",
+        "InteractionQueueSnapshot",
+        "InteractionReceipt",
+    }
+    assert public_names <= set(evopi.__all__)
+    assert public_names <= set(evopi.core.__all__)
+    for name in public_names:
+        assert getattr(evopi, name) is getattr(evopi.core, name)
+
+
 def _open_queue(**kwargs: Any) -> InteractionQueueController:
     queue = InteractionQueueController(**kwargs)
     queue.open("run-1")
@@ -51,6 +75,16 @@ def test_controller_rejects_invalid_queue_modes() -> None:
             InteractionQueueController(steering_mode=bad)  # type: ignore[arg-type]
         with pytest.raises(InteractionModeError):
             InteractionQueueController(follow_up_mode=bad)  # type: ignore[arg-type]
+
+
+def test_controller_rejects_unpaired_surrogate_as_structured_content_error() -> None:
+    queue = _open_queue()
+
+    async def scenario() -> None:
+        with pytest.raises(InteractionContentError, match="UTF-8"):
+            await queue.admit("steer", "api", "\ud800", emit=None)
+
+    asyncio.run(scenario())
 
 
 def test_controller_rejects_invalid_limits() -> None:
@@ -135,6 +169,65 @@ def test_controller_admission_fifo_positions_and_counts() -> None:
     assert all("pending_steering_count" in event.data for event in queued)
     assert all("pending_follow_up_count" in event.data for event in queued)
     assert queued[0].data["mode"] == "one-at-a-time"
+
+
+def test_controller_serializes_queued_event_before_safe_point_delivery() -> None:
+    async def scenario() -> None:
+        queue = _open_queue()
+        queued_started = asyncio.Event()
+        release_queued = asyncio.Event()
+        events: list[CoreEvent] = []
+
+        async def listener(event: CoreEvent) -> None:
+            if event.type == "interaction_queued":
+                queued_started.set()
+                await release_queued.wait()
+            events.append(event)
+
+        admission = asyncio.create_task(
+            queue.admit("steer", "api", "ordered", emit=listener)
+        )
+        await queued_started.wait()
+        drain = asyncio.create_task(
+            queue.drain_steering(
+                emit=listener,
+                run_id="run-1",
+                append=lambda message: None,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not drain.done()
+
+        release_queued.set()
+        receipt = await admission
+        delivered = await drain
+
+        assert delivered[0].content == "ordered"
+        assert receipt.run_id == "run-1"
+        assert [event.type for event in events][:2] == [
+            "interaction_queued",
+            "interaction_delivered",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_controller_rolls_back_admission_when_queued_event_fails() -> None:
+    async def scenario() -> None:
+        queue = _open_queue()
+
+        async def broken_listener(event: CoreEvent) -> None:
+            assert event.type == "interaction_queued"
+            raise RuntimeError("observer failed")
+
+        with pytest.raises(RuntimeError, match="observer failed"):
+            await queue.admit("steer", "api", "not acknowledged", emit=broken_listener)
+
+        assert queue.snapshot().pending == ()
+        receipt = await queue.admit("steer", "api", "next", emit=None)
+        assert receipt.position == 1
+
+    asyncio.run(scenario())
 
 
 def test_controller_receipts_and_snapshots_are_immutable_without_content() -> None:

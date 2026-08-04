@@ -9,6 +9,7 @@ this module never schedules model calls or cancels anything.
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,6 +90,7 @@ class InteractionQueueSnapshot:
 @dataclass(slots=True)
 class _PendingInteraction:
     input_id: str
+    run_id: str
     kind: InteractionKind
     origin: InteractionOrigin
     created_at: datetime
@@ -110,7 +112,12 @@ def validate_content(content: object, *, max_bytes: int) -> str:
         raise InteractionContentError(
             "Interaction content must contain non-whitespace text"
         )
-    size = len(content.encode("utf-8"))
+    try:
+        size = len(content.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise InteractionContentError(
+            "Interaction content must be valid UTF-8 text"
+        ) from exc
     if size > max_bytes:
         raise InteractionContentTooLargeError(
             f"Interaction content is {size} UTF-8 bytes; limit is {max_bytes}"
@@ -190,6 +197,7 @@ class InteractionQueueController:
         self._position = 0
         self._sealed = True
         self._run_id: str | None = None
+        self._operation_lock = asyncio.Lock()
 
     @property
     def sealed(self) -> bool:
@@ -211,8 +219,11 @@ class InteractionQueueController:
         opens.
         """
         if not self._sealed:
-            self._steering.clear()
-            self._follow_up.clear()
+            raise InteractionError(
+                "Cannot open a new interaction queue before the prior Run is sealed"
+            )
+        if self._steering or self._follow_up:
+            raise InteractionError("A sealed interaction queue must not retain pending items")
         self._sealed = False
         self._run_id = run_id
         self._position = 0
@@ -247,54 +258,64 @@ class InteractionQueueController:
         cleared with an observable event) and the observer failure surfaces
         without duplicating the item.
         """
-        valid_kind = _validate_kind(kind)
-        origin_literal = _validate_origin(origin)
-        text = validate_content(content, max_bytes=self._max_content_bytes)
-        if self._sealed or self._run_id is None:
-            raise InteractionQueueClosedError(
-                "No Run is accepting interactions"
+        async with self._operation_lock:
+            valid_kind = _validate_kind(kind)
+            origin_literal = _validate_origin(origin)
+            text = validate_content(content, max_bytes=self._max_content_bytes)
+            if self._sealed or self._run_id is None:
+                raise InteractionQueueClosedError(
+                    "No Run is accepting interactions"
+                )
+            if self._pending_count() >= self._max_pending_items:
+                raise InteractionQueueFullError(
+                    f"Interaction queue is full ({self._max_pending_items} pending)"
+                )
+            run_id = self._run_id
+            self._position += 1
+            item = _PendingInteraction(
+                input_id=uuid4().hex,
+                run_id=run_id,
+                kind=valid_kind,
+                origin=origin_literal,
+                created_at=datetime.now(UTC),
+                position=self._position,
+                content=text,
+                mode=(
+                    self._steering_mode
+                    if valid_kind == "steer"
+                    else self._follow_up_mode
+                ),
             )
-        if self._pending_count() >= self._max_pending_items:
-            raise InteractionQueueFullError(
-                f"Interaction queue is full ({self._max_pending_items} pending)"
-            )
-        self._position += 1
-        item = _PendingInteraction(
-            input_id=uuid4().hex,
-            kind=valid_kind,
-            origin=origin_literal,
-            created_at=datetime.now(UTC),
-            position=self._position,
-            content=text,
-            mode=(
-                self._steering_mode
-                if valid_kind == "steer"
-                else self._follow_up_mode
-            ),
-        )
-        queue = self._steering if valid_kind == "steer" else self._follow_up
-        queue.append(item)
-        receipt = self._receipt(item)
-        run_id_for_event = self._run_id
-        await notify(
-            emit,
-            CoreEvent(
-                type="interaction_queued",
-                run_id=run_id_for_event,
-                data={
-                    "input_id": item.input_id,
-                    "kind": item.kind,
-                    "origin": item.origin,
-                    "run_id": run_id_for_event,
-                    "position": item.position,
-                    "mode": item.mode,
-                    "pending_steering_count": len(self._steering),
-                    "pending_follow_up_count": len(self._follow_up),
-                },
-            ),
-            signal=signal,
-        )
-        return receipt
+            queue = self._steering if valid_kind == "steer" else self._follow_up
+            queue.append(item)
+            try:
+                await notify(
+                    emit,
+                    CoreEvent(
+                        type="interaction_queued",
+                        run_id=run_id,
+                        data={
+                            "input_id": item.input_id,
+                            "kind": item.kind,
+                            "origin": item.origin,
+                            "run_id": run_id,
+                            "position": item.position,
+                            "mode": item.mode,
+                            "pending_steering_count": len(self._steering),
+                            "pending_follow_up_count": len(self._follow_up),
+                        },
+                    ),
+                    signal=signal,
+                )
+            except BaseException:
+                # Admission is not acknowledged when its lifecycle event fails.
+                # Holding the operation lock guarantees no drain/seal can have
+                # observed the item, so rollback cannot strand or duplicate it.
+                removed = queue.pop()
+                assert removed is item
+                self._position -= 1
+                raise
+            return self._receipt(item)
 
     async def drain_steering(
         self,
@@ -310,23 +331,24 @@ class InteractionQueueController:
         FIFO snapshot as separate ``UserMessage`` objects.  Returns the
         delivered messages (empty when nothing was delivered).
         """
-        if self._sealed or signal is not None and signal.aborted:
-            return ()
-        if not self._steering:
-            return ()
-        count = (
-            1
-            if self._steering_mode == "one-at-a-time"
-            else len(self._steering)
-        )
-        return await self._drain(
-            self._steering,
-            count,
-            emit=emit,
-            run_id=run_id,
-            signal=signal,
-            append=append,
-        )
+        async with self._operation_lock:
+            if self._sealed or signal is not None and signal.aborted:
+                return ()
+            if not self._steering:
+                return ()
+            count = (
+                1
+                if self._steering_mode == "one-at-a-time"
+                else len(self._steering)
+            )
+            return await self._drain(
+                self._steering,
+                count,
+                emit=emit,
+                run_id=run_id,
+                signal=signal,
+                append=append,
+            )
 
     async def drain_follow_up_at_terminal(
         self,
@@ -344,26 +366,27 @@ class InteractionQueueController:
         nothing is pending the gate seals admission atomically so the Run may
         end.  Returns the delivered messages.
         """
-        if self._sealed or signal is not None and signal.aborted:
-            return ()
-        if self._steering:
-            return ()
-        if not self._follow_up:
-            self._sealed = True
-            return ()
-        count = (
-            1
-            if self._follow_up_mode == "one-at-a-time"
-            else len(self._follow_up)
-        )
-        return await self._drain(
-            self._follow_up,
-            count,
-            emit=emit,
-            run_id=run_id,
-            signal=signal,
-            append=append,
-        )
+        async with self._operation_lock:
+            if self._sealed or signal is not None and signal.aborted:
+                return ()
+            if self._steering:
+                return ()
+            if not self._follow_up:
+                self._sealed = True
+                return ()
+            count = (
+                1
+                if self._follow_up_mode == "one-at-a-time"
+                else len(self._follow_up)
+            )
+            return await self._drain(
+                self._follow_up,
+                count,
+                emit=emit,
+                run_id=run_id,
+                signal=signal,
+                append=append,
+            )
 
     async def seal(
         self,
@@ -378,28 +401,29 @@ class InteractionQueueController:
         Idempotent: a queue sealed by the terminal gate emits nothing again.
         Every cleared input ID appears in the ``interaction_cleared`` event.
         """
-        if self._sealed:
-            return
-        self._sealed = True
-        items = [*self._steering, *self._follow_up]
-        self._steering.clear()
-        self._follow_up.clear()
-        if not items:
-            return
-        await notify(
-            emit,
-            CoreEvent(
-                type="interaction_cleared",
-                run_id=run_id,
-                data={
-                    "reason": reason,
-                    "count": len(items),
-                    "input_ids": [item.input_id for item in items],
-                    "kinds": [item.kind for item in items],
-                },
-            ),
-            signal=signal,
-        )
+        async with self._operation_lock:
+            if self._sealed:
+                return
+            self._sealed = True
+            items = [*self._steering, *self._follow_up]
+            self._steering.clear()
+            self._follow_up.clear()
+            if not items:
+                return
+            await notify(
+                emit,
+                CoreEvent(
+                    type="interaction_cleared",
+                    run_id=run_id,
+                    data={
+                        "reason": reason,
+                        "count": len(items),
+                        "input_ids": [item.input_id for item in items],
+                        "kinds": [item.kind for item in items],
+                    },
+                ),
+                signal=signal,
+            )
 
     async def _drain(
         self,
@@ -440,6 +464,9 @@ class InteractionQueueController:
         signal: AbortSignal | None,
         append: Callable[[UserMessage], None],
     ) -> UserMessage:
+        event_run_id = run_id or item.run_id
+        if event_run_id != item.run_id:
+            raise InteractionError("Interaction cannot be delivered into another Run")
         message = UserMessage(
             content=item.content,
             metadata={
@@ -456,12 +483,12 @@ class InteractionQueueController:
             emit,
             CoreEvent(
                 type="interaction_delivered",
-                run_id=run_id,
+                run_id=event_run_id,
                 data={
                     "input_id": item.input_id,
                     "kind": item.kind,
                     "origin": item.origin,
-                    "run_id": run_id,
+                    "run_id": event_run_id,
                     "message_id": message.id,
                     "mode": item.mode,
                     "pending_steering_count": len(self._steering),
@@ -474,7 +501,7 @@ class InteractionQueueController:
             emit,
             CoreEvent(
                 type="message_start",
-                run_id=run_id,
+                run_id=event_run_id,
                 data={"message_id": message.id, "role": message.role},
             ),
             signal=signal,
@@ -484,7 +511,7 @@ class InteractionQueueController:
             emit,
             CoreEvent(
                 type="message_end",
-                run_id=run_id,
+                run_id=event_run_id,
                 data={"message": message},
             ),
             signal=signal,
@@ -494,7 +521,7 @@ class InteractionQueueController:
     def _receipt(self, item: _PendingInteraction) -> InteractionReceipt:
         return InteractionReceipt(
             input_id=item.input_id,
-            run_id=self._run_id or "",
+            run_id=item.run_id,
             kind=item.kind,
             origin=item.origin,
             created_at=item.created_at,

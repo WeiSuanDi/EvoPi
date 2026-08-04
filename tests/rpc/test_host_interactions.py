@@ -1,9 +1,8 @@
 """Host-level tests for the interaction RPC surface (SFU-2 Task 1).
 
-``HarnessRpcHost`` binds a structural stand-in for the Lane 1 interaction
-surface (a fake Harness with the frozen receipt/snapshot shapes and the
-frozen error class names). The real BaseHarness binding is proven in
-Integration; these tests pin the Host behavior against the frozen contract.
+``HarnessRpcHost`` binds a structural stand-in for the interaction surface.
+The fake raises the production structured errors so the Host mapping cannot
+silently drift from the public Core contract.
 """
 
 from __future__ import annotations
@@ -18,29 +17,16 @@ from typing import Any
 import pytest
 
 from evopi.core.events import CoreEvent
+from evopi.core.interaction import (
+    InteractionContentError,
+    InteractionContentTooLargeError,
+    InteractionError,
+    InteractionQueueClosedError,
+    InteractionQueueFullError,
+)
 from evopi.core.types import JsonObject
 from evopi.harness import ConfirmationBroker, InMemoryConfirmationStore
 from evopi.rpc import HarnessRpcHost, RpcHostError, RpcRequest, RpcServer
-
-
-class InteractionError(Exception):
-    """Frozen base class name (CONTEXT.md section 3); Lane 1 defines the real class."""
-
-
-class InteractionQueueClosedError(InteractionError):
-    pass
-
-
-class InteractionQueueFullError(InteractionError):
-    pass
-
-
-class InteractionContentError(InteractionError):
-    pass
-
-
-class InteractionContentTooLargeError(InteractionContentError):
-    pass
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -61,7 +47,7 @@ class FakeSnapshot:
 
 
 class FakeHarness:
-    """Structural stand-in for the Lane 1 interaction-enabled BaseHarness."""
+    """Structural stand-in for the public interaction-enabled BaseHarness."""
 
     def __init__(self, broker: ConfirmationBroker) -> None:
         self.confirmation_broker = broker
@@ -317,53 +303,6 @@ def test_unmapped_harness_failure_is_redacted_by_server() -> None:
             await host.close()
         finally:
             harness.steer = original_steer  # type: ignore[method-assign]
-
-    asyncio.run(scenario())
-
-
-class _MinimalFakeHarness(FakeHarness):
-    """Fake whose interaction surface is absent (pre-Lane-1 BaseHarness)."""
-
-    @property
-    def interaction_snapshot(self) -> FakeSnapshot:
-        raise AttributeError("interaction surface not present")
-
-    async def steer(self, content: str, *, origin: str = "api") -> FakeReceipt:
-        raise AttributeError("steer not present")
-
-
-def test_pre_integration_host_keeps_frozen_wire_contract() -> None:
-    """Without the Lane 1 surface, initialize/status keep the v1 shapes."""
-
-    async def scenario() -> None:
-        broker = ConfirmationBroker(InMemoryConfirmationStore())
-        harness = _MinimalFakeHarness(broker)
-        host = _host(harness)
-
-        init = await host.initialize({})
-        assert "capabilities" not in init
-        assert "steering_mode" not in init
-        assert "follow_up_mode" not in init
-
-        status = await host.runtime_status({})
-        assert "pending_steering_count" not in status
-        assert "pending_follow_up_count" not in status
-        assert status["active_run_id"] is None
-
-        # Interaction methods fail closed through the redacted server path.
-        await _start_run(host, harness)
-        server = RpcServer(host)
-        response = await server.dispatch(
-            RpcRequest(
-                request_id="11111111-2222-4333-8444-555555555555",
-                method="run.steer",
-                params={"content": "hello"},
-            )
-        )
-        assert response.ok is False
-        assert response.error is not None
-        assert response.error.code == "internal_error"
-        await host.close()
 
     asyncio.run(scenario())
 
