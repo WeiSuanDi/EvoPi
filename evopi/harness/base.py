@@ -23,6 +23,13 @@ from evopi.core.cancellation import (
 )
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, CoreEventType, EventListener
+from evopi.core.interaction import (
+    InteractionLimits,
+    InteractionOrigin,
+    InteractionQueueMode,
+    InteractionQueueSnapshot,
+    InteractionReceipt,
+)
 from evopi.core.messages import (
     AssistantMessage,
     Message,
@@ -226,6 +233,9 @@ class BaseHarness:
         assembly_warnings: tuple[str, ...] = (),
         policy_activation_service: PolicyActivationService | None = None,
         defer_policy_activation: bool = False,
+        steering_mode: InteractionQueueMode = "one-at-a-time",
+        follow_up_mode: InteractionQueueMode = "one-at-a-time",
+        interaction_limits: InteractionLimits | None = None,
     ) -> None:
         if model_route is not None and model_route.primary.model is not model:
             raise ValueError("model must be the primary ModelRoute candidate")
@@ -350,6 +360,9 @@ class BaseHarness:
             prepare_context=self._prepare_context,
             after_model_call=self._after_model_call,
             should_stop_after_turn=self._should_stop_after_turn,
+            steering_mode=steering_mode,
+            follow_up_mode=follow_up_mode,
+            interaction_limits=interaction_limits,
             model_attempt_router_factory=(
                 (
                     lambda run_id: HarnessModelAttemptRouter(
@@ -481,6 +494,35 @@ class BaseHarness:
         """Return the last immutable Core Run snapshot for host integrations."""
 
         return self.agent.last_run
+
+    @property
+    def interaction_snapshot(self) -> InteractionQueueSnapshot:
+        """Read-only snapshot of the steering/follow-up queues.
+
+        Delegates to the Core Agent; the snapshot never exposes raw content.
+        """
+
+        return self.agent.interaction_snapshot
+
+    async def steer(
+        self,
+        content: str,
+        *,
+        origin: InteractionOrigin = "api",
+    ) -> InteractionReceipt:
+        """Queue a steering interaction for the active Run, if any."""
+
+        return await self.agent.steer(content, origin=origin)
+
+    async def follow_up(
+        self,
+        content: str,
+        *,
+        origin: InteractionOrigin = "api",
+    ) -> InteractionReceipt:
+        """Queue a follow-up interaction for the active Run, if any."""
+
+        return await self.agent.follow_up(content, origin=origin)
 
     def plugin_can_override_tool(self, plugin_name: str, tool_name: str) -> bool:
         return (plugin_name, tool_name) in self._plugin_tool_overrides
