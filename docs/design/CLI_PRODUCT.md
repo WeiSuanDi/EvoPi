@@ -14,10 +14,21 @@ Interactive workbench
 Management and automation
 ├── evopi run [PROMPT] [--json]
 ├── evopi session / policy / plugin
-└── evopi config show / doctor
+├── evopi config show / doctor
+└── evopi rpc
 ```
 
 `evopi "PROMPT"` remains a compatibility alias for one-shot execution.
+
+`evopi rpc` is the local host-integration entry point. It speaks strict JSONL over stdio and
+exposes a fixed v1 method set for initialize/status, asynchronous Run start and Abort,
+Confirmation list/respond/batch, bounded event replay, and shutdown. Unsolicited lifecycle events
+share the same output stream as RPC responses but remain sequence-addressable. Stdout is reserved
+for protocol envelopes; application logging belongs on stderr.
+
+This transport has no listener, authentication, or remote authorization layer. It must remain
+inside a trusted local host unless an embedding application adds those controls. RPC can only
+resolve Policy-created pending confirmations and cannot invoke a Tool or weaken Policy decisions.
 
 The Policy command group exposes a governed lifecycle rather than a single mutation command:
 `discover` creates immutable Opportunities, `generate` creates inactive evidence-bound candidates,

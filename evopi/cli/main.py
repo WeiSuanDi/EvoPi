@@ -9,7 +9,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer
@@ -35,6 +35,7 @@ from evopi.cli.product import (
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
+from evopi.cli.rpc import run_stdio_rpc
 from evopi.cli.repl import (
     ReplCommandContext,
     ReplCommandRegistry,
@@ -54,6 +55,12 @@ from evopi.cli.session import (
 )
 from evopi.core.events import CoreEvent
 from evopi.core.model_errors import ModelRetryConfig
+from evopi.harness import (
+    ConfirmationBroker,
+    ConfirmationHandler,
+    InMemoryConfirmationStore,
+)
+from evopi.rpc import RpcError
 from evopi.session import SessionManager
 from evopi.tools import resolve_shell_environment
 
@@ -65,6 +72,7 @@ _UNREVIEWED_PLUGIN_WARNING = (
     "--plugin is a deprecated, unreviewed development override; "
     "use plugin review -> approve -> reload for product use"
 )
+_DEFAULT_CONFIRMATION_HANDLER = object()
 
 
 def _non_negative_int(value: str) -> int:
@@ -279,7 +287,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_harness(args: argparse.Namespace) -> CodingHarness:
+def _build_harness(
+    args: argparse.Namespace,
+    *,
+    confirmation_handler: object = _DEFAULT_CONFIRMATION_HANDLER,
+    confirmation_broker: ConfirmationBroker | None = None,
+) -> CodingHarness:
     """Build a CodingHarness from CLI args, auto-detecting available modules."""
     from evopi.session.compact import CompactionSettings
 
@@ -304,6 +317,11 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
         model_route = None
     included_tools, excluded_tools = parse_tool_selection(args)
     session_manager = _session_manager_from_args(args)
+    resolved_confirmation_handler = (
+        async_terminal_confirmation_handler
+        if confirmation_handler is _DEFAULT_CONFIRMATION_HANDLER
+        else cast(ConfirmationHandler | None, confirmation_handler)
+    )
 
     # Auto-detect Memory — always on, stored in workspace
     memory_path = getattr(args, "memory", None)
@@ -333,7 +351,8 @@ def _build_harness(args: argparse.Namespace) -> CodingHarness:
             enabled=not getattr(args, "no_retry", False),
             max_retries=getattr(args, "max_retries", 3),
         ),
-        confirmation_handler=async_terminal_confirmation_handler,
+        confirmation_handler=resolved_confirmation_handler,
+        confirmation_broker=confirmation_broker,
         session_manager=session_manager,
         deadline=getattr(args, "deadline", None),
         tool_timeout=getattr(args, "tool_timeout", None),
@@ -637,6 +656,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return doctor_main(raw_args[1:])
 
     try:
+        if raw_args[:1] == ["rpc"]:
+            rpc_parser = build_parser()
+            rpc_parser.prog = "evopi rpc"
+            rpc_parser.description = "Run the local EvoPi JSONL host over stdio"
+            args = rpc_parser.parse_args(raw_args[1:])
+            if getattr(args, "prompt", None) is not None:
+                print("EvoPi rpc does not accept a positional prompt.", file=sys.stderr)
+                return 2
+            broker = ConfirmationBroker(InMemoryConfirmationStore())
+            harness = _build_harness(
+                args,
+                confirmation_handler=None,
+                confirmation_broker=broker,
+            )
+            return asyncio.run(run_stdio_rpc(harness, broker))
         if raw_args[:1] == ["chat"]:
             chat_parser = build_parser()
             chat_parser.prog = "evopi chat"
@@ -674,7 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(args, "prompt", None):
             return asyncio.run(_run_one_shot(args))
         return asyncio.run(_run_repl(args))
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, RuntimeError, RpcError) as exc:
         print(f"EvoPi error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

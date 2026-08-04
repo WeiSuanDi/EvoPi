@@ -333,3 +333,14 @@ CodingHarness 的产品宿主：`evopi`/`chat` 负责持续交互，`run` 提供
 动态 Coding Prompt 由最终活动 Tool 视图生成，能力变化后刷新。Prompt 只陈述当前
 真实能力与治理事实，不把 Session UI 命令或未启用能力伪装成模型能力。完整产品契约
 见 `CLI_PRODUCT.md`。
+
+## 宿主交互层
+
+终端、桌面 UI、IDE 或未来 RPC 宿主都位于 Harness 外侧。当前本地 Host Integration
+Foundation 由三部分组成：Confirmation Broker 负责可恢复的确认状态，Event Stream
+负责严格编码、递增序号和有界回放，`HarnessRpcHost` 只通过 BaseHarness 公共接口编排
+Run、Abort 和状态查询。它们不下沉到 Core，也不建立第二条 Tool 或 Policy 执行通道。
+
+RPC 客户端只能答复由 Policy 创建的 pending request；不能自行创建 Confirmation、
+越过 `block` 或直接调用 Tool。当前 JSONL stdio 传输只面向同机受信宿主，不包含网络
+监听、认证或多租户隔离。

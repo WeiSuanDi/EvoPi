@@ -56,6 +56,8 @@ def build_product_parser() -> argparse.ArgumentParser:
             '  evopi "PROMPT"                Run one prompt (legacy compatible)\n'
             "  evopi chat [INITIAL_PROMPT]   Start the workbench, optionally with a prompt\n"
             "  evopi run [PROMPT] [--json]   Run once for scripts and automation\n\n"
+            "Host integration:\n"
+            "  evopi rpc                     Run the local JSONL host over stdio\n\n"
             "Management:\n"
             "  evopi session ...             Inspect and maintain sessions\n"
             "  evopi policy ...              Review, approve, and activate Policies\n"

@@ -15,6 +15,7 @@ EvoPi provides a compact foundation for building agents that can call models, us
 - **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
 - **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
 - **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
+- **Local host protocol** — drive Runs, replay events, abort work, and resolve Policy-created confirmations over a strict JSONL RPC boundary without bypassing the Harness.
 - **Governed policy evolution** — discover confirmation patterns, generate evidence-bound inactive candidates, and keep review, approval, activation, reload, and rollback explicit.
 - **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
 
@@ -394,6 +395,13 @@ ToolResult and never reaches Policy or the Tool handler. Its default policy pack
 Policies are ordinary typed Python components and can be registered individually or grouped into reusable policy packs. Policy decisions are emitted into the runtime trace alongside model and tool events.
 
 The `evopi` CLI installs an asynchronous interactive `y/N` confirmation handler automatically. Pressing `Ctrl+C` at a confirmation returns an explicit `cancelled` decision and aborts the run. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
+
+Host applications can instead launch `evopi rpc`. This local stdio JSONL protocol starts Runs
+asynchronously, streams sequenced lifecycle events, supports bounded replay and Abort, and lets a
+separate UI resolve only requests that Policy has already placed in the Confirmation Broker. A
+response never overrides a Policy `block`, never invokes a Tool directly, and duplicate or stale
+responses fail closed. The RPC protocol is a local integration surface, not an authenticated remote
+service; do not expose its stdio transport across a trust boundary without adding one.
 
 ### Policy pattern discovery
 

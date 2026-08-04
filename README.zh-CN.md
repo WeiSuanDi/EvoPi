@@ -15,6 +15,7 @@ EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 A
 - **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
 - **通用 PluginAPI** — 通过单一受治理运行时协议扩展工具、Policy、命令、上下文、Prompt、Session 状态、Tool 视图和宿主 UI。
 - **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
+- **本地宿主协议** — 通过严格的 JSONL RPC 边界启动 Run、回放事件、中止任务并处理 Policy 已创建的确认请求，同时不绕过 Harness。
 - **受治理的 Policy 演进** — 从人工确认模式发现机会，生成证据绑定的非启用候选，并保持审查、批准、启用、重载和回滚相互独立。
 - **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
 
@@ -379,6 +380,12 @@ Policy 或 Tool Handler。默认 Policy Pack 提供：
 Policy 是普通的类型化 Python 组件，既可以单独注册，也可以组合成可复用的 Policy Pack。Policy 决策会与模型和工具事件一起写入运行时 Trace。
 
 `evopi` CLI 会自动安装异步交互式 `y/N` Confirmation Handler。在确认界面按下 `Ctrl+C` 会产生明确的 `cancelled` 决策并中止当前运行。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
+
+宿主应用也可以启动 `evopi rpc`。该本地 stdio JSONL 协议会异步启动 Run，推送带序号的
+生命周期事件，支持有界回放与 Abort，并允许独立 UI 只处理已经由 Policy 放入
+Confirmation Broker 的请求。RPC 响应不能覆盖 Policy `block`、不能直接调用 Tool，
+重复或过期响应会 fail closed。该协议是本地集成面，不是带认证的远程服务；若要跨越
+信任边界暴露 stdio，宿主必须自行增加认证、授权与传输保护。
 
 ### Policy 模式发现
 

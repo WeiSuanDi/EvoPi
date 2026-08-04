@@ -61,6 +61,16 @@ class _RecordingStore(InMemoryConfirmationStore):
         return super().transition_batch(transitions)
 
 
+class _FailingCloseStore(InMemoryConfirmationStore):
+    """Persistence failure used to prove close never strands live waiters."""
+
+    def transition_batch(
+        self,
+        transitions: tuple[ConfirmationTransition, ...],
+    ) -> tuple[ConfirmationRecord, ...]:
+        raise OSError("synthetic persistence failure")
+
+
 def _response(request_id: str, decision: str = "approve") -> ConfirmationResponse:
     return ConfirmationResponse(
         request_id=request_id,
@@ -526,6 +536,31 @@ def test_close_atomically_persists_cancelled_for_all_pending_waiters() -> None:
             assert transition.response is not None
             assert transition.response.decision == "cancelled"
             assert transition.response.metadata == {"automatic": True, "closed": True}
+
+    asyncio.run(scenario())
+
+
+def test_close_persistence_failure_still_wakes_waiters_and_closes_store() -> None:
+    async def scenario() -> None:
+        store = _FailingCloseStore()
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_request("req-fail")))
+        await asyncio.sleep(0)
+
+        with pytest.raises(OSError, match="synthetic persistence failure"):
+            broker.close()
+        with pytest.raises(ConfirmationBrokerClosedError):
+            await task
+        with pytest.raises(ConfirmationStoreClosedError):
+            store.list_pending()
+
+        current = asyncio.current_task()
+        leaked = [
+            candidate
+            for candidate in asyncio.all_tasks()
+            if candidate is not current and not candidate.done()
+        ]
+        assert leaked == []
 
     asyncio.run(scenario())
 

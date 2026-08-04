@@ -30,7 +30,7 @@ from typing import TypeAlias
 from evopi.core.events import CoreEvent
 from evopi.core.types import JsonObject
 
-from .codec import to_event_data
+from .codec import encode_event, to_event_data
 from .errors import (
     EventCursorExpiredError,
     EventCursorInvalidError,
@@ -148,6 +148,9 @@ class EventStream:
                 run_id=event.run_id,
                 created_at=event.created_at,
             )
+            # Enforce the exact same invariants as the wire encoder before a
+            # sequence is consumed or the event becomes replayable.
+            encode_event(rpc_event)
             self._next_sequence += 1
             self._events.append(rpc_event)
             for subscriber in list(self._subscribers.values()):

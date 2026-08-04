@@ -27,6 +27,7 @@ from .connection import (
     JsonlRpcConnection,
 )
 from .event_stream import DEFAULT_CAPACITY, DEFAULT_SUBSCRIBER_QUEUE_CAPACITY, EventStream
+from .harness_host import HarnessRpcHost
 from .server import CONFIRMATION_DECISIONS, RpcHost, RpcServer, error_response
 from .errors import (
     EventCursorExpiredError,
@@ -51,6 +52,7 @@ __all__ = [
     "DEFAULT_INBOUND_EVENT_CAPACITY",
     "DEFAULT_SUBSCRIBER_QUEUE_CAPACITY",
     "EventStream",
+    "HarnessRpcHost",
     "RpcHost",
     "RpcServer",
     "SCHEMA_VERSION",

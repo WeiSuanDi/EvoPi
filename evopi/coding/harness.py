@@ -32,6 +32,7 @@ from evopi.core.model_errors import ModelRetryConfig
 from evopi.evolution import PolicyActivationService
 from evopi.harness.base import BaseHarness
 from evopi.harness.confirmation import ConfirmationHandler
+from evopi.harness.confirmation_broker import ConfirmationBroker
 from evopi.memory import (
     MemoryPersistenceError,
     MemoryRetriever,
@@ -68,6 +69,7 @@ class CodingHarness(BaseHarness):
         system_prompt: str | None = None,
         append_system_prompt: str | None = None,
         confirmation_handler: ConfirmationHandler | None = None,
+        confirmation_broker: ConfirmationBroker | None = None,
         session_manager: SessionManager | None = None,
         approvals_path: str | Path | None = None,
         approval_mode: ApprovalMode = "warn",
@@ -195,6 +197,7 @@ class CodingHarness(BaseHarness):
             max_turns=max_turns,
             retry_config=retry_config,
             confirmation_handler=confirmation_handler,
+            confirmation_broker=confirmation_broker,
             session_manager=(
                 session_manager or SessionManager.in_memory(self.workspace)
             ),

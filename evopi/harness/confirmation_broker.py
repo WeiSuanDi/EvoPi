@@ -185,33 +185,45 @@ class ConfirmationBroker:
         self._closed = True
         waiters = dict(self._waiters)
         self._waiters.clear()
-        transitions: list[ConfirmationTransition] = []
-        for request_id, future in waiters.items():
-            current = self._store.get(request_id)
-            if current is None or current.status != "pending":
-                continue  # already resolved: authoritative, never overwritten
-            transitions.append(
-                ConfirmationTransition(
-                    request_id=request_id,
-                    expected_revision=current.revision,
-                    status="cancelled",
-                    response=ConfirmationResponse(
+        failure: Exception | None = None
+        try:
+            transitions: list[ConfirmationTransition] = []
+            for request_id, future in waiters.items():
+                current = self._store.get(request_id)
+                if current is None or current.status != "pending":
+                    continue  # already resolved: authoritative, never overwritten
+                transitions.append(
+                    ConfirmationTransition(
                         request_id=request_id,
-                        decision="cancelled",
-                        reason="Confirmation broker closed",
-                        metadata={"automatic": True, "closed": True},
-                    ),
+                        expected_revision=current.revision,
+                        status="cancelled",
+                        response=ConfirmationResponse(
+                            request_id=request_id,
+                            decision="cancelled",
+                            reason="Confirmation broker closed",
+                            metadata={"automatic": True, "closed": True},
+                        ),
+                    )
                 )
-            )
-        if transitions:
-            # Persist first: one atomic batch transition per graceful close.
-            self._store.transition_batch(tuple(transitions))
-        # Then wake each caller fail closed; Future cancellation here is only
-        # the wake-up signal, never the durable state transition.
-        for future in waiters.values():
-            if not future.done():
-                future.cancel()
-        self._store.close()
+            if transitions:
+                # Persist first: one atomic batch transition per graceful close.
+                self._store.transition_batch(tuple(transitions))
+        except Exception as exc:
+            # The persistence failure remains visible to the owner, but it may
+            # never strand a live Run. A durable pending fact can only become
+            # orphaned on recovery; no waiter or Tool is reconstructed.
+            failure = exc
+        finally:
+            for future in waiters.values():
+                if not future.done():
+                    future.cancel()
+            try:
+                self._store.close()
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
     def _check_open(self) -> None:
         if self._closed:
