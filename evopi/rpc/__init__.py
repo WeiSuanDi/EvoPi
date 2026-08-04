@@ -19,6 +19,7 @@ from .codec import (
     parse_utc_timestamp,
     to_event_data,
 )
+from .event_stream import DEFAULT_CAPACITY, DEFAULT_SUBSCRIBER_QUEUE_CAPACITY, EventStream
 from .errors import (
     EventCursorExpiredError,
     EventCursorInvalidError,
@@ -37,6 +38,9 @@ from .errors import (
 from .protocol import RpcEnvelope, RpcErrorInfo, RpcEvent, RpcRequest, RpcResponse
 
 __all__ = [
+    "DEFAULT_CAPACITY",
+    "DEFAULT_SUBSCRIBER_QUEUE_CAPACITY",
+    "EventStream",
     "SCHEMA_VERSION",
     "EventCursorExpiredError",
     "EventCursorInvalidError",
