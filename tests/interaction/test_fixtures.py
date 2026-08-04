@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from .conformance import (
     FIXED_TS,
+    KIT_EVENT_UUID,
     make_confirmation_request,
     make_event,
     make_response,
@@ -38,6 +40,7 @@ def test_confirmation_fixtures_are_synthetic_only() -> None:
     assert request.policy_names == ("kit-test-policy",)
     assert request.run_id == "run-kit"
     assert request.session_id == "session-kit"
+    assert request.hook == "before_tool_call"  # protocol-valid Hook
     response = make_response(request_id="fixture-2", decision="approve")
     assert response.request_id == "fixture-2"
     assert response.decision == "approve"
@@ -53,6 +56,14 @@ def test_rpc_fixtures_are_deterministic_and_json_safe() -> None:
     first_request = make_rpc_request(request_id="rpc-fixture", method="runtime.status", params={})
     second_request = make_rpc_request(request_id="rpc-fixture", method="runtime.status", params={})
     assert first_request == second_request
+
+
+def test_event_fixtures_are_protocol_valid() -> None:
+    """Fixture events carry UUID ids, positive sequences, and UTC timestamps."""
+    event = make_event(event_id=KIT_EVENT_UUID, sequence=3)
+    assert str(UUID(event.event_id)) == event.event_id
+    assert event.sequence >= 1
+    assert event.created_at.utcoffset() == timedelta(0)
 
 
 def test_to_json_safe_handles_kit_value_kinds() -> None:
@@ -80,7 +91,7 @@ def test_fixtures_never_depend_on_environment() -> None:
     request = make_confirmation_request(request_id="fixture-3", timeout_seconds=30.0)
     expected = {
         "id": "fixture-3",
-        "hook": "pre_tool_execution",
+        "hook": "before_tool_call",
         "reason": "synthetic confirmation fixture",
         "risk_level": "high",
         "policy_names": ["kit-test-policy"],

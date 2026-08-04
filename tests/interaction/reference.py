@@ -2,17 +2,23 @@
 
 These adapters implement the observable Confirmation v2 and Event Stream / RPC
 v1 semantics frozen in the milestone CONTEXT.md sections 4 and 5 with minimal,
-self-contained machinery.  They never import production modules; Integration
-binds the approved production components to the kit Protocols instead.
+self-contained machinery.  The wire codec enforces the CONTEXT.md revision 2
+invariants: duplicate JSON keys, non-finite numbers, empty identifiers, invalid
+Event UUIDs, non-positive sequences, empty event types, non-UTC timestamps,
+unknown versions, and non-object payloads are all rejected, and responses
+encode the canonical five-key success/failure shape.
 
-The kit drives time explicitly (``advance_time``) so every scenario is
-deterministic and never depends on real timing.
+They never import production modules; Integration binds the approved production
+components to the kit Protocols instead.  The kit drives time explicitly
+(``advance_time``) so every scenario is deterministic and never depends on
+real timing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
@@ -25,6 +31,7 @@ from .conformance import (
     ConfirmationResponse,
     DispatchedCall,
     ExecutedOperation,
+    KIT_REDACT_SECRET,
     ProtocolViolationError,
     ReopenOutcome,
     ReplayResult,
@@ -46,12 +53,25 @@ _REQUEST_ENVELOPE_KEYS = frozenset({"request_id", "method", "params", "schema_ve
 _EVENT_ENVELOPE_KEYS = frozenset(
     {"event_id", "sequence", "type", "data", "run_id", "created_at", "schema_version"}
 )
-_PARAM_SCHEMAS: dict[str, dict[str, type]] = {
-    "run.start": {"run_id": str},
-    "run.abort": {"run_id": str},
-    "events.replay": {"after_sequence": int},
-    "confirmation.respond": {"request_id": str, "decision": str},
-    "confirmation.respond_batch": {"responses": list},
+_RESPONSE_ENVELOPE_KEYS = frozenset({"request_id", "ok", "result", "error", "schema_version"})
+_ERROR_OBJECT_KEYS = frozenset({"code", "message", "details"})
+_RESPOND_ITEM_KEYS = frozenset({"request_id", "decision", "reason", "metadata"})
+_V1_DECISIONS = ("approve", "deny", "cancelled")
+
+# Exact v1 param contracts (CONTEXT.md revision 2): allowed keys, required keys.
+_PARAM_CONTRACTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "initialize": (frozenset(), frozenset()),
+    "runtime.status": (frozenset(), frozenset()),
+    "run.start": (frozenset({"prompt"}), frozenset({"prompt"})),
+    "run.abort": (frozenset(), frozenset()),
+    "confirmation.list": (frozenset(), frozenset()),
+    "confirmation.respond": (
+        frozenset({"request_id", "decision", "reason", "metadata"}),
+        frozenset({"request_id", "decision"}),
+    ),
+    "confirmation.respond_batch": (frozenset({"responses"}), frozenset({"responses"})),
+    "events.replay": (frozenset({"after_sequence"}), frozenset({"after_sequence"})),
+    "shutdown": (frozenset(), frozenset()),
 }
 
 
@@ -63,6 +83,27 @@ class _MethodError(Exception):
         self.code = code
         self.message = message
         self.details = details
+
+
+class _DuplicateKeyError(ValueError):
+    """A JSON object repeated a key; the strict codec rejects it."""
+
+
+class _NonFiniteError(ValueError):
+    """A JSON constant like NaN/Infinity appeared; the strict codec rejects it."""
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateKeyError(f"duplicate JSON key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def _reject_constant(token: str) -> None:
+    raise _NonFiniteError(f"non-finite number {token}")
 
 
 def _utc_now() -> datetime:
@@ -393,8 +434,10 @@ class ReferenceRpcAdapter:
         self._retained: list[RpcEvent] = []
         self._subscribers: list[_ReferenceSubscriber] = []
         self._active_run: str | None = None
+        self._run_counter = 0
         self._seen_request_ids: set[str] = set()
         self._dispatched: list[DispatchedCall] = []
+        self._armed_failures: set[str] = set()
         self._closed = False
         self._methods: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "initialize": self._h_initialize,
@@ -406,8 +449,6 @@ class ReferenceRpcAdapter:
             "confirmation.respond": self._h_confirmation_respond,
             "confirmation.respond_batch": self._h_confirmation_respond_batch,
             "shutdown": self._h_shutdown,
-            # kit-defined probe: always raises, used to prove RPC redaction
-            "explode": self._h_explode,
         }
 
     # -- handlers --
@@ -418,15 +459,17 @@ class ReferenceRpcAdapter:
         return {"active_run_id": self._active_run}
 
     async def _h_run_start(self, params: dict[str, Any]) -> dict[str, Any]:
-        run_id = params["run_id"]
-        if self._active_run is not None and self._active_run != run_id:
+        if self._active_run is not None:
             raise _MethodError("run_already_active", "another run is already active")
+        # the Host assigns the run id; the caller never chooses it
+        self._run_counter += 1
+        run_id = f"run-{self._run_counter}"
         self._active_run = run_id
         return {"run_id": run_id}
 
     async def _h_run_abort(self, params: dict[str, Any]) -> dict[str, Any]:
         self._active_run = None
-        return {"aborted": True, "run_id": params["run_id"]}
+        return {"aborted": True}
 
     async def _h_events_replay(self, params: dict[str, Any]) -> dict[str, Any]:
         result = self.replay(after_sequence=params["after_sequence"])
@@ -451,8 +494,10 @@ class ReferenceRpcAdapter:
         await self.close()
         return {"closed": True}
 
-    async def _h_explode(self, params: dict[str, Any]) -> dict[str, Any]:
-        raise RuntimeError(f"boom: token={params.get('token')!r}")
+    # -- test-only controls --
+    def arm_failure(self, method: str) -> None:
+        """Make one fixed v1 Host method raise unexpectedly on its next dispatch."""
+        self._armed_failures.add(method)
 
     # -- wire payloads --
     def _event_payload(self, event: RpcEvent) -> dict[str, Any]:
@@ -466,70 +511,162 @@ class ReferenceRpcAdapter:
             "schema_version": event.schema_version,
         }
 
-    def _decode_request(self, line: str) -> RpcRequest | WireError:
+    @staticmethod
+    def _conversion_error(exc: ValueError) -> WireError:
+        message = str(exc)
+        if "non-finite" in message:
+            return WireError(code="non_finite_number", message=message)
+        return WireError(code="unsupported_value", message=message)
+
+    def _strict_loads(self, line: str) -> dict[str, Any] | WireError:
         try:
-            obj = json.loads(line)
+            obj = json.loads(line, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+        except _DuplicateKeyError as exc:
+            return WireError(code="duplicate_json_key", message=str(exc))
+        except _NonFiniteError as exc:
+            return WireError(code="non_finite_number", message=str(exc))
         except json.JSONDecodeError:
             return WireError(code="malformed_json", message="invalid JSON")
         if not isinstance(obj, dict):
             return WireError(code="invalid_envelope", message="envelope must be a JSON object")
-        unknown = set(obj) - _REQUEST_ENVELOPE_KEYS
+        return obj
+
+    def _validate_params(self, method: str, params: dict[str, Any]) -> WireError | None:
+        contract = _PARAM_CONTRACTS.get(method)
+        if contract is None:
+            return None  # unknown method: params already object-checked
+        allowed, required = contract
+        unknown = set(params) - allowed
+        if unknown:
+            return WireError(code="invalid_params", message=f"unknown param key: {sorted(unknown)[0]}")
+        missing = required - set(params)
+        if missing:
+            return WireError(code="invalid_params", message=f"missing required param: {sorted(missing)[0]}")
+        if "prompt" in params and not isinstance(params["prompt"], str):
+            return WireError(code="invalid_params", message="param 'prompt' must be a string")
+        if "after_sequence" in params:
+            value = params["after_sequence"]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return WireError(code="invalid_params", message="param 'after_sequence' must be a non-negative integer")
+        if "request_id" in params and (not isinstance(params["request_id"], str) or not params["request_id"]):
+            return WireError(code="invalid_params", message="param 'request_id' must be a non-empty string")
+        if "decision" in params and params["decision"] not in _V1_DECISIONS:
+            return WireError(code="invalid_params", message="param 'decision' must be approve, deny, or cancelled")
+        if "reason" in params and not isinstance(params["reason"], str):
+            return WireError(code="invalid_params", message="param 'reason' must be a string")
+        if "metadata" in params and (isinstance(params["metadata"], bool) or not isinstance(params["metadata"], dict)):
+            return WireError(code="invalid_params", message="param 'metadata' must be an object")
+        if "responses" in params:
+            responses = params["responses"]
+            if isinstance(responses, bool) or not isinstance(responses, list):
+                return WireError(code="invalid_params", message="param 'responses' must be a list")
+            for item in responses:
+                error = self._validate_respond_item(item)
+                if error is not None:
+                    return error
+        return None
+
+    def _validate_respond_item(self, item: Any) -> WireError | None:
+        if isinstance(item, bool) or not isinstance(item, dict):
+            return WireError(code="invalid_params", message="each response must be an object")
+        unknown = set(item) - _RESPOND_ITEM_KEYS
+        if unknown:
+            return WireError(code="invalid_params", message=f"unknown response key: {sorted(unknown)[0]}")
+        if "request_id" not in item or "decision" not in item:
+            return WireError(code="invalid_params", message="each response needs request_id and decision")
+        if not isinstance(item["request_id"], str) or not item["request_id"]:
+            return WireError(code="invalid_params", message="response request_id must be a non-empty string")
+        if item["decision"] not in _V1_DECISIONS:
+            return WireError(code="invalid_params", message="response decision must be approve, deny, or cancelled")
+        if "reason" in item and not isinstance(item["reason"], str):
+            return WireError(code="invalid_params", message="response reason must be a string")
+        if "metadata" in item and (isinstance(item["metadata"], bool) or not isinstance(item["metadata"], dict)):
+            return WireError(code="invalid_params", message="response metadata must be an object")
+        return None
+
+    def _decode_request(self, line: str) -> RpcRequest | WireError:
+        loaded = self._strict_loads(line)
+        if isinstance(loaded, WireError):
+            return loaded
+        unknown = set(loaded) - _REQUEST_ENVELOPE_KEYS
         if unknown:
             return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
-        request_id = obj.get("request_id")
-        method = obj.get("method")
-        if not isinstance(request_id, str) or not isinstance(method, str):
-            return WireError(code="invalid_envelope", message="request_id and method must be strings")
-        schema_version = obj.get("schema_version", 1)
+        request_id = loaded.get("request_id")
+        method = loaded.get("method")
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or not isinstance(method, str)
+            or not method
+        ):
+            return WireError(code="invalid_envelope", message="request_id and method must be non-empty strings")
+        schema_version = loaded.get("schema_version", 1)
         if (
             isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
             or schema_version != 1
         ):
             return WireError(code="invalid_schema_version", message="unsupported schema version")
-        params = obj.get("params")
+        params = loaded.get("params")
         if isinstance(params, bool) or not isinstance(params, dict):
             return WireError(code="invalid_params", message="params must be a JSON object")
-        for key, expected in _PARAM_SCHEMAS.get(method, {}).items():
-            if key not in params:
-                continue
-            value = params[key]
-            if expected is int:
-                if isinstance(value, bool) or not isinstance(value, int):
-                    return WireError(code="invalid_params", message=f"param {key!r} must be an integer")
-            elif not isinstance(value, expected):
-                return WireError(code="invalid_params", message=f"param {key!r} must be a {expected.__name__}")
+        error = self._validate_params(method, params)
+        if error is not None:
+            return error
         return RpcRequest(
             request_id=request_id, method=method, params=params, schema_version=1
         )
 
-    def _decode_event(self, line: str) -> RpcEvent | WireError:
+    @staticmethod
+    def _is_uuid(value: str) -> bool:
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            return WireError(code="malformed_json", message="invalid JSON")
-        if not isinstance(obj, dict):
-            return WireError(code="invalid_envelope", message="envelope must be a JSON object")
-        unknown = set(obj) - _EVENT_ENVELOPE_KEYS
+            return str(uuid.UUID(value)) == value
+        except (ValueError, AttributeError, TypeError):
+            return False
+
+    @staticmethod
+    def _parse_utc_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            return None
+        return parsed
+
+    @staticmethod
+    def _is_utc(value: datetime) -> bool:
+        return value.tzinfo is not None and value.utcoffset() == timedelta(0)
+
+    def _decode_event(self, line: str) -> RpcEvent | WireError:
+        loaded = self._strict_loads(line)
+        if isinstance(loaded, WireError):
+            return loaded
+        unknown = set(loaded) - _EVENT_ENVELOPE_KEYS
         if unknown:
             return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
-        created_at = self._parse_timestamp(obj.get("created_at"))
+        created_at = self._parse_utc_timestamp(loaded.get("created_at"))
         if created_at is None:
-            return WireError(code="invalid_timestamp", message="created_at must be an RFC-3339 timestamp")
-        data = obj.get("data")
+            return WireError(code="invalid_timestamp", message="created_at must be a UTC timestamp")
+        data = loaded.get("data")
         if isinstance(data, bool) or not isinstance(data, dict):
             return WireError(code="invalid_data", message="data must be a JSON object")
-        sequence = obj.get("sequence")
-        if isinstance(sequence, bool) or not isinstance(sequence, int):
-            return WireError(code="invalid_event", message="sequence must be an integer")
-        event_id = obj.get("event_id")
-        type_ = obj.get("type")
-        if not isinstance(event_id, str) or not isinstance(type_, str):
-            return WireError(code="invalid_event", message="event_id and type must be strings")
-        run_id = obj.get("run_id")
+        sequence = loaded.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            return WireError(code="invalid_event", message="sequence must be a positive integer")
+        event_id = loaded.get("event_id")
+        type_ = loaded.get("type")
+        if not isinstance(event_id, str) or not self._is_uuid(event_id):
+            return WireError(code="invalid_event", message="event_id must be a UUID string")
+        if not isinstance(type_, str) or not type_:
+            return WireError(code="invalid_event", message="type must be a non-empty string")
+        run_id = loaded.get("run_id")
         if run_id is not None and not isinstance(run_id, str):
             return WireError(code="invalid_event", message="run_id must be a string or null")
-        schema_version = obj.get("schema_version", 1)
+        schema_version = loaded.get("schema_version", 1)
         if (
             isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
@@ -546,29 +683,77 @@ class ReferenceRpcAdapter:
             schema_version=schema_version,
         )
 
-    @staticmethod
-    def _parse_timestamp(value: Any) -> datetime | None:
-        if not isinstance(value, str):
-            return None
-        text = value[:-1] + "+00:00" if value.endswith("Z") else value
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return None
+    def _decode_response(self, line: str) -> RpcResponse | WireError:
+        loaded = self._strict_loads(line)
+        if isinstance(loaded, WireError):
+            return loaded
+        unknown = set(loaded) - _RESPONSE_ENVELOPE_KEYS
+        if unknown:
+            return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
+        missing = _RESPONSE_ENVELOPE_KEYS - set(loaded)
+        if missing:
+            return WireError(code="invalid_envelope", message=f"missing envelope key: {sorted(missing)[0]}")
+        request_id = loaded.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return WireError(code="invalid_response", message="request_id must be a non-empty string")
+        ok = loaded.get("ok")
+        if not isinstance(ok, bool):
+            return WireError(code="invalid_response", message="ok must be a boolean")
+        schema_version = loaded.get("schema_version", 1)
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        ):
+            return WireError(code="invalid_schema_version", message="unsupported schema version")
+        result = loaded.get("result")
+        error = loaded.get("error")
+        if ok:
+            if isinstance(result, bool) or not isinstance(result, dict):
+                return WireError(code="invalid_response", message="a success must carry an object result")
+            if error is not None:
+                return WireError(code="invalid_response", message="a success must have error null")
+            return RpcResponse(request_id=request_id, ok=True, result=result, error=None, schema_version=1)
+        if result is not None:
+            return WireError(code="invalid_response", message="a failure must have result null")
+        if isinstance(error, bool) or not isinstance(error, dict):
+            return WireError(code="invalid_response", message="a failure must carry one exact error object")
+        unknown_error = set(error) - _ERROR_OBJECT_KEYS
+        if unknown_error:
+            return WireError(code="invalid_response", message=f"unknown error key: {sorted(unknown_error)[0]}")
+        missing_error = _ERROR_OBJECT_KEYS - set(error)
+        if missing_error:
+            return WireError(code="invalid_response", message=f"missing error key: {sorted(missing_error)[0]}")
+        code = error.get("code")
+        message = error.get("message")
+        if not isinstance(code, str) or not code or not isinstance(message, str) or not message:
+            return WireError(code="invalid_response", message="error code and message must be non-empty strings")
+        details = error.get("details")
+        if details is not None and (isinstance(details, bool) or not isinstance(details, dict)):
+            return WireError(code="invalid_response", message="error details must be an object or null")
+        return RpcResponse(
+            request_id=request_id,
+            ok=False,
+            result=None,
+            error=RpcErrorInfo(code=code, message=message, details=details),
+            schema_version=1,
+        )
 
     # -- event stream --
     async def publish(self, type_: str, data: dict[str, Any]) -> RpcEvent:
         if self._closed:
             raise ProtocolViolationError(WireError(code="closed", message="stream is closed"))
+        if not isinstance(type_, str) or not type_:
+            raise ProtocolViolationError(
+                WireError(code="invalid_event", message="type must be a non-empty string")
+            )
         try:
             safe_data = to_json_safe(data)
-        except ValueError:
-            raise ProtocolViolationError(
-                WireError(code="unsupported_value", message="event data contains unsupported values")
-            ) from None
+        except ValueError as exc:
+            raise ProtocolViolationError(self._conversion_error(exc)) from None
         self._sequence += 1
         event = RpcEvent(
-            event_id=f"ev-{self._sequence}",
+            event_id=str(uuid.uuid4()),
             sequence=self._sequence,
             type=type_,
             data=safe_data,
@@ -619,7 +804,7 @@ class ReferenceRpcAdapter:
             return RpcResponse(
                 request_id=request.request_id,
                 ok=False,
-                error=RpcErrorInfo(code="duplicate_request_id", message="request id already used"),
+                error=RpcErrorInfo(code="duplicate_request", message="request id already used"),
             )
         self._seen_request_ids.add(request.request_id)
         return await self._dispatch(request.request_id, request.method, request.params)
@@ -638,6 +823,8 @@ class ReferenceRpcAdapter:
             DispatchedCall(request_id=request_id, method=method, params=to_json_safe(params))
         )
         try:
+            if method in self._armed_failures:
+                raise RuntimeError(f"boom: token={KIT_REDACT_SECRET!r}")
             result = await handler(params)
         except _MethodError as error:
             return RpcResponse(
@@ -671,14 +858,80 @@ class ReferenceRpcAdapter:
         return WireResult(ok=False, response=response, error=wire_error)
 
     def event_wire(self, event: RpcEvent) -> str | WireError:
+        if not isinstance(event.event_id, str) or not self._is_uuid(event.event_id):
+            return WireError(code="invalid_event", message="event_id must be a UUID string")
+        if isinstance(event.sequence, bool) or not isinstance(event.sequence, int) or event.sequence < 1:
+            return WireError(code="invalid_event", message="sequence must be a positive integer")
+        if not isinstance(event.type, str) or not event.type:
+            return WireError(code="invalid_event", message="type must be a non-empty string")
+        if not self._is_utc(event.created_at):
+            return WireError(code="invalid_timestamp", message="created_at must be a UTC timestamp")
+        if isinstance(event.data, bool) or not isinstance(event.data, dict):
+            return WireError(code="invalid_data", message="data must be a JSON object")
         try:
             payload = self._event_payload(event)
-        except ValueError:
-            return WireError(code="unsupported_value", message="event contains unsupported values")
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except ValueError as exc:
+            return self._conversion_error(exc)
 
     def parse_wire_event(self, line: str) -> RpcEvent | WireError:
         return self._decode_event(line)
+
+    def response_wire(self, response: RpcResponse) -> str | WireError:
+        if (
+            isinstance(response.schema_version, bool)
+            or not isinstance(response.schema_version, int)
+            or response.schema_version != 1
+        ):
+            return WireError(code="invalid_schema_version", message="unsupported schema version")
+        if not isinstance(response.request_id, str) or not response.request_id:
+            return WireError(code="invalid_response", message="request_id must be a non-empty string")
+        if response.ok:
+            if isinstance(response.result, bool) or not isinstance(response.result, dict):
+                return WireError(code="invalid_response", message="a success must carry an object result")
+            if response.error is not None:
+                return WireError(code="invalid_response", message="a success must have error null")
+            try:
+                payload = {
+                    "request_id": response.request_id,
+                    "ok": True,
+                    "result": to_json_safe(response.result),
+                    "error": None,
+                    "schema_version": 1,
+                }
+                return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            except ValueError as exc:
+                return self._conversion_error(exc)
+        if response.result is not None:
+            return WireError(code="invalid_response", message="a failure must have result null")
+        if response.error is None:
+            return WireError(code="invalid_response", message="a failure must carry one exact error object")
+        error = response.error
+        if (
+            not isinstance(error.code, str)
+            or not error.code
+            or not isinstance(error.message, str)
+            or not error.message
+        ):
+            return WireError(code="invalid_response", message="error code and message must be non-empty strings")
+        try:
+            payload = {
+                "request_id": response.request_id,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                    "details": to_json_safe(error.details),
+                },
+                "schema_version": 1,
+            }
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except ValueError as exc:
+            return self._conversion_error(exc)
+
+    def parse_wire_response(self, line: str) -> RpcResponse | WireError:
+        return self._decode_response(line)
 
     def dispatched(self) -> tuple[DispatchedCall, ...]:
         return tuple(self._dispatched)

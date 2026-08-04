@@ -17,7 +17,21 @@ from .conformance import (
     RPC_SCENARIOS,
     ConformanceFailure,
 )
-from .mutants import CONFIRMATION_MUTANTS, RPC_MUTANTS
+from .mutants import (
+    CONFIRMATION_MUTANTS,
+    RPC_MUTANTS,
+    BlockedReaderRpcMutant,
+    DuplicateAcceptConfirmationMutant,
+    DuplicateDispatchRpcMutant,
+    DuplicateReplayRpcMutant,
+    ExceptionLeakRpcMutant,
+    ExpiredResponseAcceptConfirmationMutant,
+    PartialBatchConfirmationMutant,
+    ReplayOrphanConfirmationMutant,
+    SkippedEventRpcMutant,
+    StaleCursorSilentSkipRpcMutant,
+    TimeoutAsAbortConfirmationMutant,
+)
 from .reference import ReferenceConfirmationAdapter, ReferenceRpcAdapter
 
 
@@ -57,13 +71,28 @@ def test_rpc_mutant_fails_only_its_intended_scenario(mutant: str) -> None:
         _run(run(factory()))
 
 
-def test_acceptance_matrix_is_fully_covered() -> None:
-    """Every mutant targets a registered scenario; the matrix has 11 mutants."""
+def test_acceptance_matrix_is_exactly_mapped() -> None:
+    """The mutant-to-scenario mapping is exact, not merely inclusive."""
+    expected_confirmation = {
+        "replay-orphan": (ReplayOrphanConfirmationMutant, "orphan/no replay"),
+        "partial-batch": (PartialBatchConfirmationMutant, "atomic batch"),
+        "duplicate-accept": (DuplicateAcceptConfirmationMutant, "duplicate response"),
+        "timeout-as-abort": (TimeoutAsAbortConfirmationMutant, "timeout/no execution"),
+        "expired-accept": (ExpiredResponseAcceptConfirmationMutant, "stale/expired rejection"),
+    }
+    expected_rpc = {
+        "skipped-event": (SkippedEventRpcMutant, "replay/live handoff"),
+        "duplicate-replay": (DuplicateReplayRpcMutant, "event uniqueness"),
+        "stale-cursor-silent-skip": (StaleCursorSilentSkipRpcMutant, "cursor expiration"),
+        "blocked-reader": (BlockedReaderRpcMutant, "slow subscriber failure"),
+        "duplicate-dispatch": (DuplicateDispatchRpcMutant, "duplicate request ID"),
+        "exception-leak": (ExceptionLeakRpcMutant, "RPC redaction"),
+    }
+    assert CONFIRMATION_MUTANTS == expected_confirmation
+    assert RPC_MUTANTS == expected_rpc
+    scenarios = set(CONFIRMATION_SCENARIOS) | set(RPC_SCENARIOS)
     targets = {target for _, target in CONFIRMATION_MUTANTS.values()}
     targets |= {target for _, target in RPC_MUTANTS.values()}
-    scenarios = set(CONFIRMATION_SCENARIOS) | set(RPC_SCENARIOS)
     assert targets <= scenarios
-    assert len(CONFIRMATION_MUTANTS) == 5
-    assert len(RPC_MUTANTS) == 6
     assert len(CONFIRMATION_SCENARIOS) == 8
-    assert len(RPC_SCENARIOS) == 9
+    assert len(RPC_SCENARIOS) == 11

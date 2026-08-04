@@ -176,14 +176,16 @@ class SkippedEventRpcMutant(ReferenceRpcAdapter):
 
 
 class DuplicateReplayRpcMutant(ReferenceRpcAdapter):
-    """MUTANT: delivers each retained event twice during subscribe replay."""
+    """MUTANT: delivers every retained event twice via direct replay."""
 
-    def _retained_for_subscriber(self, after_sequence: int) -> list[RpcEvent]:
-        events = super()._retained_for_subscriber(after_sequence)
+    def replay(self, *, after_sequence: int) -> ReplayResult:
+        result = super().replay(after_sequence=after_sequence)
+        if not result.ok:
+            return result
         doubled: list[RpcEvent] = []
-        for event in events:
+        for event in result.events:
             doubled.extend([event, event])
-        return doubled
+        return ReplayResult(ok=True, events=tuple(doubled))
 
 
 class StaleCursorSilentSkipRpcMutant(ReferenceRpcAdapter):
@@ -219,9 +221,11 @@ class DuplicateDispatchRpcMutant(ReferenceRpcAdapter):
     async def _dispatch(
         self, request_id: str, method: str, params: dict[str, Any]
     ) -> RpcResponse:
-        # broken: the handler runs twice per request id
+        # broken: the handler runs twice per request id; the first response is
+        # returned so only the double effect (and double dispatch log) shows
+        first = await super()._dispatch(request_id, method, params)
         await super()._dispatch(request_id, method, params)
-        return await super()._dispatch(request_id, method, params)
+        return first
 
 
 class ExceptionLeakRpcMutant(ReferenceRpcAdapter):
@@ -250,7 +254,7 @@ CONFIRMATION_MUTANTS: dict[str, tuple[ConfirmationMutantFactory, str]] = {
 
 RPC_MUTANTS: dict[str, tuple[RpcMutantFactory, str]] = {
     "skipped-event": (SkippedEventRpcMutant, "replay/live handoff"),
-    "duplicate-replay": (DuplicateReplayRpcMutant, "replay/live handoff"),
+    "duplicate-replay": (DuplicateReplayRpcMutant, "event uniqueness"),
     "stale-cursor-silent-skip": (StaleCursorSilentSkipRpcMutant, "cursor expiration"),
     "blocked-reader": (BlockedReaderRpcMutant, "slow subscriber failure"),
     "duplicate-dispatch": (DuplicateDispatchRpcMutant, "duplicate request ID"),

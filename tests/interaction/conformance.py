@@ -3,7 +3,11 @@
 This module defines the observable-behavior vocabulary for the Confirmation v2
 and Event Stream / RPC v1 contracts frozen in the milestone CONTEXT.md sections
 4 and 5: narrow adapter Protocols, result dataclasses, deterministic synthetic
-fixture builders, and reusable async scenario functions.
+fixture builders, and reusable async scenario functions.  It enforces the
+CONTEXT.md revision 2 invariants: strict wire codecs (duplicate-key rejection,
+non-finite numbers, non-empty identifiers, UUID event ids, positive sequences,
+UTC timestamps), exact v1 method param contracts, and the canonical five-key
+response wire shape.
 
 The kit is production-independent: it never imports any production module, it
 describes only observable behavior (no private fields, no implementation class
@@ -18,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import math
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -43,7 +48,7 @@ class ConfirmationRequest:
     """Synthetic request shape the kit hands to an adapter."""
 
     id: str
-    hook: str = "pre_tool_execution"
+    hook: str = "before_tool_call"
     reason: str = "synthetic confirmation fixture"
     risk_level: str = "high"
     policy_names: tuple[str, ...] = ()
@@ -291,16 +296,22 @@ class RpcAdapter(Protocol):
     async def send_wire(self, line: str) -> WireResult: ...
     def event_wire(self, event: RpcEvent) -> str | WireError: ...
     def parse_wire_event(self, line: str) -> RpcEvent | WireError: ...
+    def response_wire(self, response: RpcResponse) -> str | WireError: ...
+    def parse_wire_response(self, line: str) -> RpcResponse | WireError: ...
+    def arm_failure(self, method: str) -> None:
+        """Test-only control: make one fixed v1 Host method raise unexpectedly."""
+        ...
     def dispatched(self) -> tuple[DispatchedCall, ...]: ...
     async def close(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
-# Deterministic synthetic fixtures
+# Deterministic synthetic fixtures (protocol-valid, CONTEXT revision 2)
 # ---------------------------------------------------------------------------
 
 FIXED_TS: datetime = datetime(2026, 1, 1, tzinfo=UTC)
 
+KIT_EVENT_UUID: str = "12345678-1234-5678-1234-567812345678"
 KIT_REDACT_SECRET: str = "kit-redact-secret"
 KIT_REDACT_COMMAND: str = "echo kit-redact-command"
 
@@ -316,11 +327,12 @@ def make_confirmation_request(
     """Build a synthetic, deterministic confirmation request.
 
     Every value is synthetic; no .env, real Trace, real Session, or user data
-    is read.  The same arguments always produce the identical request.
+    is read.  The same arguments always produce the identical request.  The
+    Hook is the protocol-valid ``before_tool_call``.
     """
     base: dict[str, Any] = {
         "id": request_id,
-        "hook": "pre_tool_execution",
+        "hook": "before_tool_call",
         "reason": "synthetic confirmation fixture",
         "risk_level": "high",
         "policy_names": ("kit-test-policy",),
@@ -348,7 +360,7 @@ def make_response(
 
 def make_event(
     *,
-    event_id: str = "ev-1",
+    event_id: str = KIT_EVENT_UUID,
     sequence: int = 1,
     type_: str = "tool_execution_start",
     data: dict[str, Any] | None = None,
@@ -356,6 +368,7 @@ def make_event(
     created_at: datetime = FIXED_TS,
     schema_version: int = 1,
 ) -> RpcEvent:
+    """Build a protocol-valid event: UUID id, positive sequence, UTC timestamp."""
     return RpcEvent(
         event_id=event_id,
         sequence=sequence,
@@ -386,19 +399,37 @@ def to_json_safe(value: Any) -> JsonLike:
     """Convert kit values to JSON-safe equivalents; reject everything else.
 
     Accepts JSON primitives, mappings, sequences, dataclasses, enums, Path, and
-    datetime/date.  Any other value raises ValueError; there is never a ``repr``
-    fallback.
+    datetime/date.  Non-string mapping keys, non-finite floats, and Enum values
+    that are not JSON primitives are rejected with ValueError; there is never a
+    ``repr`` fallback.
     """
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite float")
         return value
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Enum):
-        return value.value if isinstance(value.value, (str, int, float, bool)) else str(value.value)
+        if isinstance(value.value, (str, int, bool)):
+            return value.value
+        if isinstance(value.value, float):
+            if not math.isfinite(value.value):
+                raise ValueError("non-finite float")
+            return value.value
+        raise ValueError(f"enum value of type {type(value.value).__name__} is not JSON-safe")
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {str(key): to_json_safe(item) for key, item in value.items()}
+        converted: dict[str, JsonLike] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"non-string mapping key of type {type(key).__name__}")
+            converted[key] = to_json_safe(item)
+        return converted
     if isinstance(value, (tuple, list)):
         return [to_json_safe(item) for item in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -676,6 +707,15 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
     cases: list[tuple[str, str]] = [
         ('{"request_id": "broken"', "malformed_json"),
         (
+            '{"request_id":"sj-1","method":"runtime.status","params":{},"schema_version":1,'
+            '"request_id":"dup"}',
+            "duplicate_json_key",
+        ),
+        (
+            '{"request_id":"sj-1","method":"runtime.status","params":{"n":NaN},"schema_version":1}',
+            "non_finite_number",
+        ),
+        (
             '{"request_id":"sj-1","method":"runtime.status","params":{},"schema_version":2}',
             "invalid_schema_version",
         ),
@@ -684,12 +724,38 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
             "invalid_envelope_key",
         ),
         (
+            '{"request_id":"sj-1","method":"runtime.status","schema_version":1}',
+            "invalid_params",
+        ),
+        (
             '{"request_id":"sj-1","method":"runtime.status","params":5,"schema_version":1}',
             "invalid_params",
         ),
         (
+            '{"request_id":"","method":"runtime.status","params":{},"schema_version":1}',
+            "invalid_envelope",
+        ),
+        (
+            '{"request_id":"sj-1","method":"","params":{},"schema_version":1}',
+            "invalid_envelope",
+        ),
+        (
             '{"request_id":"sj-1","method":"events.replay","params":{"after_sequence":true},'
             '"schema_version":1}',
+            "invalid_params",
+        ),
+        (
+            '{"request_id":"sj-1","method":"run.start","params":{"prompt":"x","run_id":"y"},'
+            '"schema_version":1}',
+            "invalid_params",
+        ),
+        (
+            '{"request_id":"sj-1","method":"run.start","params":{},"schema_version":1}',
+            "invalid_params",
+        ),
+        (
+            '{"request_id":"sj-1","method":"confirmation.respond",'
+            '"params":{"request_id":"r","decision":"approved"},"schema_version":1}',
             "invalid_params",
         ),
     ]
@@ -698,41 +764,95 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
         if result.ok:
             raise ConformanceFailure(f"malformed wire line was accepted: {line!r}")
         if result.error is None or result.error.code != expected:
-            raise ConformanceFailure(
-                f"expected wire error {expected!r}, got {result.error}"
-            )
+            raise ConformanceFailure(f"expected wire error {expected!r}, got {result.error}")
     good = await adapter.send_wire(
         '{"request_id":"sj-ok","method":"runtime.status","params":{},"schema_version":1}'
     )
     if not good.ok or good.response is None or not good.response.ok:
         raise ConformanceFailure("a well-formed request must be accepted")
-    # event decode rejects malformed timestamps and non-object data
-    bad_ts = adapter.parse_wire_event(
-        '{"event_id":"e-1","sequence":1,"type":"t","data":{},"run_id":null,'
-        '"created_at":"not-a-date","schema_version":1}'
-    )
-    if not isinstance(bad_ts, WireError) or bad_ts.code != "invalid_timestamp":
-        raise ConformanceFailure("malformed event timestamp must be rejected")
-    bad_data = adapter.parse_wire_event(
-        '{"event_id":"e-1","sequence":1,"type":"t","data":[],"run_id":null,'
-        '"created_at":"2026-01-01T00:00:00Z","schema_version":1}'
-    )
-    if not isinstance(bad_data, WireError) or bad_data.code != "invalid_data":
-        raise ConformanceFailure("non-object event data must be rejected")
-    # event encode rejects unsupported values; there is never a repr fallback
-    unsupported = adapter.event_wire(make_event(event_id="ev-bad", sequence=1, data={"obj": object()}))
-    if not isinstance(unsupported, WireError) or unsupported.code != "unsupported_value":
-        raise ConformanceFailure("unsupported event data must be a protocol error")
-    # a valid event encodes to one compact JSON object per line
-    encoded = adapter.event_wire(make_event(event_id="ev-ok", sequence=1))
+    # event decode rejects invalid identifiers, sequences, timestamps, and data
+    event_cases: list[tuple[str, str]] = [
+        (
+            '{"event_id":"not-a-uuid","sequence":1,"type":"t","data":{},"run_id":null,'
+            '"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
+            "invalid_event",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":0,"type":"t",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
+            "invalid_event",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
+            "invalid_event",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T00:00:00","schema_version":1}',
+            "invalid_timestamp",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T05:00:00+05:00","schema_version":1}',
+            "invalid_timestamp",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T00:00:00Z",'
+            '"schema_version":1,"sequence":2}',
+            "duplicate_json_key",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{"n":NaN},"run_id":null,"created_at":"2026-01-01T00:00:00Z",'
+            '"schema_version":1}',
+            "non_finite_number",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":[],"run_id":null,"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
+            "invalid_data",
+        ),
+    ]
+    for line, expected in event_cases:
+        result = adapter.parse_wire_event(line)
+        if not isinstance(result, WireError) or result.code != expected:
+            raise ConformanceFailure(f"expected event wire error {expected!r}, got {result}")
+    # event encode enforces the same invariants
+    encode_cases: list[tuple[RpcEvent, str]] = [
+        (make_event(sequence=0), "invalid_event"),
+        (make_event(event_id="not-a-uuid"), "invalid_event"),
+        (make_event(type_=""), "invalid_event"),
+        (make_event(created_at=datetime(2026, 1, 1)), "invalid_timestamp"),
+        (make_event(data={"obj": object()}), "unsupported_value"),
+        (make_event(data={"x": math.nan}), "non_finite_number"),
+    ]
+    for event, expected in encode_cases:
+        result = adapter.event_wire(event)
+        if not isinstance(result, WireError) or result.code != expected:
+            raise ConformanceFailure(f"expected event encode error {expected!r}, got {result}")
+    # a valid event encodes to one compact JSON object per line and round-trips
+    valid = make_event()
+    encoded = adapter.event_wire(valid)
     if isinstance(encoded, WireError):
         raise ConformanceFailure("a valid event must encode to wire text")
     if "\n" in encoded:
         raise ConformanceFailure("wire output must be one JSON object per line")
     payload = json.loads(encoded)
-    if not isinstance(payload, dict) or payload["event_id"] != "ev-ok":
+    if not isinstance(payload, dict) or payload["event_id"] != valid.event_id:
         raise ConformanceFailure("event wire output must be a JSON object")
-    # publish of unsupported data fails explicitly
+    decoded = adapter.parse_wire_event(encoded)
+    if decoded != valid:
+        raise ConformanceFailure("event encode/decode must round-trip symmetrically")
+    # publish validates the event type and data
+    try:
+        await adapter.publish("", {"n": 1})
+    except ProtocolViolationError as violation:
+        if violation.error.code != "invalid_event":
+            raise ConformanceFailure("empty event type must be a protocol error")
+    else:
+        raise ConformanceFailure("publish of an empty event type must fail explicitly")
     try:
         await adapter.publish("type", {"bad": object()})
     except ProtocolViolationError as violation:
@@ -749,12 +869,12 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
     second = await adapter.send_wire(
         '{"request_id":"sj-dup","method":"runtime.status","params":{},"schema_version":1}'
     )
-    if second.ok or second.error is None or second.error.code != "duplicate_request_id":
+    if second.ok or second.error is None or second.error.code != "duplicate_request":
         raise ConformanceFailure("duplicate request id must be rejected at the wire level")
 
 
 async def run_event_ordering(adapter: RpcAdapter) -> None:
-    """Sequences start at 1, are strictly increasing, and replay preserves order."""
+    """Sequences start at 1 and are strictly increasing per server process."""
     events: list[RpcEvent] = []
     for index in range(1, 6):
         event = await adapter.publish(f"type-{index}", {"n": index})
@@ -762,14 +882,24 @@ async def run_event_ordering(adapter: RpcAdapter) -> None:
     sequences = [event.sequence for event in events]
     if sequences != [1, 2, 3, 4, 5]:
         raise ConformanceFailure(f"sequences must be monotonic from 1, got {sequences}")
+    if any(event.sequence < 1 for event in events):
+        raise ConformanceFailure("event sequences must be positive")
+
+
+async def run_event_uniqueness(adapter: RpcAdapter) -> None:
+    """Replay delivers every retained event exactly once."""
+    for index in range(1, 6):
+        await adapter.publish(f"type-{index}", {"n": index})
     replay = adapter.replay(after_sequence=0)
     if not replay.ok:
         raise ConformanceFailure("a fresh replay must succeed")
-    replayed = [event.sequence for event in replay.events]
-    if replayed != [1, 2, 3, 4, 5]:
-        raise ConformanceFailure(
-            f"replay must preserve order without gaps or duplicates, got {replayed}"
-        )
+    events = replay.events
+    sequences = [event.sequence for event in events]
+    if len(events) != 5 or sequences != [1, 2, 3, 4, 5]:
+        raise ConformanceFailure(f"replay must return each event exactly once, got {sequences}")
+    ids = [event.event_id for event in events]
+    if len(set(ids)) != len(ids):
+        raise ConformanceFailure("replay delivered an event more than once")
 
 
 async def run_cursor_expiration(adapter: RpcAdapter) -> None:
@@ -792,8 +922,8 @@ async def run_cursor_expiration(adapter: RpcAdapter) -> None:
     tail = adapter.replay(after_sequence=capacity)
     if not tail.ok:
         raise ConformanceFailure("a valid cursor must still replay")
-    tail_sequences = [event.sequence for event in tail.events]
-    if tail_sequences != [capacity + 1, capacity + 2]:
+    tail_sequences = {event.sequence for event in tail.events}
+    if tail_sequences != {capacity + 1, capacity + 2}:
         raise ConformanceFailure(
             f"replay after the retained edge returned {tail_sequences}"
         )
@@ -883,9 +1013,9 @@ async def run_duplicate_request_id(adapter: RpcAdapter) -> None:
     second = await adapter.call(request)
     if second.ok:
         raise ConformanceFailure("a duplicate request id must be rejected")
-    if second.error is None or second.error.code != "duplicate_request_id":
+    if second.error is None or second.error.code != "duplicate_request":
         raise ConformanceFailure(
-            f"duplicate id must be duplicate_request_id, got {second.error}"
+            f"duplicate id must be duplicate_request, got {second.error}"
         )
     dispatches = [call for call in adapter.dispatched() if call.request_id == "dup-id-1"]
     if len(dispatches) != 1:
@@ -897,12 +1027,15 @@ async def run_duplicate_request_id(adapter: RpcAdapter) -> None:
 async def run_concurrent_run_rejection(adapter: RpcAdapter) -> None:
     """V1 permits one active Run; a second start is rejected run_already_active."""
     first = await adapter.call(
-        make_rpc_request(request_id="run-1", method="run.start", params={"run_id": "run-a"})
+        make_rpc_request(request_id="run-1", method="run.start", params={"prompt": "synthetic prompt"})
     )
     if not first.ok:
         raise ConformanceFailure("the first run.start must succeed")
+    first_run_id = first.result.get("run_id") if first.result else None
+    if not isinstance(first_run_id, str) or not first_run_id:
+        raise ConformanceFailure("run.start must return a Host-assigned non-empty run id")
     second = await adapter.call(
-        make_rpc_request(request_id="run-2", method="run.start", params={"run_id": "run-b"})
+        make_rpc_request(request_id="run-2", method="run.start", params={"prompt": "second prompt"})
     )
     if second.ok:
         raise ConformanceFailure("a second run.start must be rejected")
@@ -913,15 +1046,15 @@ async def run_concurrent_run_rejection(adapter: RpcAdapter) -> None:
     status = await adapter.call(
         make_rpc_request(request_id="run-3", method="runtime.status", params={})
     )
-    if not status.ok or status.result is None or status.result.get("active_run_id") != "run-a":
+    if not status.ok or status.result is None or status.result.get("active_run_id") != first_run_id:
         raise ConformanceFailure("runtime.status must report the active run")
     aborted = await adapter.call(
-        make_rpc_request(request_id="run-4", method="run.abort", params={"run_id": "run-a"})
+        make_rpc_request(request_id="run-4", method="run.abort", params={})
     )
     if not aborted.ok:
         raise ConformanceFailure("run.abort must succeed")
     third = await adapter.call(
-        make_rpc_request(request_id="run-5", method="run.start", params={"run_id": "run-c"})
+        make_rpc_request(request_id="run-5", method="run.start", params={"prompt": "third prompt"})
     )
     if not third.ok:
         raise ConformanceFailure("run.start after abort must succeed")
@@ -929,15 +1062,12 @@ async def run_concurrent_run_rejection(adapter: RpcAdapter) -> None:
 
 async def run_rpc_redaction(adapter: RpcAdapter) -> None:
     """Exceptions never leak tracebacks, arguments, or secrets into RPC errors."""
+    adapter.arm_failure("runtime.status")  # one fixed v1 Host method misbehaves
     response = await adapter.call(
-        make_rpc_request(
-            request_id="redact-1",
-            method="explode",
-            params={"token": KIT_REDACT_SECRET, "command": "rm -rf /tmp/kit"},
-        )
+        make_rpc_request(request_id="redact-1", method="runtime.status", params={})
     )
     if response.ok:
-        raise ConformanceFailure("the exploding method must fail")
+        raise ConformanceFailure("the armed method must fail")
     if response.error is None or response.error.code != "internal_error":
         raise ConformanceFailure(
             f"an unexpected exception must map to internal_error, got {response.error}"
@@ -945,9 +1075,85 @@ async def run_rpc_redaction(adapter: RpcAdapter) -> None:
     text = response.error.message
     if response.error.details is not None:
         text += json.dumps(to_json_safe(response.error.details), sort_keys=True)
-    for leaked in (KIT_REDACT_SECRET, "rm -rf", "RuntimeError", "Traceback"):
+    for leaked in (KIT_REDACT_SECRET, "RuntimeError", "Traceback", "boom"):
         if leaked in text:
             raise ConformanceFailure("RPC error leaked exception or argument content")
+
+
+async def run_response_wire_invariant(adapter: RpcAdapter) -> None:
+    """Success and failure responses carry the canonical five-key wire shape."""
+    ok_response = await adapter.call(
+        make_rpc_request(request_id="wire-ok", method="initialize", params={})
+    )
+    if not ok_response.ok:
+        raise ConformanceFailure("initialize must succeed")
+    wire = adapter.response_wire(ok_response)
+    if isinstance(wire, WireError):
+        raise ConformanceFailure(f"a success response must encode, got {wire.code}")
+    payload = json.loads(wire)
+    if set(payload) != {"request_id", "ok", "result", "error", "schema_version"}:
+        raise ConformanceFailure(f"success wire must carry exactly five keys, got {sorted(payload)}")
+    if payload["ok"] is not True or not isinstance(payload["result"], dict) or payload["error"] is not None:
+        raise ConformanceFailure("success wire must have an object result and error null")
+    decoded = adapter.parse_wire_response(wire)
+    if isinstance(decoded, WireError) or decoded != ok_response:
+        raise ConformanceFailure("success response must decode to the identical response")
+    fail_response = await adapter.call(
+        make_rpc_request(request_id="wire-fail", method="no.such.method", params={})
+    )
+    if fail_response.ok:
+        raise ConformanceFailure("an unknown method must fail")
+    wire = adapter.response_wire(fail_response)
+    if isinstance(wire, WireError):
+        raise ConformanceFailure(f"a failure response must encode, got {wire.code}")
+    payload = json.loads(wire)
+    if payload["ok"] is not False or payload["result"] is not None:
+        raise ConformanceFailure("failure wire must have result null")
+    error = payload["error"]
+    if not isinstance(error, dict) or set(error) != {"code", "message", "details"}:
+        raise ConformanceFailure("failure wire must carry one exact error object")
+    if not error["code"] or not error["message"]:
+        raise ConformanceFailure("error code and message must be non-empty")
+    decoded = adapter.parse_wire_response(wire)
+    if isinstance(decoded, WireError) or decoded != fail_response:
+        raise ConformanceFailure("failure response must decode to the identical response")
+    # malformed response wire is rejected
+    malformed: list[tuple[str, str]] = [
+        ('{"ok":true,"result":{},"error":null,"schema_version":1}', "invalid_envelope"),
+        (
+            '{"request_id":"w","ok":true,"result":{},"error":{"code":"c","message":"m",'
+            '"details":null},"schema_version":1}',
+            "invalid_response",
+        ),
+        ('{"request_id":"w","ok":false,"result":{},"error":null,"schema_version":1}', "invalid_response"),
+        ('{"request_id":"w","ok":true,"result":5,"error":null,"schema_version":1}', "invalid_response"),
+        ('{"request_id":"","ok":true,"result":{},"error":null,"schema_version":1}', "invalid_response"),
+        ('{"request_id":"w","ok":true,"result":{},"error":null,"schema_version":2}', "invalid_schema_version"),
+        (
+            '{"request_id":"w","ok":true,"result":{},"error":null,"schema_version":1,"extra":1}',
+            "invalid_envelope_key",
+        ),
+        (
+            '{"request_id":"w","ok":true,"result":{},"error":null,"schema_version":1,'
+            '"request_id":"w"}',
+            "duplicate_json_key",
+        ),
+        (
+            '{"request_id":"w","ok":false,"result":null,"error":{"code":"c","message":"m",'
+            '"details":null,"z":1},"schema_version":1}',
+            "invalid_response",
+        ),
+        (
+            '{"request_id":"w","ok":false,"result":null,"error":{"code":"","message":"m",'
+            '"details":null},"schema_version":1}',
+            "invalid_response",
+        ),
+        ('not-json', "malformed_json"),
+    ]
+    for line, expected in malformed:
+        result = adapter.parse_wire_response(line)
+        if not isinstance(result, WireError) or result.code != expected:
+            raise ConformanceFailure(f"expected response wire error {expected!r}, got {result}")
 
 
 # ---------------------------------------------------------------------------
@@ -971,6 +1177,7 @@ CONFIRMATION_SCENARIOS: dict[str, ConfirmationScenarioFn] = {
 RPC_SCENARIOS: dict[str, RpcScenarioFn] = {
     "strict JSON": run_strict_json,
     "event ordering": run_event_ordering,
+    "event uniqueness": run_event_uniqueness,
     "cursor expiration": run_cursor_expiration,
     "replay/live handoff": run_replay_live_handoff,
     "slow subscriber failure": run_slow_subscriber_failure,
@@ -978,4 +1185,5 @@ RPC_SCENARIOS: dict[str, RpcScenarioFn] = {
     "duplicate request ID": run_duplicate_request_id,
     "concurrent Run rejection": run_concurrent_run_rejection,
     "RPC redaction": run_rpc_redaction,
+    "response wire invariant": run_response_wire_invariant,
 }
