@@ -13,10 +13,12 @@ from evopi.harness.confirmation import (
     ConfirmationBrokerClosedError,
     ConfirmationDuplicateResponseError,
     ConfirmationExpiredError,
+    ConfirmationRecord,
     ConfirmationRequest,
     ConfirmationResponse,
     ConfirmationSettings,
     ConfirmationStoreClosedError,
+    ConfirmationTransition,
     ConfirmationUnknownRequestError,
 )
 from evopi.harness.confirmation_broker import ConfirmationBroker
@@ -42,6 +44,21 @@ def _expiring_request(request_id: str) -> ConfirmationRequest:
         id=request_id,
         expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
+
+
+class _RecordingStore(InMemoryConfirmationStore):
+    """In-memory store that captures atomic batches for close-boundary tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.transitions: list[tuple[ConfirmationTransition, ...]] = []
+
+    def transition_batch(
+        self,
+        transitions: tuple[ConfirmationTransition, ...],
+    ) -> tuple[ConfirmationRecord, ...]:
+        self.transitions.append(tuple(transitions))
+        return super().transition_batch(transitions)
 
 
 def _response(request_id: str, decision: str = "approve") -> ConfirmationResponse:
@@ -479,6 +496,104 @@ def test_cancelled_wait_rejects_late_response() -> None:
         assert record is not None
         assert record.status == "cancelled"
         assert record.revision == 2  # exactly one terminal transition
+
+    asyncio.run(scenario())
+
+
+def test_close_atomically_persists_cancelled_for_all_pending_waiters() -> None:
+    """Finding H (rev 3): graceful close persists one atomic cancelled batch."""
+    async def scenario() -> None:
+        store = _RecordingStore()
+        broker = ConfirmationBroker(store)
+        tasks = [
+            asyncio.create_task(broker.request(_request("req-a"))),
+            asyncio.create_task(broker.request(_request("req-b"))),
+        ]
+        await asyncio.sleep(0)
+
+        broker.close()
+
+        for task in tasks:
+            with pytest.raises(ConfirmationBrokerClosedError):
+                await task
+
+        # One atomic batch, persisted before the callers were woken.
+        assert len(store.transitions) == 1
+        batch = store.transitions[0]
+        assert [t.request_id for t in batch] == ["req-a", "req-b"]
+        for transition in batch:
+            assert transition.status == "cancelled"
+            assert transition.response is not None
+            assert transition.response.decision == "cancelled"
+            assert transition.response.metadata == {"automatic": True, "closed": True}
+
+    asyncio.run(scenario())
+
+
+def test_close_preserves_committed_response() -> None:
+    """Finding H (rev 3): a committed response is never overwritten by close."""
+    async def scenario() -> None:
+        store = _RecordingStore()
+        broker = ConfirmationBroker(store)
+        task = asyncio.create_task(broker.request(_request("req-1")))
+        await asyncio.sleep(0)
+
+        await broker.submit(_response("req-1"))
+        broker.close()
+
+        result = await task
+        assert result.decision == "approve"
+        assert store.transitions == []  # no close transition overwrote it
+
+    asyncio.run(scenario())
+
+
+def test_file_store_graceful_close_reopens_as_cancelled(tmp_path) -> None:
+    """Finding H (rev 3): GRACEFUL_CLOSE_STATUS must be cancelled, not orphaned."""
+    async def scenario() -> None:
+        root = tmp_path / "store"
+        store = ConfirmationFileStore(root, runtime_id="broker-1")
+        broker = ConfirmationBroker(store, runtime_id="broker-1")
+        task = asyncio.create_task(broker.request(_request("req-1")))
+        await asyncio.sleep(0)
+
+        broker.close()
+        with pytest.raises(ConfirmationBrokerClosedError):
+            await task
+
+        for runtime_id in ("broker-1", "broker-2"):
+            reopened = ConfirmationFileStore(root, runtime_id=runtime_id)
+            record = reopened.get("req-1")
+            assert record is not None
+            assert record.status == "cancelled"
+            assert record.response is not None
+            assert record.response.decision == "cancelled"
+            assert record.response.metadata == {"automatic": True, "closed": True}
+            assert reopened.list_pending() == ()
+            reopened.close()
+
+    asyncio.run(scenario())
+
+
+def test_file_store_graceful_close_preserves_committed_response(tmp_path) -> None:
+    """Finding H (rev 3): committed approvals survive close and reopen."""
+    async def scenario() -> None:
+        root = tmp_path / "store"
+        store = ConfirmationFileStore(root, runtime_id="broker-1")
+        broker = ConfirmationBroker(store, runtime_id="broker-1")
+        task = asyncio.create_task(broker.request(_request("req-1")))
+        await asyncio.sleep(0)
+
+        await broker.submit(_response("req-1"))
+        broker.close()
+        result = await task
+        assert result.decision == "approve"
+
+        reopened = ConfirmationFileStore(root, runtime_id="broker-1")
+        record = reopened.get("req-1")
+        assert record is not None
+        assert record.status == "approved"
+        reopened.close()
 
     asyncio.run(scenario())
 
