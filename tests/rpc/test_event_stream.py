@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -45,6 +47,14 @@ async def _collect_sequences(
 ) -> None:
     async for event in await stream.subscribe(after_sequence=after_sequence):
         into.append(event.sequence)
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        time.sleep(0.01)
 
 
 class TestPublish:
@@ -319,3 +329,84 @@ class TestClose:
         stream.close()
         with pytest.raises(EventStreamClosedError):
             stream.replay(after_sequence=0)
+
+
+class TestCrossThreadPublish:
+    """publish()/close() must work from threads without a running event loop."""
+
+    def test_publish_from_foreign_thread_delivers_in_order(self) -> None:
+        stream = EventStream(capacity=10, subscriber_queue_capacity=10)
+        received: list[int] = []
+        thread_error: list[BaseException] = []
+
+        def run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            try:
+
+                async def consume() -> None:
+                    async for event in await stream.subscribe(after_sequence=0):
+                        received.append(event.sequence)
+                        if len(received) == 3:
+                            return
+
+                loop.run_until_complete(consume())
+            except BaseException as exc:  # pragma: no cover - failure reporting only
+                thread_error.append(exc)
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        try:
+            _wait_until(lambda: len(stream._subscribers) == 1)  # subscriber registered
+            # The main thread has no running loop: this exercises the
+            # cross-thread delivery path for every publish.
+            stream.publish(_event(i=1))
+            stream.publish(_event(i=2))
+            stream.publish(_event(i=3))
+            thread.join(timeout=3.0)
+            assert not thread.is_alive()
+            assert thread_error == []
+            assert received == [1, 2, 3]  # per-subscriber ordering preserved
+        finally:
+            stream.close()
+
+    def test_close_from_foreign_thread_wakes_subscribers(self) -> None:
+        stream = EventStream(capacity=10)
+        received: list[int] = []
+
+        def run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_collect_sequences(stream, after_sequence=0, into=received))
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        try:
+            _wait_until(lambda: len(stream._subscribers) == 1)
+            stream.publish(_event(i=1))
+            _wait_until(lambda: 1 in received)
+            stream.close()  # no running loop in this thread: sentinel is routed
+            thread.join(timeout=3.0)
+            assert not thread.is_alive()
+            assert received == [1]
+        finally:
+            stream.close()
+
+    def test_publish_after_subscriber_loop_closed_removes_subscriber(self) -> None:
+        stream = EventStream(capacity=10)
+        loop = asyncio.new_event_loop()
+
+        def run_loop() -> None:
+            # Registers a subscriber (returns the iterator) but never iterates
+            # it, so the subscription survives and the loop can be closed.
+            loop.run_until_complete(stream.subscribe(after_sequence=0))
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+        loop.close()
+        assert len(stream._subscribers) == 1
+        # Publishing with a dead subscriber loop must not raise and must drop
+        # the subscription deterministically (no leaked queue).
+        stream.publish(_event(i=1))
+        assert len(stream._subscribers) == 0
+        stream.close()

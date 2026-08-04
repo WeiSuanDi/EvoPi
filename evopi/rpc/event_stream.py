@@ -9,9 +9,12 @@ one lock. Slow subscribers use bounded queues and are failed explicitly rather
 than blocking event production. Closing wakes subscribers and rejects future
 publish operations.
 
-``publish`` is synchronous and is intended to be called from the event-loop
-thread that owns the subscribers (the harness loop). When called from another
-thread it is routed to each subscriber's loop via ``call_soon_threadsafe``.
+``publish`` and ``close`` are synchronous and work from any thread: when the
+calling thread has no running event loop (or a different one), delivery is
+routed to each subscriber's loop via ``call_soon_threadsafe``, preserving
+per-subscriber ordering and bounded non-blocking delivery. If a subscriber's
+loop has already been closed, the subscription is removed deterministically
+and the publisher never raises an unrelated ``RuntimeError``.
 """
 
 from __future__ import annotations
@@ -176,11 +179,20 @@ class EventStream:
 
     def _put(self, subscriber: _Subscriber, value: RpcEvent | None) -> None:
         loop = subscriber.loop
-        if loop is not asyncio.get_running_loop():
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None  # no event loop in this thread: use the subscriber's loop
+        if running is not loop:
             try:
                 loop.call_soon_threadsafe(self._put_nowait, subscriber, value)
             except RuntimeError:
-                pass  # the subscriber's loop is gone; the subscription is dead
+                # The subscriber's loop is closed: drop the subscription
+                # deterministically so the publisher never leaks a queue or
+                # surfaces an unrelated RuntimeError.
+                with self._lock:
+                    self._subscribers.pop(subscriber.subscription_id, None)
+                subscriber.failed = True
             return
         self._put_nowait(subscriber, value)
 
