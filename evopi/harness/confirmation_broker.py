@@ -171,14 +171,46 @@ class ConfirmationBroker:
         return records
 
     def close(self) -> None:
-        """Cancel pending waits fail closed and close the store exactly once."""
+        """Graceful close: persist `cancelled`, wake callers, close once.
+
+        Every still-pending live waiter is atomically transitioned to
+        ``cancelled`` (with a correlated automatic response carrying
+        ``closed=true``) BEFORE any caller is woken, so graceful close is
+        durable and never degrades to a crash-orphan. A response already
+        committed before close remains authoritative. The method stays
+        synchronous, idempotent, and exactly-once (Finding H, rev 3).
+        """
         if self._closed:
             return
         self._closed = True
-        for future in self._waiters.values():
+        waiters = dict(self._waiters)
+        self._waiters.clear()
+        transitions: list[ConfirmationTransition] = []
+        for request_id, future in waiters.items():
+            current = self._store.get(request_id)
+            if current is None or current.status != "pending":
+                continue  # already resolved: authoritative, never overwritten
+            transitions.append(
+                ConfirmationTransition(
+                    request_id=request_id,
+                    expected_revision=current.revision,
+                    status="cancelled",
+                    response=ConfirmationResponse(
+                        request_id=request_id,
+                        decision="cancelled",
+                        reason="Confirmation broker closed",
+                        metadata={"automatic": True, "closed": True},
+                    ),
+                )
+            )
+        if transitions:
+            # Persist first: one atomic batch transition per graceful close.
+            self._store.transition_batch(tuple(transitions))
+        # Then wake each caller fail closed; Future cancellation here is only
+        # the wake-up signal, never the durable state transition.
+        for future in waiters.values():
             if not future.done():
                 future.cancel()
-        self._waiters.clear()
         self._store.close()
 
     def _check_open(self) -> None:
