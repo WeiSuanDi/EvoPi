@@ -40,6 +40,7 @@ from evopi.cli.repl import (
     ReplCommandContext,
     ReplCommandRegistry,
     ReplCompleter,
+    ReplRunner,
     build_repl_startup_config,
     startup_panel,
 )
@@ -58,6 +59,7 @@ from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness import (
     ConfirmationBroker,
     ConfirmationHandler,
+    ConfirmationResponse,
     InMemoryConfirmationStore,
 )
 from evopi.rpc import RpcError
@@ -507,17 +509,55 @@ async def _run_one_shot(
             harness.close()
 
 
+class _TerminalEditor:
+    """One terminal reader at a time: REPL input, Confirmation, and Plugin UI.
+
+    All prompt reads serialize on one lock so two terminal readers never run
+    concurrently; a modal prompt (Confirmation/Plugin UI) waits for the active
+    input read to finish and vice versa. Queue editing is therefore suspended
+    before a modal prompt and recreated after it; a partially typed line is
+    never split between readers.
+    """
+
+    def __init__(self, session: PromptSession[str], lock: asyncio.Lock) -> None:
+        self._session = session
+        self._lock = lock
+
+    async def read(self, label: str) -> str:
+        async with self._lock:
+            return await self._session.prompt_async(label)
+
+
+def _gated_confirmation_handler(lock: asyncio.Lock) -> ConfirmationHandler:
+    """Serialize terminal confirmation reads with the REPL input reader."""
+
+    async def handler(
+        request: Any,
+        *,
+        signal: Any = None,
+    ) -> ConfirmationResponse:
+        async with lock:
+            return await async_terminal_confirmation_handler(
+                request,
+                signal=signal,
+            )
+
+    return handler
+
+
 async def _run_repl(
     args: argparse.Namespace,
     *,
     initial_prompt: str | None = None,
 ) -> int:
-    """Multi-turn REPL: prompt → response → prompt → ..."""
+    """Multi-turn REPL: one coordinated reader, concurrent Run and input."""
     console = Console(file=sys.stderr)
-    harness: CodingHarness | None = None
+    reader_lock = asyncio.Lock()
+    harness = _build_harness(
+        args,
+        confirmation_handler=_gated_confirmation_handler(reader_lock),
+    )
     try:
-        harness = _build_harness(args)
-
         display = ReplDisplay()
         display.set_status(
             f"Model: {harness.model.name} | "
@@ -538,6 +578,7 @@ async def _run_repl(
                 context=command_context,
             )
         )
+        editor = _TerminalEditor(session=session, lock=reader_lock)
         console.print(startup_panel(command_context))
         for warning in harness.capabilities.warnings:
             console.print(f"[yellow]Warning: {warning}[/]")
@@ -546,55 +587,22 @@ async def _run_repl(
         harness.attach_plugin_ui(
             ReplPluginUI(
                 display=display,
-                prompt=session.prompt_async,
+                prompt=editor.read,
                 console=console,
             )
         )
-        pending_input = initial_prompt
-        while True:
-            if pending_input is not None:
-                user_input = pending_input.strip()
-                pending_input = None
-            else:
-                try:
-                    user_input = (await session.prompt_async("> ")).strip()
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]Aborted.[/]")
-                    return 130
-                except EOFError:
-                    console.print("\n[dim]Goodbye.[/]")
-                    return 0
-
-            if not user_input:
-                continue
-
-            if user_input.startswith("/"):
-                result = await registry.dispatch(command_context, user_input)
-                if result.action == "quit":
-                    console.print("[dim]Goodbye.[/]")
-                    return result.exit_code
-                if result.action != "retry" or result.prompt is None:
-                    continue
-                user_input = result.prompt
-                console.print(f"[dim]Retrying: {user_input[:80]}...[/]")
-
-            command_context.recent_prompt = user_input
-
-            try:
-                display.show_user_message(user_input)
-                display.start_run()
-                await harness.prompt(user_input)
-                display.end_run()
-            except (ValueError, RuntimeError) as exc:
-                display.end_run()
-                console.print(f"[red]Error: {exc}[/]")
-                continue
-            except KeyboardInterrupt:
-                display.end_run()
-                console.print("[yellow][aborted][/]")
-                continue
+        runner = ReplRunner(
+            harness=harness,
+            display=display,
+            console=console,
+            registry=registry,
+            context=command_context,
+            read=editor.read,
+            initial_prompt=initial_prompt,
+        )
+        return await runner.run()
     finally:
-        if harness is not None and not harness.is_running:
+        if not harness.is_running:
             harness.close()
 
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -15,6 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from evopi.coding import CodingHarness
+from evopi.rpc.harness_host import InteractionHarness
 
 ReplCommandAction = Literal["continue", "retry", "quit"]
 
@@ -249,6 +251,216 @@ class ReplCompleter(Completer):
                     start_position=-len(fragment),
                     display_meta=spec.source,
                 )
+
+
+# Commands permitted while a Run is active (CONTEXT.md section 7). /tree and
+# /leaves are pure Session display reads and are included; the frozen
+# mutating set is exactly what must reject while busy.
+_READONLY_BUSY_COMMANDS = frozenset(
+    {
+        "/agents",
+        "/help",
+        "/leaves",
+        "/memory",
+        "/policies",
+        "/plugins",
+        "/session",
+        "/settings",
+        "/skills",
+        "/status",
+        "/tools",
+        "/trace",
+        "/tree",
+    }
+)
+_MUTATING_COMMANDS = frozenset(
+    {
+        "/branch",
+        "/clear",
+        "/compact",
+        "/exit",
+        "/fork",
+        "/merge",
+        "/new",
+        "/quit",
+        "/reload",
+        "/retry",
+        "/switch",
+    }
+)
+
+
+class ReplRunnerDisplay(Protocol):
+    """Display surface the concurrent REPL runner needs."""
+
+    def show_user_message(self, text: str) -> None: ...
+
+    def start_run(self) -> None: ...
+
+    def end_run(self) -> None: ...
+
+    def set_status(self, text: str) -> None: ...
+
+    def pause(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+
+class ReplRunner:
+    """Concurrent REPL controller: one reader, coordinated Run and input Tasks.
+
+    While idle, plain submitted text starts one Run. While a Run is active,
+    plain submitted text queues steering, ``/steer`` and ``/followup`` queue
+    explicit interactions, ``/abort`` requests Abort, the frozen read-only
+    commands run, and mutating commands are rejected. EOF, Ctrl+C, quit, and
+    Abort always settle the Run Task before the runner returns, so no orphan
+    Task survives.
+    """
+
+    def __init__(
+        self,
+        *,
+        harness: CodingHarness,
+        display: ReplRunnerDisplay,
+        console: Console,
+        registry: ReplCommandRegistry,
+        context: ReplCommandContext,
+        read: Callable[[str], Awaitable[str]],
+        initial_prompt: str | None = None,
+    ) -> None:
+        self._harness = harness
+        self._display = display
+        self._console = console
+        self._registry = registry
+        self._context = context
+        self._read = read
+        self._initial_prompt = initial_prompt
+        self._run_task: asyncio.Task[None] | None = None
+
+    def _busy(self) -> bool:
+        return self._run_task is not None and not self._run_task.done()
+
+    async def run(self) -> int:
+        """Run the coordinated REPL loop until quit, EOF, or Ctrl+C."""
+        pending_text = self._initial_prompt
+        exit_code = 0
+        try:
+            while True:
+                if pending_text is not None:
+                    text = pending_text.strip()
+                    pending_text = None
+                else:
+                    try:
+                        text = (await self._read("> ")).strip()
+                    except EOFError:
+                        break
+                    except KeyboardInterrupt:
+                        exit_code = 130
+                        break
+                if not text:
+                    continue
+                if text.startswith("/"):
+                    outcome = await self._dispatch_command(text)
+                    if outcome == "quit":
+                        exit_code = 0
+                        break
+                    if outcome == "retry":
+                        prompt = self._context.recent_prompt
+                        if prompt is None:
+                            continue
+                        text = prompt
+                        self._console.print(f"[dim]Retrying: {text[:80]}...[/]")
+                    else:
+                        continue
+                if self._busy():
+                    await self._queue_input("steer", text)
+                else:
+                    self._start_run(text)
+        finally:
+            await self._settle_run_task()
+        return exit_code
+
+    async def _dispatch_command(self, text: str) -> str | None:
+        """Handle one slash command; return 'quit', 'retry', or None."""
+        name = "/" + text.strip().partition(" ")[0].lstrip("/").lower()
+        busy = self._busy()
+        if name in {"/steer", "/followup"}:
+            await self._queue_explicit(name, text, busy)
+            return None
+        if name == "/abort":
+            if busy:
+                self._harness.abort()
+                self._console.print("[yellow]Abort requested.[/]")
+            else:
+                self._console.print("[dim]No active Run to abort.[/]")
+            return None
+        if busy:
+            if name in _READONLY_BUSY_COMMANDS:
+                await self._registry.dispatch(self._context, text)
+                return None
+            self._console.print(
+                f"[yellow]Rejected while a Run is active: {name} mutates state.[/]"
+            )
+            return None
+        result = await self._registry.dispatch(self._context, text)
+        if result.action == "quit":
+            return "quit"
+        if result.action == "retry" and result.prompt is not None:
+            return "retry"
+        return None
+
+    async def _queue_explicit(self, name: str, text: str, busy: bool) -> None:
+        kind = "steer" if name == "/steer" else "follow_up"
+        if not busy:
+            self._console.print(
+                f"[yellow]{name} is only accepted while a Run is active.[/]"
+            )
+            return
+        arguments = text.strip().partition(" ")[2].strip()
+        if not arguments:
+            self._console.print(f"[yellow]Usage: {name} TEXT[/]")
+            return
+        await self._queue_input(kind, arguments)
+
+    async def _queue_input(self, kind: str, text: str) -> None:
+        """Queue one interaction and render the accepted input exactly once."""
+        surface = cast(InteractionHarness, self._harness)
+        try:
+            if kind == "steer":
+                await surface.steer(text, origin="repl")
+            else:
+                await surface.follow_up(text, origin="repl")
+        except Exception as exc:
+            self._console.print(f"[red]Error: {exc}[/]")
+            return
+        # Accepted queued input renders once as queued state; the delivered
+        # UserMessage is committed silently and never re-panels.
+        self._display.show_user_message(text)
+
+    def _start_run(self, text: str) -> None:
+        self._context.recent_prompt = text
+        self._display.show_user_message(text)
+        self._run_task = asyncio.create_task(self._execute_run(text))
+
+    async def _execute_run(self, text: str) -> None:
+        self._display.start_run()
+        try:
+            await self._harness.prompt(text)
+        except (ValueError, RuntimeError) as exc:
+            self._console.print(f"[red]Error: {exc}[/]")
+        except KeyboardInterrupt:
+            self._console.print("[yellow][aborted][/]")
+        finally:
+            self._display.end_run()
+
+    async def _settle_run_task(self) -> None:
+        """Abort and await the active Run Task so nothing is orphaned."""
+        task = self._run_task
+        if task is None:
+            return
+        if not task.done():
+            self._harness.abort()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def startup_panel(context: ReplCommandContext) -> Panel:
@@ -694,6 +906,8 @@ __all__ = [
     "ReplCommandResult",
     "ReplCommandSpec",
     "ReplCompleter",
+    "ReplRunner",
+    "ReplRunnerDisplay",
     "ReplStartupConfig",
     "build_repl_startup_config",
     "startup_panel",
