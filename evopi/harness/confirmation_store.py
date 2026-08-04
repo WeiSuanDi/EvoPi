@@ -14,8 +14,9 @@ import os
 import sys
 import threading
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -42,6 +43,8 @@ from evopi.harness.confirmation_codec import (
     decode_transition,
     encode_record,
     encode_transition,
+    validate_record_invariants,
+    validate_transition_invariants,
 )
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -57,6 +60,21 @@ _LOCK_PATH_NAME = "lock"
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """JSON object-pairs hook that rejects duplicate keys (Finding C)."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    """JSON parse_constant hook that rejects NaN/Infinity (Finding C)."""
+    raise ValueError(f"non-standard JSON constant {value}")
 
 
 def already_resolved_error(record: ConfirmationRecord) -> ConfirmationConflictError:
@@ -86,6 +104,25 @@ def _terminal_status(status: ConfirmationStatus) -> None:
         )
 
 
+def _validate_creation(record: ConfirmationRecord) -> None:
+    """create() accepts only fresh pending records (Finding A, rev 2)."""
+    if record.revision != 1:
+        raise ConfirmationFormatError(
+            "create accepts only revision-1 records",
+            details={"revision": record.revision},
+        )
+    if record.status != "pending":
+        raise ConfirmationFormatError(
+            "create accepts only pending records",
+            details={"status": record.status},
+        )
+    if record.response is not None:
+        raise ConfirmationFormatError(
+            "create accepts only records without a response",
+            details={"request_id": record.request.id},
+        )
+
+
 def _validate_transition(
     record: ConfirmationRecord | None,
     transition: ConfirmationTransition,
@@ -109,18 +146,26 @@ def _validate_transition(
         )
     if record.status != "pending":
         raise already_resolved_error(record)
-    if (
-        transition.response is not None
-        and transition.response.request_id != transition.request_id
-    ):
-        raise ConfirmationConflictError(
-            f"response {transition.response.request_id!r} does not correlate to "
-            f"request {transition.request_id!r}",
-            details={
-                "request_id": transition.request_id,
-                "response_request_id": transition.response.request_id,
-            },
-        )
+    # State checks above take precedence; the frozen pairing/correlation
+    # invariants then apply so a crafted transition cannot slip through.
+    validate_transition_invariants(transition)
+
+
+def snapshot_record(record: ConfirmationRecord) -> ConfirmationRecord:
+    """Defensive deep copy so stores never share mutable references (Finding B).
+
+    Callers may mutate the request/response they passed in, and callers may
+    mutate values returned by Store methods; stored state must not change
+    without a fact or a revision bump.
+    """
+    return ConfirmationRecord(
+        request=deepcopy(record.request),
+        status=record.status,
+        runtime_id=record.runtime_id,
+        revision=record.revision,
+        response=None if record.response is None else deepcopy(record.response),
+        updated_at=record.updated_at,
+    )
 
 
 def _apply_transition(
@@ -132,7 +177,7 @@ def _apply_transition(
     return replace(
         record,
         status=status,
-        response=response,
+        response=None if response is None else deepcopy(response),
         revision=record.revision + 1,
         updated_at=_utc_now(),
     )
@@ -158,24 +203,31 @@ class InMemoryConfirmationStore:
     def __init__(self) -> None:
         self._records: dict[str, ConfirmationRecord] = {}
         self._lock = threading.Lock()
+        self._closed = False
 
     def create(self, record: ConfirmationRecord) -> None:
         with self._lock:
+            self._check_not_closed()
             if record.request.id in self._records:
                 raise ConfirmationDuplicateRequestError(
                     f"confirmation request {record.request.id!r} already exists",
                     details={"request_id": record.request.id},
                 )
-            self._records[record.request.id] = record
+            _validate_creation(record)
+            validate_record_invariants(record)
+            self._records[record.request.id] = snapshot_record(record)
 
     def get(self, request_id: str) -> ConfirmationRecord | None:
         with self._lock:
-            return self._records.get(request_id)
+            self._check_not_closed()
+            record = self._records.get(request_id)
+            return None if record is None else snapshot_record(record)
 
     def list_pending(self) -> tuple[ConfirmationRecord, ...]:
         with self._lock:
+            self._check_not_closed()
             return tuple(
-                record
+                snapshot_record(record)
                 for record in self._records.values()
                 if record.status == "pending"
             )
@@ -195,6 +247,7 @@ class InMemoryConfirmationStore:
             response=response,
         )
         with self._lock:
+            self._check_not_closed()
             return self._apply_transitions_locked((transition,))[0]
 
     def transition_batch(
@@ -202,10 +255,12 @@ class InMemoryConfirmationStore:
         transitions: tuple[ConfirmationTransition, ...],
     ) -> tuple[ConfirmationRecord, ...]:
         with self._lock:
+            self._check_not_closed()
             return self._apply_transitions_locked(tuple(transitions))
 
     def recover_orphans(self, *, runtime_id: str) -> tuple[ConfirmationRecord, ...]:
         with self._lock:
+            self._check_not_closed()
             pending = [
                 record
                 for record in self._records.values()
@@ -216,8 +271,15 @@ class InMemoryConfirmationStore:
             return self._apply_transitions_locked(_orphan_transitions(pending))
 
     def close(self) -> None:
-        # In-memory state needs no release; kept for ConfirmationStore parity.
-        return None
+        """Idempotent but final: further operations fail closed (Finding F)."""
+        with self._lock:
+            self._closed = True
+
+    def _check_not_closed(self) -> None:
+        if self._closed:
+            raise ConfirmationStoreClosedError(
+                "in-memory confirmation store is closed"
+            )
 
     def _apply_transitions_locked(
         self,
@@ -237,7 +299,7 @@ class InMemoryConfirmationStore:
                 response=transition.response,
             )
             self._records[transition.request_id] = new_record
-            updated.append(new_record)
+            updated.append(snapshot_record(new_record))
         return tuple(updated)
 
 
@@ -346,19 +408,22 @@ class ConfirmationFileStore:
                     f"confirmation request {record.request.id!r} already exists",
                     details={"request_id": record.request.id},
                 )
+            _validate_creation(record)
+            validate_record_invariants(record)
             self._append_fact(self._fact("create", encode_record(record)))
-            self._records[record.request.id] = record
+            self._records[record.request.id] = snapshot_record(record)
 
     def get(self, request_id: str) -> ConfirmationRecord | None:
         with self._lock:
             self._check_not_closed()
-            return self._records.get(request_id)
+            record = self._records.get(request_id)
+            return None if record is None else snapshot_record(record)
 
     def list_pending(self) -> tuple[ConfirmationRecord, ...]:
         with self._lock:
             self._check_not_closed()
             return tuple(
-                record
+                snapshot_record(record)
                 for record in self._records.values()
                 if record.status == "pending"
             )
@@ -387,7 +452,7 @@ class ConfirmationFileStore:
                 record, status=status, response=response
             )
             self._records[request_id] = updated
-            return updated
+            return snapshot_record(updated)
 
     def transition_batch(
         self,
@@ -453,34 +518,64 @@ class ConfirmationFileStore:
             ) from exc
 
     def _replay(self) -> None:
-        raw = self._facts_path.read_text(encoding="utf-8")
-        if raw == "":
+        try:
+            raw = self._facts_path.read_bytes()
+        except OSError as exc:
+            raise ConfirmationFormatError(
+                f"failed to read confirmation facts: {exc}",
+                details={"path": str(self._facts_path)},
+            ) from exc
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfirmationFormatError(
+                "confirmation fact log is not valid UTF-8",
+                details={"path": str(self._facts_path)},
+            ) from exc
+        if content == "":
             return
-        lines = raw.split("\n")
-        if lines and lines[-1] == "":
+        has_trailing_newline = content.endswith("\n")
+        lines = content.split("\n")
+        if has_trailing_newline:
             lines.pop()
         facts: list[JsonObject] = []
+        torn_index: int | None = None
         for index, line in enumerate(lines):
             try:
-                facts.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                if index == len(lines) - 1:
-                    # Torn tail: a crash may leave only the final line partial.
+                facts.append(self._parse_fact_line(line))
+            except (json.JSONDecodeError, ValueError) as exc:
+                is_final = index == len(lines) - 1
+                if is_final and not has_trailing_newline:
+                    # Only an unterminated residual fragment after a crash may
+                    # be repaired; a newline-terminated malformed fact is
+                    # durable corruption and must fail closed.
+                    torn_index = index
                     self._repair_warnings.append(
                         f"repaired torn tail at line {index + 1}: {exc}"
                     )
                     continue
                 raise ConfirmationFormatError(
-                    f"corrupt confirmation fact at line {index + 1}",
+                    f"corrupt confirmation fact at line {index + 1}: {exc}",
                     details={"line": index + 1},
                 ) from exc
-        if self._repair_warnings:
-            repaired = "\n".join(lines[:-1])
-            self._facts_path.write_text(
-                repaired + "\n" if repaired else "", encoding="utf-8"
-            )
+        if torn_index is not None:
+            repaired = "\n".join(lines[:torn_index])
+            repaired_bytes = (repaired + "\n" if repaired else "").encode("utf-8")
+            with self._facts_path.open("wb") as handle:
+                handle.write(repaired_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
         for fact in facts:
             self._apply_fact(fact)
+
+    @staticmethod
+    def _parse_fact_line(line: str) -> JsonObject:
+        """Parse one fact line, rejecting duplicate keys and NaN/Infinity."""
+        return json.loads(
+            line,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
 
     def _apply_fact(self, fact: JsonObject) -> None:
         if not isinstance(fact, dict):
@@ -559,6 +654,10 @@ class ConfirmationFileStore:
             raise ConfirmationFormatError(
                 "fact 'created_at' must carry a timezone offset"
             )
+        if parsed.utcoffset() != timedelta(0):
+            raise ConfirmationFormatError(
+                "fact 'created_at' must use UTC (offset zero)"
+            )
 
     def _decode_batch_transitions(
         self, data: Any
@@ -585,10 +684,13 @@ class ConfirmationFileStore:
         return tuple(decode_transition(item) for item in transitions)
 
     def _orphan_sweep(self) -> None:
+        # Reopening a lifetime-locked store is runtime recovery, never a host
+        # reconnect: every previously persisted pending request is orphaned,
+        # regardless of any reused runtime id (Finding E, rev 2).
         pending = [
             record
             for record in self._records.values()
-            if record.status == "pending" and record.runtime_id != self._runtime_id
+            if record.status == "pending"
         ]
         if not pending:
             return
@@ -617,7 +719,7 @@ class ConfirmationFileStore:
                 response=transition.response,
             )
             self._records[transition.request_id] = new_record
-            updated.append(new_record)
+            updated.append(snapshot_record(new_record))
         return tuple(updated)
 
 
@@ -625,4 +727,5 @@ __all__ = [
     "ConfirmationFileStore",
     "InMemoryConfirmationStore",
     "already_resolved_error",
+    "snapshot_record",
 ]

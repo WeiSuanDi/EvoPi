@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Awaitable, Callable, Literal, Protocol, TypeAlias
@@ -71,6 +72,17 @@ class ConfirmationSettings:
     """Timeout policy for waiting on a confirmation decision."""
 
     timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        timeout = self.timeout_seconds
+        if timeout is None:
+            return
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("timeout_seconds must be a finite number or None")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                "timeout_seconds must be finite and strictly positive when set"
+            )
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -217,4 +229,3 @@ __all__ = [
     "ConfirmationTransition",
     "ConfirmationUnknownRequestError",
 ]
-

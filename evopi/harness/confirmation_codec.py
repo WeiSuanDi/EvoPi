@@ -9,7 +9,7 @@ versions, unknown fields, and unsupported values fail closed with
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast, get_args
 
 from evopi.core.tool import ToolArgumentError, ToolCall
@@ -33,6 +33,12 @@ _KNOWN_STATUSES = get_args(ConfirmationStatus)
 _KNOWN_DECISIONS = get_args(ConfirmationDecision)
 
 _MAX_ID_LENGTH = 512
+
+_DECISION_FOR_STATUS: dict[str, str] = {
+    "approved": "approve",
+    "denied": "deny",
+    "cancelled": "cancelled",
+}
 
 _REQUEST_KEYS = frozenset(
     {
@@ -150,10 +156,16 @@ def _check_utc_datetime(value: Any, *, field: str) -> datetime:
             f"field '{field}' is not a valid ISO-8601 datetime",
             details={"field": field},
         ) from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    offset = parsed.utcoffset()
+    if offset is None:
         raise ConfirmationFormatError(
             f"field '{field}' must carry a timezone offset",
             details={"field": field},
+        )
+    if offset != timedelta(0):
+        raise ConfirmationFormatError(
+            f"field '{field}' must use UTC (offset zero)",
+            details={"field": field, "offset": offset.total_seconds()},
         )
     return parsed
 
@@ -214,33 +226,92 @@ def _check_json_object(value: Any, *, field: str) -> JsonObject:
     return value
 
 
-def _encode_jsonable(value: Any, *, field: str) -> Any:
-    """Convert to a JSON-safe value or fail closed."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
+def _validate_status_response_pair(
+    status: str,
+    response: ConfirmationResponse | None,
+    *,
+    request_id: str,
+) -> None:
+    """Enforce the frozen terminal-state and response semantics (Finding A)."""
+    if status == "pending":
+        if response is not None:
             raise ConfirmationFormatError(
-                f"field '{field}' contains a non-finite float",
-                details={"field": field, "type": "float"},
+                "pending records must not carry a response",
+                details={"request_id": request_id},
             )
-        return value
-    if isinstance(value, dict):
-        encoded: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ConfirmationFormatError(
-                    f"field '{field}' contains a non-string key of type "
-                    f"{type(key).__name__}",
-                    details={"field": field, "type": type(key).__name__},
-                )
-            encoded[key] = _encode_jsonable(item, field=f"{field}.{key}")
-        return encoded
-    if isinstance(value, list):
-        return [_encode_jsonable(item, field=f"{field}[{index}]") for index, item in enumerate(value)]
+        return
+    if status == "orphaned":
+        if response is not None:
+            raise ConfirmationFormatError(
+                "orphaned records must not carry a response",
+                details={"request_id": request_id},
+            )
+        return
+    if response is None:
+        raise ConfirmationFormatError(
+            f"status {status!r} requires a correlated response",
+            details={"request_id": request_id, "status": status},
+        )
+    if response.request_id != request_id:
+        raise ConfirmationFormatError(
+            f"response {response.request_id!r} does not correlate to "
+            f"request {request_id!r}",
+            details={"request_id": request_id, "response_request_id": response.request_id},
+        )
+    expected = _DECISION_FOR_STATUS.get(status)
+    if expected is not None:
+        if response.decision != expected:
+            raise ConfirmationFormatError(
+                f"status {status!r} requires decision {expected!r}",
+                details={"request_id": request_id, "decision": response.decision},
+            )
+        return
+    if status == "expired":
+        if response.decision != "deny":
+            raise ConfirmationFormatError(
+                "expired requires a deny decision",
+                details={"request_id": request_id},
+            )
+        if response.metadata.get("automatic") is not True:
+            raise ConfirmationFormatError(
+                "expired requires metadata.automatic=true",
+                details={"request_id": request_id},
+            )
+        if response.metadata.get("expired") is not True:
+            raise ConfirmationFormatError(
+                "expired requires metadata.expired=true",
+                details={"request_id": request_id},
+            )
+        return
     raise ConfirmationFormatError(
-        f"field '{field}' contains a non-JSON value of type {type(value).__name__}",
-        details={"field": field, "type": type(value).__name__},
+        f"unsupported status {status!r}", details={"status": status}
+    )
+
+
+def validate_record_invariants(record: ConfirmationRecord) -> None:
+    """Reject records the decoder would refuse to reconstruct (Findings A/F)."""
+    if isinstance(record.revision, bool) or record.revision < 1:
+        raise ConfirmationFormatError(
+            "record revision must be positive",
+            details={"revision": record.revision},
+        )
+    _validate_status_response_pair(
+        record.status, record.response, request_id=record.request.id
+    )
+
+
+def validate_transition_invariants(transition: ConfirmationTransition) -> None:
+    """Reject transitions the decoder would refuse to reconstruct (Findings A/F)."""
+    if (
+        isinstance(transition.expected_revision, bool)
+        or transition.expected_revision < 1
+    ):
+        raise ConfirmationFormatError(
+            "transition expected_revision must be positive",
+            details={"expected_revision": transition.expected_revision},
+        )
+    _validate_status_response_pair(
+        transition.status, transition.response, request_id=transition.request_id
     )
 
 
@@ -265,7 +336,7 @@ def _encode_tool_call(call: ToolCall | None) -> JsonObject | None:
     return {
         "id": _check_id(call.id, field="tool_call.id"),
         "name": _check_str(call.name, field="tool_call.name"),
-        "arguments": _encode_jsonable(call.arguments, field="tool_call.arguments"),
+        "arguments": _check_json_object(call.arguments, field="tool_call.arguments"),
         "argument_error": None
         if argument_error is None
         else {
@@ -336,17 +407,20 @@ def encode_request(request: ConfirmationRequest) -> JsonObject:
     """Encode a request with exact keys and strict types (schema version 1)."""
     _check_literal(request.hook, field="hook", allowed=_KNOWN_HOOKS)
     _check_literal(request.risk_level, field="risk_level", allowed=_KNOWN_RISK_LEVELS)
-    metadata = _encode_jsonable(request.metadata, field="metadata")
+    metadata = _check_json_object(request.metadata, field="metadata")
     arguments = (
-        None if request.arguments is None else _encode_jsonable(request.arguments, field="arguments")
+        None
+        if request.arguments is None
+        else _check_json_object(request.arguments, field="arguments")
     )
+    policy_names = [_check_str(policy, field="policy_names") for policy in request.policy_names]
     return {
         "schema_version": SCHEMA_VERSION,
         "id": _check_id(request.id, field="id"),
         "hook": request.hook,
         "reason": _check_str(request.reason, field="reason"),
         "risk_level": request.risk_level,
-        "policy_names": list(request.policy_names),
+        "policy_names": policy_names,
         "tool_call": _encode_tool_call(request.tool_call),
         "arguments": arguments,
         "created_at": _encode_datetime(request.created_at, field="created_at"),
@@ -393,7 +467,7 @@ def encode_response(response: ConfirmationResponse) -> JsonObject:
         "request_id": _check_id(response.request_id, field="request_id"),
         "decision": response.decision,
         "reason": _check_str(response.reason, field="reason"),
-        "metadata": _encode_jsonable(response.metadata, field="metadata"),
+        "metadata": _check_json_object(response.metadata, field="metadata"),
     }
 
 
@@ -419,6 +493,7 @@ def encode_record(record: ConfirmationRecord) -> JsonObject:
     _check_literal(record.status, field="status", allowed=_KNOWN_STATUSES)
     _check_id(record.runtime_id, field="runtime_id")
     _check_int(record.revision, field="revision")
+    validate_record_invariants(record)
     return {
         "schema_version": SCHEMA_VERSION,
         "request": encode_request(record.request),
@@ -436,7 +511,7 @@ def decode_record(data: JsonObject) -> ConfirmationRecord:
         raise ConfirmationFormatError("record payload must be an object")
     _check_keys(data, _RECORD_KEYS, field="record")
     _check_version(data, field="record")
-    return ConfirmationRecord(
+    record = ConfirmationRecord(
         request=decode_request(data["request"]),
         status=cast(
             ConfirmationStatus,
@@ -447,12 +522,15 @@ def decode_record(data: JsonObject) -> ConfirmationRecord:
         response=None if data["response"] is None else decode_response(data["response"]),
         updated_at=_check_utc_datetime(data["updated_at"], field="updated_at"),
     )
+    validate_record_invariants(record)
+    return record
 
 
 def encode_transition(transition: ConfirmationTransition) -> JsonObject:
     """Encode a transition with exact keys and strict types (schema version 1)."""
     _check_literal(transition.status, field="status", allowed=_KNOWN_STATUSES)
     _check_int(transition.expected_revision, field="expected_revision")
+    validate_transition_invariants(transition)
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": _check_id(transition.request_id, field="request_id"),
@@ -468,7 +546,7 @@ def decode_transition(data: JsonObject) -> ConfirmationTransition:
         raise ConfirmationFormatError("transition payload must be an object")
     _check_keys(data, _TRANSITION_KEYS, field="transition")
     _check_version(data, field="transition")
-    return ConfirmationTransition(
+    transition = ConfirmationTransition(
         request_id=_check_id(data["request_id"], field="request_id"),
         expected_revision=_check_int(data["expected_revision"], field="expected_revision"),
         status=cast(
@@ -477,6 +555,8 @@ def decode_transition(data: JsonObject) -> ConfirmationTransition:
         ),
         response=None if data["response"] is None else decode_response(data["response"]),
     )
+    validate_transition_invariants(transition)
+    return transition
 
 
 __all__ = [
@@ -489,4 +569,6 @@ __all__ = [
     "encode_request",
     "encode_response",
     "encode_transition",
+    "validate_record_invariants",
+    "validate_transition_invariants",
 ]

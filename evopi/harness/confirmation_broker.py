@@ -93,6 +93,17 @@ class ConfirmationBroker:
         self._waiters[request.id] = future
         try:
             return await self._race(record, future, signal=signal)
+        except asyncio.CancelledError:
+            # External cancellation: fail closed with one cancelled
+            # transition, then re-raise (Finding D, rev 2).
+            response = ConfirmationResponse(
+                request_id=request.id,
+                decision="cancelled",
+                reason="Confirmation wait cancelled",
+                metadata={"automatic": True, "cancelled": True},
+            )
+            self._persist_terminal(record, "cancelled", response)
+            raise
         finally:
             self._waiters.pop(request.id, None)
 
@@ -193,7 +204,15 @@ class ConfirmationBroker:
             timeout_task = asyncio.create_task(asyncio.sleep(delay))
             tasks.add(timeout_task)
 
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            done, _ = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # External cancellation of the waiting task: cancel and retrieve
+            # every race Task/Future so nothing stays unresolved.
+            await self._cancel_all_tasks(tasks)
+            raise
 
         # Priority: Abort > already-committed response > timeout.
         if abort_task is not None and abort_task in done:
@@ -210,6 +229,18 @@ class ConfirmationBroker:
             future.cancel()
             return self._timeout_outcome(record)
         raise AssertionError("unreachable race state")  # pragma: no cover
+
+    async def _cancel_all_tasks(
+        self, tasks: set[asyncio.Future[Any]]
+    ) -> None:
+        for task in tasks:
+            if isinstance(task, asyncio.Task):
+                if not task.done():
+                    task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            elif not task.done():
+                task.cancel()
 
     async def _cancel_losers(
         self,
