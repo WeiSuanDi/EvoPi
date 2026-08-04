@@ -26,6 +26,14 @@ from evopi.core.cancellation import (
 )
 from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent, EventListener
+from evopi.core.interaction import (
+    InteractionLimits,
+    InteractionOrigin,
+    InteractionQueueController,
+    InteractionQueueMode,
+    InteractionQueueSnapshot,
+    InteractionReceipt,
+)
 from evopi.core.messages import AssistantMessage, Message, SystemMessage, UserMessage
 from evopi.core.model import Model
 from evopi.core.model_attempts import ModelAttemptRouter
@@ -61,6 +69,9 @@ class Agent:
         after_turn: AfterTurn | None = None,
         should_stop_after_turn: ShouldStopAfterTurn | None = None,
         model_attempt_router_factory: Callable[[str], ModelAttemptRouter] | None = None,
+        steering_mode: InteractionQueueMode = "one-at-a-time",
+        follow_up_mode: InteractionQueueMode = "one-at-a-time",
+        interaction_limits: InteractionLimits | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
@@ -69,6 +80,11 @@ class Agent:
         if system_prompt:
             self.messages.append(SystemMessage(content=system_prompt))
         self._loop = AgentLoop(max_turns=max_turns, retry_config=retry_config, deadline=deadline, tool_timeout=tool_timeout)
+        self._interaction_queue = InteractionQueueController(
+            steering_mode=steering_mode,
+            follow_up_mode=follow_up_mode,
+            limits=interaction_limits,
+        )
         self._listeners: list[EventListener] = []
         self._before_tool_call = before_tool_call
         self._after_tool_call = after_tool_call
@@ -144,6 +160,45 @@ class Agent:
 
         return unsubscribe
 
+    async def steer(
+        self,
+        content: str,
+        *,
+        origin: InteractionOrigin = "api",
+    ) -> InteractionReceipt:
+        """Queue a steering interaction for the active Run, if any.
+
+        Raises :class:`InteractionQueueClosedError` while the Agent is idle or
+        the Run's admission gate is already sealed.
+        """
+        return await self._interaction_queue.admit(
+            "steer", origin, content, emit=self._emit, signal=self.signal
+        )
+
+    async def follow_up(
+        self,
+        content: str,
+        *,
+        origin: InteractionOrigin = "api",
+    ) -> InteractionReceipt:
+        """Queue a follow-up interaction for the active Run, if any.
+
+        Follow-up is delivered only at a terminal candidate: no Tool call
+        remains, no steering is pending, and the Run would otherwise end.
+        """
+        return await self._interaction_queue.admit(
+            "follow_up", origin, content, emit=self._emit, signal=self.signal
+        )
+
+    @property
+    def interaction_snapshot(self) -> InteractionQueueSnapshot:
+        """Read-only snapshot of the steering/follow-up queues.
+
+        The snapshot never exposes raw content or mutable queue internals.
+        """
+
+        return self._interaction_queue.snapshot()
+
     async def prompt(self, content: str) -> AssistantMessage:
         if not content:
             raise ValueError("Prompt content cannot be empty")
@@ -161,6 +216,7 @@ class Agent:
                 self._active_run = active
             self._current_run_id = run_id
             self._current_turn = 0
+            self._interaction_queue.open(run_id)
             run_start = len(self.messages)
             user_message = UserMessage(content=content)
             self.messages.append(user_message)
@@ -207,6 +263,7 @@ class Agent:
                             run_id=run_id,
                             signal=active.controller.signal,
                             model_attempt_router=model_attempt_router,
+                            interaction_queue=self._interaction_queue,
                         )
                     )
                     try:
@@ -268,6 +325,7 @@ class Agent:
                         else None
                     ),
                 )
+                await self._seal_interactions(reason)
                 await self._emit(
                     CoreEvent(
                         type="agent_end",
@@ -296,6 +354,9 @@ class Agent:
                     except Exception:
                         pass
                 await self._stop_abort_monitor(active)
+                # Safety net for paths that end without an agent_end (caller
+                # cancellation): seal and clear fail closed.
+                await self._seal_interactions("cancelled")
                 self._current_run_id = None
                 self._current_turn = 0
                 with self._active_guard:
@@ -396,6 +457,7 @@ class Agent:
             error=error,
             error_info=error_info,
         )
+        await self._seal_interactions(reason)
         await self._emit(
             CoreEvent(
                 type="error",
@@ -416,6 +478,20 @@ class Agent:
                     "error_info": error_info,
                 },
             )
+        )
+
+    async def _seal_interactions(self, reason: str) -> None:
+        """Close the interaction admission gate and clear pending items.
+
+        Called before every ``agent_end`` emission and as a safety net in the
+        run's ``finally`` block; sealing is idempotent, so a queue already
+        sealed by the loop's terminal gate emits nothing again.
+        """
+        await self._interaction_queue.seal(
+            emit=self._emit,
+            run_id=self._current_run_id,
+            reason=reason,
+            signal=self.signal,
         )
 
     async def _emit_cleanup_error(self, run_id: str, failure: Exception) -> None:

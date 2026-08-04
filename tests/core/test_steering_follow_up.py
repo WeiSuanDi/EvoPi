@@ -9,12 +9,15 @@ follow-up, and fail-closed clearing).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError
 from datetime import datetime
 from typing import Any
 
 import pytest
 
+from evopi.core.agent import Agent
+from evopi.core.context import AgentContext
 from evopi.core.events import CoreEvent
 from evopi.core.interaction import (
     InteractionContentError,
@@ -26,7 +29,9 @@ from evopi.core.interaction import (
     InteractionQueueFullError,
     InteractionQueueSnapshot,
 )
-from evopi.core.messages import UserMessage
+from evopi.core.messages import AssistantMessage, UserMessage
+from evopi.core.stream import ModelComplete, ModelStreamEvent
+from evopi.core.tool import Tool, ToolCall, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -344,3 +349,508 @@ def test_controller_delivery_events_order_and_never_contain_content() -> None:
     assert delivered_events[0].data["message_id"]
     assert "pending_steering_count" in delivered_events[0].data
     assert "pending_follow_up_count" in delivered_events[0].data
+
+
+# ---------------------------------------------------------------------------
+# Part 2 — Agent safe-point semantics
+# ---------------------------------------------------------------------------
+
+
+class GatedModel:
+    """Scripted model whose streams wait on an optional release gate."""
+
+    name = "gated"
+
+    def __init__(
+        self,
+        messages: list[AssistantMessage],
+        *,
+        started: asyncio.Event | None = None,
+        release: asyncio.Event | None = None,
+    ) -> None:
+        self._messages = iter(messages)
+        self._started = started
+        self._release = release
+        self.contexts: list[AgentContext] = []
+
+    async def stream(self, context: AgentContext) -> AsyncIterator[ModelStreamEvent]:
+        self.contexts.append(context)
+        message = next(self._messages)
+        if self._started is not None:
+            self._started.set()
+        if self._release is not None:
+            await self._release.wait()
+        yield ModelComplete(message=message)
+
+
+def _gated_tool(
+    name: str,
+    *,
+    started: asyncio.Event,
+    release: asyncio.Event,
+    executed: list[str],
+) -> Tool:
+    async def handler() -> str:
+        executed.append(name)
+        started.set()
+        await release.wait()
+        return "ok"
+
+    return Tool(
+        name=name,
+        description=name,
+        parameters={"type": "object", "properties": {}},
+        handler=handler,
+    )
+
+
+def _terminate_tool(
+    name: str,
+    *,
+    started: asyncio.Event,
+    release: asyncio.Event,
+    executed: list[str],
+) -> Tool:
+    async def handler() -> ToolResult:
+        executed.append(name)
+        started.set()
+        await release.wait()
+        return ToolResult(content="stop now", terminate=True)
+
+    return Tool(
+        name=name,
+        description=name,
+        parameters={"type": "object", "properties": {}},
+        handler=handler,
+    )
+
+
+def _user_contents(messages: list[object]) -> list[str]:
+    return [
+        message.content for message in messages if isinstance(message, UserMessage)
+    ]
+
+
+def test_agent_rejects_steering_and_follow_up_while_idle() -> None:
+    agent = Agent(model=GatedModel([]))
+    with pytest.raises(InteractionQueueClosedError):
+        asyncio.run(agent.steer("hello"))
+    with pytest.raises(InteractionQueueClosedError):
+        asyncio.run(agent.follow_up("hello"))
+
+
+def test_agent_constructor_validates_modes_and_limits() -> None:
+    with pytest.raises(InteractionModeError):
+        Agent(model=GatedModel([]), steering_mode="all-at-once")  # type: ignore[arg-type]
+    with pytest.raises(InteractionModeError):
+        Agent(model=GatedModel([]), follow_up_mode="sometimes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        Agent(
+            model=GatedModel([]),
+            interaction_limits=InteractionLimits(max_pending_items=0),
+        )
+
+
+def test_agent_steer_during_model_stream_is_delivered_after_stream_completes() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="working...", stop_reason="stop"),
+                AssistantMessage(content="done", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model)
+        events: list[CoreEvent] = []
+        agent.subscribe(events.append)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        receipt = await agent.steer("go faster")
+        release.set()
+        answer = await task
+
+        assert answer.content == "done"
+        assert receipt.kind == "steer"
+        assert len(model.contexts) == 2
+        # the steer is the next UserMessage after the completed stream
+        assert _user_contents(model.contexts[1].messages) == ["initial", "go faster"]
+        assert agent.last_run is not None
+        assert agent.last_run.end_reason == "completed"
+        assert agent.last_run.turns_used == 2
+        sequence = [event.type for event in events]
+        turn_starts = [i for i, t in enumerate(sequence) if t == "turn_start"]
+        delivered_at = sequence.index("interaction_delivered")
+        turn_end_at = sequence.index("turn_end")
+        assert sequence.index("interaction_queued") < turn_end_at
+        assert turn_end_at < delivered_at < turn_starts[1]
+        assert sequence[delivered_at + 1 : turn_starts[1]][:2] == [
+            "message_start",
+            "message_end",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_agent_steer_during_sibling_tools_waits_for_all_siblings() -> None:
+    async def scenario() -> None:
+        tool_started = asyncio.Event()
+        release = asyncio.Event()
+        executed: list[str] = []
+        model = GatedModel(
+            [
+                AssistantMessage(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="a-1", name="slow", arguments={}),
+                        ToolCall(id="b-1", name="fast", arguments={}),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(content="done", stop_reason="stop"),
+            ]
+        )
+        agent = Agent(
+            model=model,
+            tools=[
+                _gated_tool(
+                    "slow", started=tool_started, release=release, executed=executed
+                ),
+                _gated_tool(
+                    "fast", started=tool_started, release=release, executed=executed
+                ),
+            ],
+        )
+        events: list[CoreEvent] = []
+        agent.subscribe(events.append)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await tool_started.wait()
+        assert executed == ["slow"]
+        await agent.steer("after tools")
+        release.set()
+        answer = await task
+
+        assert answer.content == "done"
+        assert executed == ["slow", "fast"]
+        sequence = [event.type for event in events]
+        tool_ends = [i for i, t in enumerate(sequence) if t == "tool_execution_end"]
+        assert max(tool_ends) < sequence.index("interaction_delivered")
+        assert _user_contents(model.contexts[1].messages) == ["initial", "after tools"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_follow_up_continues_natural_completion_in_same_run() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="first answer", stop_reason="stop"),
+                AssistantMessage(content="continued", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        receipt = await agent.follow_up("keep going")
+        release.set()
+        answer = await task
+
+        assert answer.content == "continued"
+        assert receipt.kind == "follow_up"
+        assert len(model.contexts) == 2
+        assert _user_contents(model.contexts[1].messages) == ["initial", "keep going"]
+        assert agent.last_run is not None
+        assert agent.last_run.end_reason == "completed"
+        assert agent.last_run.turns_used == 2
+
+    asyncio.run(scenario())
+
+
+def test_agent_follow_up_after_terminate_batch_continues_same_run() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        executed: list[str] = []
+        model = GatedModel(
+            [
+                AssistantMessage(
+                    content="",
+                    tool_calls=[ToolCall(id="t-1", name="stop_tool", arguments={})],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(content="finished", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(
+            model=model,
+            tools=[
+                _terminate_tool(
+                    "stop_tool", started=started, release=release, executed=executed
+                )
+            ],
+        )
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.follow_up("do not stop")
+        release.set()
+        answer = await task
+
+        assert answer.content == "finished"
+        assert len(model.contexts) == 2
+        assert agent.last_run is not None
+        assert agent.last_run.end_reason == "completed"
+        assert agent.last_run.turns_used == 2
+
+    asyncio.run(scenario())
+
+
+def test_agent_queued_input_overrides_after_turn_terminate_decision() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="stop please", stop_reason="stop"),
+                AssistantMessage(content="overridden", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model, should_stop_after_turn=lambda *a, **k: True)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.follow_up("continue")
+        release.set()
+        answer = await task
+
+        assert answer.content == "overridden"
+        assert len(model.contexts) == 2
+        assert agent.last_run is not None
+        # the queued input overrode the first terminate decision and the Run
+        # continued; the next candidate still terminates per the decision
+        assert agent.last_run.end_reason == "terminated"
+        assert agent.last_run.turns_used == 2
+
+    asyncio.run(scenario())
+
+
+def test_agent_abort_clears_pending_without_extra_model_call() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [AssistantMessage(content="never finishes", stop_reason="stop")],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model)
+        events: list[CoreEvent] = []
+        agent.subscribe(events.append)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        steer_receipt = await agent.steer("lost steer")
+        follow_receipt = await agent.follow_up("lost follow-up")
+        agent.abort()
+        await agent.wait_for_idle()
+        await task
+
+        assert len(model.contexts) == 1
+        assert agent.last_run is not None
+        assert agent.last_run.end_reason == "aborted"
+        assert "lost steer" not in [message.content for message in agent.messages]
+        assert "lost follow-up" not in [message.content for message in agent.messages]
+        cleared = next(event for event in events if event.type == "interaction_cleared")
+        assert cleared.data["reason"] == "aborted"
+        assert cleared.data["input_ids"] == [
+            steer_receipt.input_id,
+            follow_receipt.input_id,
+        ]
+        sequence = [event.type for event in events]
+        assert sequence.index("interaction_cleared") < sequence.index("agent_end")
+
+    asyncio.run(scenario())
+
+
+def test_agent_turn_limit_at_terminal_candidate_seals_without_extra_model_call() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [AssistantMessage(content="done", stop_reason="stop")],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model, max_turns=1)
+        events: list[CoreEvent] = []
+        agent.subscribe(events.append)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        receipt = await agent.follow_up("too late")
+        release.set()
+        answer = await task
+
+        assert answer.content == "done"
+        assert len(model.contexts) == 1
+        assert "too late" not in [message.content for message in agent.messages]
+        cleared = next(event for event in events if event.type == "interaction_cleared")
+        assert cleared.data["reason"] == "turn_limit"
+        assert cleared.data["input_ids"] == [receipt.input_id]
+        assert agent.last_run is not None
+        assert agent.last_run.end_reason == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_agent_steering_one_at_a_time_delivers_one_item_per_continuation() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="one", stop_reason="stop"),
+                AssistantMessage(content="two", stop_reason="stop"),
+                AssistantMessage(content="three", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model, max_turns=3)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.steer("s1")
+        await agent.steer("s2")
+        release.set()
+        answer = await task
+
+        assert answer.content == "three"
+        assert len(model.contexts) == 3
+        assert _user_contents(model.contexts[1].messages) == ["initial", "s1"]
+        assert _user_contents(model.contexts[2].messages) == ["initial", "s1", "s2"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_steering_all_delivers_snapshot_before_one_request() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="one", stop_reason="stop"),
+                AssistantMessage(content="two", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model, steering_mode="all")
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.steer("s1")
+        await agent.steer("s2")
+        release.set()
+        answer = await task
+
+        assert answer.content == "two"
+        assert len(model.contexts) == 2
+        assert _user_contents(model.contexts[1].messages) == ["initial", "s1", "s2"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_follow_up_all_delivers_snapshot_before_one_request() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="one", stop_reason="stop"),
+                AssistantMessage(content="two", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model, follow_up_mode="all")
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.follow_up("f1")
+        await agent.follow_up("f2")
+        release.set()
+        answer = await task
+
+        assert answer.content == "two"
+        assert len(model.contexts) == 2
+        assert _user_contents(model.contexts[1].messages) == ["initial", "f1", "f2"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_initial_steering_is_delivered_before_first_model_attempt() -> None:
+    async def scenario() -> None:
+        model = GatedModel([AssistantMessage(content="done", stop_reason="stop")])
+        agent = Agent(model=model)
+        events: list[CoreEvent] = []
+        agent.subscribe(events.append)
+
+        async def steer_on_start(event: CoreEvent) -> None:
+            if event.type == "agent_start":
+                await agent.steer("early steer")
+
+        agent.subscribe(steer_on_start)
+        answer = await agent.prompt("hello")
+
+        assert answer.content == "done"
+        assert len(model.contexts) == 1
+        assert _user_contents(model.contexts[0].messages) == ["hello", "early steer"]
+        sequence = [event.type for event in events]
+        turn_starts = [i for i, t in enumerate(sequence) if t == "turn_start"]
+        assert sequence.index("interaction_delivered") < turn_starts[0]
+
+    asyncio.run(scenario())
+
+
+def test_agent_steer_after_run_terminates_raises_closed_error() -> None:
+    async def scenario() -> None:
+        model = GatedModel([AssistantMessage(content="done", stop_reason="stop")])
+        agent = Agent(model=model)
+        await agent.prompt("hello")
+        with pytest.raises(InteractionQueueClosedError):
+            await agent.steer("late")
+        with pytest.raises(InteractionQueueClosedError):
+            await agent.follow_up("late")
+
+    asyncio.run(scenario())
+
+
+def test_agent_interaction_snapshot_reflects_pending_and_delivered() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        model = GatedModel(
+            [
+                AssistantMessage(content="done", stop_reason="stop"),
+                AssistantMessage(content="second", stop_reason="stop"),
+            ],
+            started=started,
+            release=release,
+        )
+        agent = Agent(model=model)
+        task = asyncio.create_task(agent.prompt("initial"))
+        await started.wait()
+        await agent.follow_up("later")
+        assert agent.interaction_snapshot.pending_follow_up_count == 1
+        assert agent.interaction_snapshot.pending_steering_count == 0
+        release.set()
+        await task
+        after = agent.interaction_snapshot
+        assert after.pending_follow_up_count == 0
+        assert after.pending_steering_count == 0
+
+    asyncio.run(scenario())
