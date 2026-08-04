@@ -234,7 +234,7 @@ class ExceptionLeakRpcMutant(ReferenceRpcAdapter):
     @staticmethod
     def _format_unexpected(exc: Exception) -> RpcErrorInfo:
         # broken: the exception message (and its secrets) reaches the client
-        return RpcErrorInfo(code="internal_error", message=f"{type(exc).__name__}: {exc}", details=None)
+        return RpcErrorInfo(code="internal_error", message=f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------

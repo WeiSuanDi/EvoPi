@@ -9,8 +9,10 @@ conformant known-good adapter that the reusable scenarios then use as oracle.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
-from datetime import datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta
 from enum import Enum
 from uuid import UUID
 
@@ -36,6 +38,12 @@ UUID_LINE = (
 def _assert_wire_error(result: object, expected: str) -> None:
     assert isinstance(result, WireError), f"expected WireError, got {result!r}"
     assert result.code == expected, f"expected {expected!r}, got {result.code!r}"
+
+
+def _drop_key(line: str, key: str) -> str:
+    obj = json.loads(line)
+    del obj[key]
+    return json.dumps(obj)
 
 
 def test_codec_rejects_duplicate_json_keys() -> None:
@@ -146,6 +154,92 @@ def test_codec_rejects_empty_identifiers() -> None:
         ),
         "invalid_response",
     )
+
+
+def test_codec_requires_every_request_and_event_key() -> None:
+    """Request and Event require the exact frozen key set, one key at a time."""
+    adapter = ReferenceRpcAdapter()
+    request_line = '{"request_id":"x","method":"runtime.status","params":{},"schema_version":1}'
+    for key in ("request_id", "method", "params", "schema_version"):
+        result = asyncio.run(adapter.send_wire(_drop_key(request_line, key)))
+        assert not result.ok
+        assert result.error is not None and result.error.code == "invalid_envelope", (
+            f"request missing {key!r} must be invalid_envelope"
+        )
+    for key in ("event_id", "sequence", "type", "data", "run_id", "created_at", "schema_version"):
+        _assert_wire_error(adapter.parse_wire_event(_drop_key(UUID_LINE, key)), "invalid_envelope")
+    # mixed missing and extra keys
+    mixed_request = json.loads(_drop_key(request_line, "schema_version"))
+    mixed_request["extra"] = 1
+    result = asyncio.run(adapter.send_wire(json.dumps(mixed_request)))
+    assert not result.ok
+    assert result.error is not None and result.error.code == "invalid_envelope_key"
+    mixed_event = json.loads(_drop_key(UUID_LINE, "run_id"))
+    mixed_event["extra"] = 1
+    _assert_wire_error(adapter.parse_wire_event(json.dumps(mixed_event)), "invalid_envelope_key")
+
+
+def test_codec_rejects_negative_after_sequence() -> None:
+    adapter = ReferenceRpcAdapter()
+    for line in (
+        '{"request_id":"n","method":"events.replay","params":{"after_sequence":-1},"schema_version":1}',
+        '{"request_id":"n","method":"events.replay","params":{"after_sequence":-5},"schema_version":1}',
+    ):
+        result = asyncio.run(adapter.send_wire(line))
+        assert not result.ok
+        assert result.error is not None and result.error.code == "invalid_params"
+
+
+def test_response_wire_rejects_null_or_non_object_error_details() -> None:
+    adapter = ReferenceRpcAdapter()
+    for line in (
+        '{"request_id":"w","ok":false,"result":null,"error":{"code":"c","message":"m",'
+        '"details":null},"schema_version":1}',
+        '{"request_id":"w","ok":false,"result":null,"error":{"code":"c","message":"m",'
+        '"details":[]},"schema_version":1}',
+    ):
+        _assert_wire_error(adapter.parse_wire_response(line), "invalid_response")
+    fail_response = _call(adapter, "no.such.method", {})
+    wire = adapter.response_wire(fail_response)
+    assert isinstance(wire, str)
+    payload = json.loads(wire)
+    assert isinstance(payload["error"]["details"], dict)
+    assert payload["error"]["message"]  # non-empty safe message
+
+
+def test_to_json_safe_accepts_generic_mappings_sequences_and_dates() -> None:
+    class _Map(Mapping[str, int]):
+        def __init__(self, data: dict[str, int]) -> None:
+            self._data = data
+
+        def __getitem__(self, key: str) -> int:
+            return self._data[key]
+
+        def __iter__(self):
+            return iter(self._data)
+
+        def __len__(self) -> int:
+            return len(self._data)
+
+    class _Seq(Sequence[int]):
+        def __init__(self, data: list[int]) -> None:
+            self._data = data
+
+        def __getitem__(self, index):
+            return self._data[index]
+
+        def __len__(self) -> int:
+            return len(self._data)
+
+    assert to_json_safe(_Map({"a": 1, "b": {"c": 2}})) == {"a": 1, "b": {"c": 2}}
+    assert to_json_safe(_Seq([1, (2, 3)])) == [1, [2, 3]]
+    assert to_json_safe(range(3)) == [0, 1, 2]
+    assert to_json_safe(date(2026, 1, 2)) == "2026-01-02"
+    assert to_json_safe({"when": date(2026, 1, 2)}) == {"when": "2026-01-02"}
+    with pytest.raises(ValueError):
+        to_json_safe(b"raw bytes")
+    with pytest.raises(ValueError, match="non-string mapping key"):
+        to_json_safe({1: "x"})
 
 
 def test_codec_rejects_unknown_schema_versions() -> None:
@@ -302,8 +396,6 @@ def test_response_wire_round_trip_symmetry() -> None:
 
 
 def test_response_wire_canonical_invariant() -> None:
-    import json
-
     adapter = ReferenceRpcAdapter()
     ok_response = _call(adapter, "initialize", {})
     payload = json.loads(adapter.response_wire(ok_response))

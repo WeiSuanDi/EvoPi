@@ -23,10 +23,10 @@ import asyncio
 import dataclasses
 import json
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias
@@ -213,7 +213,7 @@ class RpcRequest:
 class RpcErrorInfo:
     code: str
     message: str
-    details: JsonLike | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -398,10 +398,10 @@ def make_rpc_request(
 def to_json_safe(value: Any) -> JsonLike:
     """Convert kit values to JSON-safe equivalents; reject everything else.
 
-    Accepts JSON primitives, mappings, sequences, dataclasses, enums, Path, and
-    datetime/date.  Non-string mapping keys, non-finite floats, and Enum values
-    that are not JSON primitives are rejected with ValueError; there is never a
-    ``repr`` fallback.
+    Accepts JSON primitives, any string-keyed Mapping, any non-byte Sequence,
+    dataclasses, enums, Path, and datetime/date.  Non-string mapping keys,
+    bytes, non-finite floats, and Enum values that are not JSON primitives are
+    rejected with ValueError; there is never a ``repr`` fallback.
     """
     if value is None or isinstance(value, (bool, str)):
         return value
@@ -411,7 +411,7 @@ def to_json_safe(value: Any) -> JsonLike:
         if not math.isfinite(value):
             raise ValueError("non-finite float")
         return value
-    if isinstance(value, datetime):
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, Enum):
         if isinstance(value.value, (str, int, bool)):
@@ -423,14 +423,14 @@ def to_json_safe(value: Any) -> JsonLike:
         raise ValueError(f"enum value of type {type(value.value).__name__} is not JSON-safe")
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         converted: dict[str, JsonLike] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"non-string mapping key of type {type(key).__name__}")
             converted[key] = to_json_safe(item)
         return converted
-    if isinstance(value, (tuple, list)):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [to_json_safe(item) for item in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
@@ -725,7 +725,7 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
         ),
         (
             '{"request_id":"sj-1","method":"runtime.status","schema_version":1}',
-            "invalid_params",
+            "invalid_envelope",
         ),
         (
             '{"request_id":"sj-1","method":"runtime.status","params":5,"schema_version":1}',
@@ -740,7 +740,20 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
             "invalid_envelope",
         ),
         (
+            '{"request_id":"sj-1","method":"runtime.status","params":{}}',
+            "invalid_envelope",
+        ),
+        (
+            '{"request_id":"sj-1","params":{},"schema_version":1}',
+            "invalid_envelope",
+        ),
+        (
             '{"request_id":"sj-1","method":"events.replay","params":{"after_sequence":true},'
+            '"schema_version":1}',
+            "invalid_params",
+        ),
+        (
+            '{"request_id":"sj-1","method":"events.replay","params":{"after_sequence":-1},'
             '"schema_version":1}',
             "invalid_params",
         ),
@@ -813,6 +826,16 @@ async def run_strict_json(adapter: RpcAdapter) -> None:
             '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
             '"data":[],"run_id":null,"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
             "invalid_data",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{},"created_at":"2026-01-01T00:00:00Z","schema_version":1}',
+            "invalid_envelope",
+        ),
+        (
+            '{"event_id":"12345678-1234-5678-1234-567812345678","sequence":1,"type":"t",'
+            '"data":{},"run_id":null,"created_at":"2026-01-01T00:00:00Z"}',
+            "invalid_envelope",
         ),
     ]
     for line, expected in event_cases:
@@ -1072,9 +1095,10 @@ async def run_rpc_redaction(adapter: RpcAdapter) -> None:
         raise ConformanceFailure(
             f"an unexpected exception must map to internal_error, got {response.error}"
         )
+    if not response.error.message:
+        raise ConformanceFailure("error message must be non-empty and safe")
     text = response.error.message
-    if response.error.details is not None:
-        text += json.dumps(to_json_safe(response.error.details), sort_keys=True)
+    text += json.dumps(to_json_safe(response.error.details), sort_keys=True)
     for leaked in (KIT_REDACT_SECRET, "RuntimeError", "Traceback", "boom"):
         if leaked in text:
             raise ConformanceFailure("RPC error leaked exception or argument content")
@@ -1114,6 +1138,8 @@ async def run_response_wire_invariant(adapter: RpcAdapter) -> None:
         raise ConformanceFailure("failure wire must carry one exact error object")
     if not error["code"] or not error["message"]:
         raise ConformanceFailure("error code and message must be non-empty")
+    if not isinstance(error["details"], dict):
+        raise ConformanceFailure("error details must be an object, never null")
     decoded = adapter.parse_wire_response(wire)
     if isinstance(decoded, WireError) or decoded != fail_response:
         raise ConformanceFailure("failure response must decode to the identical response")
@@ -1145,7 +1171,17 @@ async def run_response_wire_invariant(adapter: RpcAdapter) -> None:
         ),
         (
             '{"request_id":"w","ok":false,"result":null,"error":{"code":"","message":"m",'
+            '"details":{}},"schema_version":1}',
+            "invalid_response",
+        ),
+        (
+            '{"request_id":"w","ok":false,"result":null,"error":{"code":"c","message":"m",'
             '"details":null},"schema_version":1}',
+            "invalid_response",
+        ),
+        (
+            '{"request_id":"w","ok":false,"result":null,"error":{"code":"c","message":"m",'
+            '"details":[]},"schema_version":1}',
             "invalid_response",
         ),
         ('not-json', "malformed_json"),

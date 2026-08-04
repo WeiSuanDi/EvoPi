@@ -591,6 +591,9 @@ class ReferenceRpcAdapter:
         unknown = set(loaded) - _REQUEST_ENVELOPE_KEYS
         if unknown:
             return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
+        missing = _REQUEST_ENVELOPE_KEYS - set(loaded)
+        if missing:
+            return WireError(code="invalid_envelope", message=f"missing envelope key: {sorted(missing)[0]}")
         request_id = loaded.get("request_id")
         method = loaded.get("method")
         if (
@@ -648,6 +651,9 @@ class ReferenceRpcAdapter:
         unknown = set(loaded) - _EVENT_ENVELOPE_KEYS
         if unknown:
             return WireError(code="invalid_envelope_key", message=f"unknown envelope key: {sorted(unknown)[0]}")
+        missing = _EVENT_ENVELOPE_KEYS - set(loaded)
+        if missing:
+            return WireError(code="invalid_envelope", message=f"missing envelope key: {sorted(missing)[0]}")
         created_at = self._parse_utc_timestamp(loaded.get("created_at"))
         if created_at is None:
             return WireError(code="invalid_timestamp", message="created_at must be a UTC timestamp")
@@ -729,8 +735,8 @@ class ReferenceRpcAdapter:
         if not isinstance(code, str) or not code or not isinstance(message, str) or not message:
             return WireError(code="invalid_response", message="error code and message must be non-empty strings")
         details = error.get("details")
-        if details is not None and (isinstance(details, bool) or not isinstance(details, dict)):
-            return WireError(code="invalid_response", message="error details must be an object or null")
+        if isinstance(details, bool) or not isinstance(details, dict):
+            return WireError(code="invalid_response", message="error details must be an object")
         return RpcResponse(
             request_id=request_id,
             ok=False,
@@ -830,7 +836,9 @@ class ReferenceRpcAdapter:
             return RpcResponse(
                 request_id=request_id,
                 ok=False,
-                error=RpcErrorInfo(code=error.code, message=error.message, details=error.details),
+                error=RpcErrorInfo(
+                    code=error.code, message=error.message, details=error.details or {}
+                ),
             )
         except Exception as exc:
             return RpcResponse(request_id=request_id, ok=False, error=self._format_unexpected(exc))
@@ -839,7 +847,7 @@ class ReferenceRpcAdapter:
     @staticmethod
     def _format_unexpected(exc: Exception) -> RpcErrorInfo:
         # Never leak tracebacks, prompts, tool arguments, or provider state.
-        return RpcErrorInfo(code="internal_error", message="internal error", details=None)
+        return RpcErrorInfo(code="internal_error", message="internal error")
 
     # -- wire surface --
     async def send_wire(self, line: str) -> WireResult:
@@ -914,6 +922,8 @@ class ReferenceRpcAdapter:
             or not error.message
         ):
             return WireError(code="invalid_response", message="error code and message must be non-empty strings")
+        if isinstance(error.details, bool) or not isinstance(error.details, dict):
+            return WireError(code="invalid_response", message="error details must be an object")
         try:
             payload = {
                 "request_id": response.request_id,
