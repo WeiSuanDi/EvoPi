@@ -131,33 +131,47 @@ class HarnessRpcHost:
 
     async def initialize(self, params: JsonObject) -> JsonObject:
         capabilities = self.harness.capabilities
-        snapshot = self._snapshot()
-        return {
+        result = {
             "protocol": "evopi.rpc.v1",
             "schema_version": 1,
             "session_id": self.harness.session.session_id,
             "active_tool_names": list(capabilities.active_tool_names),
             "policy_names": list(capabilities.policy_names),
-            "capabilities": {"text_steering": True, "text_follow_up": True},
-            "steering_mode": snapshot.steering_mode,
-            "follow_up_mode": snapshot.follow_up_mode,
         }
+        surface = self._interaction_surface()
+        if surface is not None:
+            snapshot = surface.interaction_snapshot
+            result.update(
+                {
+                    "capabilities": {"text_steering": True, "text_follow_up": True},
+                    "steering_mode": snapshot.steering_mode,
+                    "follow_up_mode": snapshot.follow_up_mode,
+                }
+            )
+        return result
 
     async def runtime_status(self, params: JsonObject) -> JsonObject:
         last_run = self.harness.last_run
-        snapshot = self._snapshot()
-        return {
+        result = {
             "active_run_id": self._active_run_id,
             "lifecycle": str(self.harness.state.status),
             "session_id": self.harness.session.session_id,
             "pending_confirmation_count": len(self.broker.list_pending()),
             "last_end_reason": last_run.end_reason if last_run is not None else None,
             "last_run_error": self._last_run_error,
-            "steering_mode": snapshot.steering_mode,
-            "follow_up_mode": snapshot.follow_up_mode,
-            "pending_steering_count": snapshot.pending_steering_count,
-            "pending_follow_up_count": snapshot.pending_follow_up_count,
         }
+        surface = self._interaction_surface()
+        if surface is not None:
+            snapshot = surface.interaction_snapshot
+            result.update(
+                {
+                    "steering_mode": snapshot.steering_mode,
+                    "follow_up_mode": snapshot.follow_up_mode,
+                    "pending_steering_count": snapshot.pending_steering_count,
+                    "pending_follow_up_count": snapshot.pending_follow_up_count,
+                }
+            )
+        return result
 
     async def run_steer(self, params: JsonObject) -> JsonObject:
         return await self._queue_interaction("steer", cast(str, params["content"]))
@@ -197,8 +211,18 @@ class HarnessRpcHost:
             "position": receipt.position,
         }
 
-    def _snapshot(self) -> InteractionSnapshotView:
-        return cast(InteractionHarness, self.harness).interaction_snapshot
+    def _interaction_surface(self) -> InteractionHarness | None:
+        """Return the Lane 1 interaction surface when the Harness has it.
+
+        Lane 1 introduces ``steer``/``follow_up``/``interaction_snapshot`` on
+        BaseHarness. Until both Lanes are integrated, the Host serves the
+        frozen pre-milestone v1 wire contract (no interaction fields) so
+        existing Host bindings keep working; the interaction methods
+        themselves fail closed through the ordinary redacted path.
+        """
+        if not hasattr(self.harness, "interaction_snapshot"):
+            return None
+        return cast(InteractionHarness, self.harness)
 
     async def run_start(self, params: JsonObject) -> JsonObject:
         if self._closed:
