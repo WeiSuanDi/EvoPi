@@ -146,7 +146,13 @@ class ConfirmationAdapter(Protocol):
 
     def advance_time(self, seconds: float) -> None: ...
 
-    def pending(self) -> tuple[ConfirmationRecord, ...]: ...
+    def pending(self) -> tuple[ConfirmationRecord, ...]:
+        """Only records still awaiting a decision are reported here."""
+        ...
+
+    def record(self, request_id: str) -> ConfirmationRecord | None:
+        """Inspect one record by id, terminal or not (None when unknown)."""
+        ...
 
     def execution_log(self) -> tuple[ExecutedOperation, ...]: ...
 
@@ -162,9 +168,27 @@ class ConfirmationAdapter(Protocol):
 
     async def abort(self, request_id: str) -> RespondOutcome: ...
 
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """Graceful close: wake every live waiter fail closed, no pending record.
 
-    async def reopen(self, *, runtime_id: str) -> ReopenOutcome: ...
+        This is not a crash.  A runtime process keeps its pending facts alive
+        while an external host reconnects; only ``crash``/``recover`` model
+        abrupt process loss.
+        """
+        ...
+
+    async def crash(self) -> None:
+        """Test-only abrupt process loss: durable pending facts survive.
+
+        Live waiters are abandoned (they never resolve); the durable pending
+        records remain for a later ``recover`` to orphan.
+        """
+        ...
+
+    async def recover(self, *, runtime_id: str) -> ReopenOutcome:
+        """Crash recovery: every persisted pending record orphans, even when the
+        old runtime id is reused; no waiter or tool is reconstructed."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -554,21 +578,30 @@ async def run_atomic_batch(adapter: ConfirmationAdapter) -> None:
 
 
 async def run_orphan_no_replay(adapter: ConfirmationAdapter) -> None:
-    """Requests pending at crash become orphaned on reopen and never replay."""
+    """Requests pending at abrupt process loss orphan on recovery and never replay."""
     request = make_confirmation_request(request_id="orphan-1")
     task = asyncio.create_task(adapter.request(request))
     await asyncio.sleep(0)
-    await adapter.close()  # the owning process dies without responding
-    task.cancel()
+    pending_before = adapter.pending()
+    if not pending_before or pending_before[0].request_id != "orphan-1":
+        raise ConformanceFailure("request must be pending before the crash")
+    runtime_id = pending_before[0].runtime_id  # the crashed owner's runtime id
+    await adapter.crash()  # abrupt process loss: durable pending fact survives
+    task.cancel()  # the live waiter is gone with the process
     with suppress(asyncio.CancelledError):
         await task
-    reopened = await adapter.reopen(runtime_id="runtime-b")
-    orphaned = [record for record in reopened.orphaned if record.request_id == "orphan-1"]
+    recovered = await adapter.recover(runtime_id=runtime_id)  # old runtime id reused
+    orphaned = [record for record in recovered.orphaned if record.request_id == "orphan-1"]
     if not orphaned or orphaned[0].status != "orphaned":
-        raise ConformanceFailure("pending requests of the crashed owner must reopen as orphaned")
-    statuses = {record.request_id: record.status for record in adapter.pending()}
-    if statuses.get("orphan-1") != "orphaned":
-        raise ConformanceFailure("orphaned record must be visible with status 'orphaned'")
+        raise ConformanceFailure(
+            "persisted pending requests must recover as orphaned even when the "
+            "old runtime id is reused"
+        )
+    if adapter.pending():
+        raise ConformanceFailure("pending() must report only pending records")
+    observed = adapter.record("orphan-1")
+    if observed is None or observed.status != "orphaned":
+        raise ConformanceFailure("orphaned records must be inspectable via record lookup")
     if adapter.execution_log():
         raise ConformanceFailure("orphaned request was replayed or executed")
     late = await adapter.respond(make_response(request_id="orphan-1", decision="approve"))
@@ -577,7 +610,33 @@ async def run_orphan_no_replay(adapter: ConfirmationAdapter) -> None:
     if late.error is None or late.error.code != "request_orphaned":
         raise ConformanceFailure("orphaned response must be a structured orphaned conflict")
     if adapter.execution_log():
-        raise ConformanceFailure("orphaned request executed after reopen")
+        raise ConformanceFailure("orphaned request executed after recovery")
+
+
+async def run_graceful_close(adapter: ConfirmationAdapter) -> None:
+    """Graceful close wakes every waiter fail closed and leaves no pending record."""
+    tasks: list[asyncio.Task[RequestOutcome]] = []
+    for index in range(2):
+        request = make_confirmation_request(request_id=f"close-{index}")
+        task = asyncio.create_task(adapter.request(request))
+        tasks.append(task)
+        await asyncio.sleep(0)
+    await adapter.close()
+    for task in tasks:
+        outcome = await _await_bounded(task, what="waiter after graceful close")
+        if outcome.status != "cancelled":
+            raise ConformanceFailure(
+                f"graceful close must wake waiters fail closed, got {outcome.status!r}"
+            )
+        if outcome.executed:
+            raise ConformanceFailure("graceful close must never execute a guarded operation")
+    for task in tasks:
+        if not task.done():
+            raise ConformanceFailure("graceful close leaked a waiter task")
+    if adapter.pending():
+        raise ConformanceFailure("graceful close must leave no pending record")
+    if adapter.execution_log():
+        raise ConformanceFailure("graceful close executed a guarded operation")
 
 
 async def run_confirmation_redaction(adapter: ConfirmationAdapter) -> None:
@@ -783,14 +842,16 @@ async def run_slow_subscriber_failure(adapter: RpcAdapter) -> None:
             with suppress(asyncio.CancelledError):
                 await task
             raise ConformanceFailure("publisher blocked behind a slow subscriber")
-        first = await subscriber.next_event()
-        if first is None or first.sequence != 1:
-            raise ConformanceFailure(
-                "slow subscriber must still receive queued events before failing"
-            )
-        drained = await subscriber.next_event()
-        if drained is not None:
-            raise ConformanceFailure("an overflowing subscriber did not fail explicitly")
+        # Either dropping the buffered item immediately or draining it before
+        # the terminal overflow is valid; what is mandatory is the explicit
+        # overflow failure on the subscriber while publication never blocks.
+        first = await _await_bounded(subscriber.next_event(), what="slow subscriber read")
+        if first is not None:
+            second = await _await_bounded(subscriber.next_event(), what="slow subscriber drain")
+            if second is not None:
+                raise ConformanceFailure(
+                    "subscriber kept delivering events after the overflow failure"
+                )
         failure = subscriber.failure()
         if failure is None or failure.code != "subscriber_queue_overflow":
             raise ConformanceFailure(
@@ -903,6 +964,7 @@ CONFIRMATION_SCENARIOS: dict[str, ConfirmationScenarioFn] = {
     "duplicate response": run_duplicate_response,
     "atomic batch": run_atomic_batch,
     "orphan/no replay": run_orphan_no_replay,
+    "graceful close": run_graceful_close,
     "confirmation redaction": run_confirmation_redaction,
 }
 

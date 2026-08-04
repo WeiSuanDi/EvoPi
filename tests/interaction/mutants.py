@@ -41,10 +41,10 @@ from .reference import ReferenceConfirmationAdapter, ReferenceRpcAdapter
 class ReplayOrphanConfirmationMutant(ReferenceConfirmationAdapter):
     """MUTANT: replays (re-executes) requests that should have been orphaned."""
 
-    async def reopen(self, *, runtime_id: str) -> ReopenOutcome:
+    async def recover(self, *, runtime_id: str) -> ReopenOutcome:
         orphaned: list[ConfirmationRecord] = []
         for record in list(self._records.values()):
-            if record.status == "pending" and record.runtime_id != runtime_id:
+            if record.status == "pending":
                 # broken: the pending operation is resumed and executed
                 self._log.append(ExecutedOperation(request_id=record.request.id, decision="approve"))
                 self._resolve(

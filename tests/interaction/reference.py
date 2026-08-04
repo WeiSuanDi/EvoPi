@@ -134,6 +134,14 @@ class ReferenceConfirmationAdapter:
             metadata={"automatic": True, "aborted": True},
         )
 
+    @staticmethod
+    def _automatic_close(request_id: str) -> ConfirmationResponse:
+        return ConfirmationResponse(
+            request_id=request_id,
+            decision="cancelled",
+            metadata={"automatic": True, "closed": True},
+        )
+
     def _resolve(
         self, record: _PendingRecord, status: str, response: ConfirmationResponse | None
     ) -> None:
@@ -153,6 +161,19 @@ class ReferenceConfirmationAdapter:
                 response=record.response,
             )
             for record in self._records.values()
+            if record.status == "pending"
+        )
+
+    def record(self, request_id: str) -> ConfirmationRecord | None:
+        record = self._records.get(request_id)
+        if record is None:
+            return None
+        return ConfirmationRecord(
+            request_id=record.request.id,
+            status=record.status,
+            runtime_id=record.runtime_id,
+            revision=record.revision,
+            response=record.response,
         )
 
     def execution_log(self) -> tuple[ExecutedOperation, ...]:
@@ -162,6 +183,15 @@ class ReferenceConfirmationAdapter:
     async def request(
         self, request: ConfirmationRequest, *, abort: AbortToken | None = None
     ) -> RequestOutcome:
+        if self._closed:
+            # fail closed after graceful close: no record is created and no
+            # waiter is left behind
+            return RequestOutcome(
+                request_id=request.id,
+                status="cancelled",
+                response=self._automatic_close(request.id),
+                executed=False,
+            )
         record = _PendingRecord(request, self._runtime_id, self._deadline(request))
         self._records[request.id] = record
         if abort is None:
@@ -272,14 +302,28 @@ class ReferenceConfirmationAdapter:
 
     # -- process boundary --
     async def close(self) -> None:
-        # A runtime process keeps pending records alive while a host reconnects.
+        # Graceful close cancels the live pending waits, wakes callers fail
+        # closed, and leaves no pending record.  It is not a crash: the durable
+        # facts are resolved, not orphaned, and a host reconnect keeps using the
+        # same live adapter.
         self._closed = True
+        for record in list(self._records.values()):
+            if record.status == "pending":
+                self._resolve(record, "cancelled", self._automatic_close(record.request.id))
 
-    async def reopen(self, *, runtime_id: str) -> ReopenOutcome:
+    async def crash(self) -> None:
+        # Test-only abrupt process loss boundary: the durable pending facts
+        # survive untouched and the live waiters are abandoned (never resolved).
+        # No cleanup runs, exactly like a process dying mid-wait.
+        return None
+
+    async def recover(self, *, runtime_id: str) -> ReopenOutcome:
+        # Process recovery reopens the same durable store: every persisted
+        # pending record transitions to orphaned, even when the caller reuses
+        # the old runtime id.  No waiter or tool is reconstructed.
         orphaned: list[ConfirmationRecord] = []
         for record in list(self._records.values()):
-            if record.status == "pending" and record.runtime_id != runtime_id:
-                # no waiter is resumed and no tool is reconstructed
+            if record.status == "pending":
                 record.status = "orphaned"
                 record.revision += 1
                 orphaned.append(

@@ -65,5 +65,5 @@ def test_acceptance_matrix_is_fully_covered() -> None:
     assert targets <= scenarios
     assert len(CONFIRMATION_MUTANTS) == 5
     assert len(RPC_MUTANTS) == 6
-    assert len(CONFIRMATION_SCENARIOS) == 7
+    assert len(CONFIRMATION_SCENARIOS) == 8
     assert len(RPC_SCENARIOS) == 9
