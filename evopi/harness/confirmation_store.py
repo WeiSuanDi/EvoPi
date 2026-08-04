@@ -23,6 +23,7 @@ from evopi.core.types import JsonObject
 from evopi.harness.confirmation import (
     ConfirmationConflictError,
     ConfirmationDuplicateRequestError,
+    ConfirmationDuplicateResponseError,
     ConfirmationError,
     ConfirmationExpiredError,
     ConfirmationFormatError,
@@ -71,7 +72,7 @@ def already_resolved_error(record: ConfirmationRecord) -> ConfirmationConflictEr
             f"confirmation request {request_id!r} is orphaned",
             details={"request_id": request_id, "status": record.status},
         )
-    return ConfirmationConflictError(
+    return ConfirmationDuplicateResponseError(
         f"confirmation request {request_id!r} is already {record.status}",
         details={"request_id": request_id, "status": record.status},
     )
