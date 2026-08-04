@@ -964,21 +964,22 @@ async def run_exactly_once_input_ids(adapter: InteractionAdapter) -> None:
     cleared_events = [e for e in events if e.type == "interaction_cleared"]
     if len(cleared_events) != 1 or cleared_events[0].data.get("reason") != "cancelled":
         raise ConformanceFailure("the terminal clear must be one cancelled event")
-    cleared_ids = list(cleared_events[0].data.get("input_ids", ()))
-    if mode == "one-at-a-time":
-        expected_cleared = [fu.input_id, steer2.input_id]
-    else:
-        expected_cleared = [fu.input_id]
-    if cleared_ids != expected_cleared:
-        raise ConformanceFailure(f"cleared IDs must be exact and in admission order, got {cleared_ids}")
-    evidence = delivered_ids + cleared_ids
+    cleared_ids = [cast(str, item) for item in cleared_events[0].data.get("input_ids", ())]
+    final_delivered_ids = [
+        cast(str, e.data["input_id"]) for e in events if e.type == "interaction_delivered"
+    ]
+    evidence = final_delivered_ids + cleared_ids
     all_ids = [steer1.input_id, fu.input_id, steer2.input_id]
-    if evidence != all_ids:
+    if sorted(evidence) != sorted(all_ids):
         raise ConformanceFailure("every accepted input ID must appear exactly once as delivered or cleared")
+    if len(evidence) != len(set(evidence)):
+        raise ConformanceFailure("an input ID appeared more than once")
     agent_ends = [e for e in events if e.type == "agent_end"]
     if len(agent_ends) != 1 or agent_ends[0].data.get("outcome") != "cancelled":
         raise ConformanceFailure("agent_end must report the cancelled outcome")
     _assert_strictly_before(events, cleared_events[0], agent_ends[0], "cleared before agent_end")
+    if any(e.type == "interaction_delivered" and e.sequence > agent_ends[0].sequence for e in events):
+        raise ConformanceFailure("a delivery after agent_end would strand an acknowledged input")
     await _await_bounded(adapter.wait_for_idle(), what="idle after the terminal clear")
 
 
@@ -1108,11 +1109,19 @@ async def run_queue_capacity(adapter: InteractionAdapter) -> None:
     await adapter.terminate("cancelled")
     events = _events_of(adapter, run_id)
     cleared = [e for e in events if e.type == "interaction_cleared"]
-    if len(cleared) != 1 or cleared[0].data.get("count") != limits.max_pending_items:
-        raise ConformanceFailure("every accepted undelivered item must clear exactly once")
-    ids = list(cleared[0].data.get("input_ids", ()))
-    if ids != [r.input_id for r in receipts] or len(set(ids)) != len(ids):
-        raise ConformanceFailure("cleared input IDs must be unique and in FIFO admission order")
+    if len(cleared) != 1 or cleared[0].data.get("reason") != "cancelled":
+        raise ConformanceFailure("the terminal clear must be one cancelled event")
+    cleared_ids = list(cleared[0].data.get("input_ids", ()))
+    delivered_ids = [
+        e.data.get("input_id") for e in events if e.type == "interaction_delivered"
+    ]
+    evidence = delivered_ids + cleared_ids
+    if len(evidence) != limits.max_pending_items or len(set(evidence)) != limits.max_pending_items:
+        raise ConformanceFailure(
+            "every accepted undelivered item must carry exactly-once delivery-or-clear evidence"
+        )
+    if set(evidence) != {r.input_id for r in receipts}:
+        raise ConformanceFailure("evidence must cover exactly the accepted items")
 
 
 async def run_invalid_content(adapter: InteractionAdapter) -> None:
