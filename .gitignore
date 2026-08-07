@@ -47,6 +47,7 @@ pip-wheel-metadata/
 .hypothesis/
 .tox/
 .nox/
+.reasonix/
 .mypy_cache/
 .ruff_cache/
 .pyre/
