@@ -50,7 +50,49 @@ The layers have deliberately separate responsibilities:
 
 ## Installation
 
-### Conda
+### Windows (official managed runtime)
+
+Install [Python 3.11+](https://www.python.org/downloads/windows/) first. Python 3.12 is
+recommended. You can also install it with:
+
+```powershell
+winget install --id Python.Python.3.12 -e
+```
+
+Then install the latest stable EvoPi release from PowerShell:
+
+```powershell
+irm https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 | iex
+```
+
+From CMD, invoke the same PowerShell installer:
+
+```cmd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 | iex"
+```
+
+For a review-before-execution workflow, download and inspect the installer first:
+
+```powershell
+Invoke-WebRequest https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 -OutFile install.ps1
+Get-Content .\install.ps1
+.\install.ps1
+```
+
+The installer verifies the Release wheel against `SHA256SUMS`, creates a user-level versioned
+runtime under `~/.evopi/runtime`, and adds `~/.evopi/bin` to the current user's PATH. It never
+modifies the system PATH. Open a new terminal if `evopi` is not immediately found.
+
+### macOS and Linux
+
+The v1 managed installer is Windows-only. Use pipx, Conda, or a virtual environment on other
+platforms; those installations deliberately refuse `evopi update` self-modification.
+
+```bash
+pipx install "git+https://github.com/WeiSuanDi/EvoPi.git@v0.2.0"
+```
+
+### Development with Conda
 
 ```powershell
 git clone <repository-url>
@@ -59,7 +101,7 @@ conda env create -f environment.yml
 conda activate EvoPi
 ```
 
-### pip
+### Development with pip
 
 ```bash
 python -m venv .venv
@@ -68,7 +110,24 @@ python -m pip install -e ".[dev]"
 
 ## Configuration
 
-Copy the example environment file and provide credentials for your model provider:
+Run the first-time setup wizard after installation:
+
+```powershell
+evopi setup
+```
+
+It asks for a Provider, model name, Base URL, and a hidden API key, then performs a minimal
+connection test. The selected profile is stored in `~/.evopi/config.toml`; its key is stored in
+`~/.evopi/credentials.json` with user-only permissions. These files are local plaintext and must
+be protected like any other credential file. Use `evopi setup --skip-test` to explicitly save an
+unverified profile.
+
+Interactive `evopi` and `evopi chat` enter setup automatically when configuration is incomplete.
+Automation entries (`evopi run` and `evopi rpc`) never open a wizard and instead ask you to run
+`evopi setup`. Environment variables and a workspace `.env` remain supported and take precedence
+over user configuration.
+
+For environment-only configuration, copy the example file:
 
 ```powershell
 Copy-Item .env.example .env
@@ -104,7 +163,24 @@ OPENAI_MODEL=your-model-name
 `openai` and `openai-compatible` continue to select the Chat Completions adapter.
 Only `openai-responses` selects the native Responses adapter.
 
-Credentials are loaded from the environment or a local `.env` file. EvoPi does not persist or print resolved API keys.
+EvoPi never prints resolved API keys. `config show`, `doctor`, `/settings`, JSON output, Session,
+and Trace expose only whether a credential is configured.
+
+## Updates
+
+Official Windows managed runtimes update only on explicit request:
+
+```powershell
+evopi update --check
+evopi update
+evopi update --rollback
+```
+
+Normal startup performs no update network request. Updates accept only stable Releases from
+`WeiSuanDi/EvoPi`, verify HTTPS asset hosts, `SHA256SUMS`, wheel identity and version, install into
+a new runtime, run import/version/help smoke tests, and only then atomically switch the active
+pointer. Failed updates preserve the current runtime. `--rollback` is offline. For automation,
+use `--yes` and optionally `--json`.
 
 ## Quick start
 

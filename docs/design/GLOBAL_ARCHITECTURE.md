@@ -22,6 +22,7 @@ EvoPi 的重点是后者。
 ```mermaid
 flowchart TD
     User["用户 / 产品入口"] --> Harness["Harness<br/>运行治理框架"]
+    User --> Distribution["Configuration / Distribution<br/>首次配置与版本交付"]
     Harness --> Core["Core<br/>稳定 Agent Loop"]
     Core --> Model["Model / API<br/>统一模型接入"]
     Harness --> Routing["Model Route / Circuit<br/>候选与健康状态"]
@@ -35,7 +36,12 @@ flowchart TD
     Session --> Evolution["Evolution<br/>受控演进闭环"]
     Evolution --> Policy
     Evolution --> Harness
+    Distribution -. "选择可执行版本与模型配置" .-> Harness
 ```
+
+Configuration 与 Distribution 是产品宿主边界：前者为 Coding CLI 解析用户模型配置，
+后者安装和选择受验证的 EvoPi 可执行版本。二者都不进入 Core，也不获得绕过 Policy、
+Confirmation 或 Harness 的执行权限。
 
 ## 各层职责
 

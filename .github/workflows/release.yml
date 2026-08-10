@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python scripts/check_release.py --tag "${{ github.ref_name }}"
+      - run: python -m ruff check .
+      - run: python -m mypy
+      - run: python -m pytest -q
+
+  build:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python scripts/check_release.py --tag "${{ github.ref_name }}"
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Verify wheel package data and clean install
+        run: |
+          python -m venv wheel-test
+          wheel-test/bin/python -m pip install dist/evopi-*.whl
+          wheel-test/bin/python -c "import importlib.resources as r; import evopi; assert r.files('evopi.plugins').joinpath('sdk_templates').is_dir(); assert r.files('evopi.evolution').joinpath('policy_templates').is_dir()"
+          wheel-test/bin/evopi --version
+          wheel-test/bin/evopi --help
+          wheel-test/bin/evopi setup --help
+          wheel-test/bin/evopi update --help
+      - name: Generate release checksums
+        run: |
+          cp install.ps1 dist/install.ps1
+          cd dist
+          sha256sum evopi-* install.ps1 > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+
+  installer:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Install from local simulated Release assets
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".Substring(1)
+          $env:EVOPI_INSTALL_TESTING = "1"
+          ./install.ps1 -InstallRoot "$env:RUNNER_TEMP\evopi-managed" -LocalReleaseDirectory "$PWD\release-assets" -LocalVersion $version -SkipPathUpdate
+          & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --version
+          & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --help
+
+  publish:
+    needs: [build, installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release-assets/*"
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release-assets/*

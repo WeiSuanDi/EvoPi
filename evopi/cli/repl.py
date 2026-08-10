@@ -55,6 +55,9 @@ class ReplStartupConfig:
     shell_executable: str = "-"
     steering_mode: str = "one-at-a-time"
     follow_up_mode: str = "one-at-a-time"
+    profile: str | None = None
+    profile_verified: bool | None = None
+    configuration_source: str = "environment"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -98,16 +101,24 @@ def build_repl_startup_config(
     provider = str(getattr(args, "provider", None) or "environment")
     base_url = str(getattr(harness.model, "base_url", "-"))
     credential_configured = False
+    profile: str | None = None
+    profile_verified: bool | None = None
+    configuration_source = "environment"
     try:
-        from evopi.ai import resolve_model_environment
+        from evopi.cli.model_configuration import resolve_cli_model_configuration
 
-        model_environment = resolve_model_environment(
+        resolved = resolve_cli_model_configuration(
             getattr(args, "provider", None),
             model=getattr(args, "model", None),
+            base_url=getattr(args, "base_url", None),
         )
+        model_environment = resolved.safe
         provider = model_environment.provider
         base_url = model_environment.base_url
         credential_configured = model_environment.credential_configured
+        profile = resolved.profile
+        profile_verified = resolved.verified
+        configuration_source = resolved.sources.get("model", "environment")
     except ValueError:
         pass
     route = harness.model_route
@@ -142,6 +153,9 @@ def build_repl_startup_config(
         shell_executable=harness.shell_environment.executable,
         steering_mode=steering_mode,
         follow_up_mode=follow_up_mode,
+        profile=profile,
+        profile_verified=profile_verified,
+        configuration_source=configuration_source,
     )
 
 
@@ -667,6 +681,9 @@ def _settings(context: ReplCommandContext, arguments: str, raw: str) -> ReplComm
         ("Model", value.model),
         ("Base URL", value.base_url),
         ("Credential configured", str(value.credential_configured)),
+        ("Configuration source", value.configuration_source),
+        ("Profile", value.profile or "none"),
+        ("Profile verified", str(value.profile_verified) if value.profile is not None else "-"),
         ("Workspace", value.workspace),
         ("Session mode", value.session_mode),
         ("Retry", f"{value.retry_enabled} ({value.max_retries})"),

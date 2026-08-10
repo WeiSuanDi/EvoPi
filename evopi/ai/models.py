@@ -67,6 +67,7 @@ def resolve_model_environment(
 def model_from_config(
     config: ModelEnvironmentConfig,
     *,
+    api_key: str | None = None,
     timeout: float = 120.0,
     context_window: int = 0,
     max_tokens: int = 4096,
@@ -76,6 +77,7 @@ def model_from_config(
     if config.provider == "anthropic":
         return AnthropicMessagesModel(
             model=config.model,
+            api_key=api_key,
             base_url=config.base_url,
             timeout=timeout,
             context_window=context_window,
@@ -84,6 +86,7 @@ def model_from_config(
     if config.provider == "openai-compatible":
         return OpenAICompatibleModel(
             model=config.model,
+            api_key=api_key,
             base_url=config.base_url,
             timeout=timeout,
             context_window=context_window,
@@ -92,6 +95,7 @@ def model_from_config(
     if config.provider == "openai-responses":
         return OpenAIResponsesModel(
             model=config.model,
+            api_key=api_key,
             base_url=config.base_url,
             timeout=timeout,
             context_window=context_window,

@@ -17,10 +17,14 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.output import Output
 from rich.console import Console
 
-from evopi.ai.models import model_from_environment
+from evopi.ai.models import model_from_config
 from evopi.coding.harness import CodingHarness
 from evopi.cli.confirmation import async_terminal_confirmation_handler
 from evopi.cli.diagnostics import config_show_main, doctor_main
+from evopi.cli.model_configuration import (
+    IncompleteModelConfigurationError,
+    resolve_cli_model_configuration,
+)
 from evopi.cli.display import ReplDisplay
 from evopi.cli.policy_review import policy_review_main
 from evopi.cli.policy_generation import policy_generate_main
@@ -56,7 +60,10 @@ from evopi.cli.session import (
     session_gc_main,
     session_list_main,
 )
+from evopi.cli.setup import SetupOptions, run_setup, setup_main
+from evopi.cli.update import update_main
 from evopi.core.events import CoreEvent
+from evopi.core.model import Model
 from evopi.core.model_errors import ModelRetryConfig
 from evopi.harness import (
     ConfirmationBroker,
@@ -128,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["anthropic", "openai-compatible", "openai-responses"],
     )
     model_group.add_argument("--model", help="Override the model name from .env")
+    model_group.add_argument("--base-url", help="Override the provider Base URL")
     model_group.add_argument("--no-retry", action="store_true")
     model_group.add_argument("--max-retries", type=_non_negative_int, default=3)
     model_group.add_argument(
@@ -331,6 +339,8 @@ def _build_harness(
     }
     if hasattr(args, "max_output_tokens"):
         model_options["max_tokens"] = args.max_output_tokens
+    if getattr(args, "base_url", None) is not None:
+        model_options["base_url"] = args.base_url
     fallback_values = fallback_values_from_args(args)
     if fallback_values or getattr(args, "no_failover", False):
         model, model_route, _ = build_model_runtime(args)
@@ -422,6 +432,31 @@ def _policy_activation_service_from_args(
         PolicySelectionStore(home / "policy-selections.json"),
     )
 
+
+def model_from_environment(
+    provider: str | None = None,
+    *,
+    timeout: float = 120.0,
+    model: str | None = None,
+    base_url: str | None = None,
+    context_window: int = 0,
+    max_tokens: int = 4096,
+) -> Model:
+    """Compatibility seam backed by the CLI's persisted configuration resolver."""
+
+    resolved = resolve_cli_model_configuration(
+        provider,
+        model=model,
+        base_url=base_url,
+        require_complete=True,
+    )
+    return model_from_config(
+        resolved.safe,
+        api_key=resolved.api_key,
+        timeout=timeout,
+        context_window=context_window,
+        max_tokens=max_tokens,
+    )
 
 def _skills_root_from_args(
     args: argparse.Namespace,
@@ -714,6 +749,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print(f"EvoPi {__version__}")
         return 0
+    if raw_args[:1] == ["setup"]:
+        try:
+            return setup_main(raw_args[1:])
+        except KeyboardInterrupt:
+            print("\nEvoPi setup aborted.", file=sys.stderr)
+            return 130
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"EvoPi setup error: {exc}", file=sys.stderr)
+            return 1
+    if raw_args[:1] == ["update"]:
+        try:
+            return update_main(raw_args[1:])
+        except KeyboardInterrupt:
+            print("\nEvoPi update aborted.", file=sys.stderr)
+            return 130
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"EvoPi update error: {exc}", file=sys.stderr)
+            return 1
     if len(raw_args) == 2 and raw_args[0] in {"session", "policy", "plugin"} and raw_args[1] in {
         "--help",
         "-h",
@@ -764,6 +817,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             chat_parser = build_parser()
             chat_parser.prog = "evopi chat"
             args = chat_parser.parse_args(raw_args[1:])
+            setup_result = _ensure_interactive_setup(args)
+            if setup_result is not None:
+                return setup_result
             return asyncio.run(
                 _run_repl(args, initial_prompt=getattr(args, "prompt", None))
             )
@@ -796,7 +852,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if getattr(args, "prompt", None):
             return asyncio.run(_run_one_shot(args))
+        setup_result = _ensure_interactive_setup(args)
+        if setup_result is not None:
+            return setup_result
         return asyncio.run(_run_repl(args))
+    except IncompleteModelConfigurationError as exc:
+        print(f"EvoPi configuration error: {exc}", file=sys.stderr)
+        return 2
     except (ValueError, RuntimeError, RpcError) as exc:
         print(f"EvoPi error: {exc}", file=sys.stderr)
         return 1
@@ -812,6 +874,33 @@ def _read_piped_stdin() -> str:
         return sys.stdin.read()
     except (AttributeError, OSError):
         return ""
+
+
+def _ensure_interactive_setup(args: argparse.Namespace) -> int | None:
+    try:
+        resolve_cli_model_configuration(
+            getattr(args, "provider", None),
+            model=getattr(args, "model", None),
+            base_url=getattr(args, "base_url", None),
+            require_complete=True,
+        )
+        return None
+    except IncompleteModelConfigurationError:
+        if not sys.stdin.isatty():
+            print(
+                "EvoPi model configuration is incomplete; run 'evopi setup'.",
+                file=sys.stderr,
+            )
+            return 2
+        result = run_setup(
+            SetupOptions(
+                provider=getattr(args, "provider", None),
+                model=getattr(args, "model", None),
+                base_url=getattr(args, "base_url", None),
+            ),
+            interactive=True,
+        )
+        return None if result == 0 else result
 
 
 __all__ = [

@@ -22,12 +22,26 @@ EvoPi/
 │   ├── subagents/
 │   ├── validators/
 │   ├── evolution/
+│   ├── configuration/
+│   ├── distribution/
 │   ├── coding/
 │   └── cli/
 ├── docs/
 ├── examples/
 └── tests/
 ```
+
+## evopi/configuration
+
+Coding CLI 的用户配置层。它定义严格 schema v1 的模型 Profile 与 Provider/Base URL
+绑定凭据，使用跨进程锁、符号链接拒绝、原子替换和权限收紧。只有产品 CLI 默认读取该层；
+裸 BaseHarness 与 Python API 不隐式读取用户目录。
+
+## evopi/distribution
+
+Windows 正式发行与受管 Runtime 层。它只负责 GitHub Release 发现、工件校验、版本化
+Runtime 安装、活动指针切换与离线回滚，不改变 Core、Harness、Policy 或 Session 语义。
+完整协议见 [`DISTRIBUTION.md`](DISTRIBUTION.md)。
 
 ## evopi/ai
 

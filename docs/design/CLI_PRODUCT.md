@@ -18,6 +18,10 @@ Management and automation
 └── evopi rpc
 ```
 
+Product lifecycle commands add `evopi setup` and `evopi update`. Setup belongs to the Coding CLI
+host and never changes BaseHarness neutrality. Update belongs to the distribution layer and never
+changes Core, Policy, Session, or Plugin runtime semantics.
+
 `evopi "PROMPT"` remains a compatibility alias for one-shot execution.
 
 `evopi rpc` is the local host-integration entry point. It speaks strict JSONL over stdio and
@@ -116,6 +120,18 @@ summary request is created. These are Domain behaviors, not defaults of bare Age
 
 ## Configuration and diagnostics
 
+The Coding CLI resolves model fields with `CLI > process environment/workspace .env > user
+profile > product default` precedence. `~/.evopi/config.toml` is a strict schema-v1 profile store;
+`~/.evopi/credentials.json` binds each plaintext credential to its profile, Provider, and Base
+URL. An environment credential always wins. A stored credential is never reused for a different
+Provider or Base URL. Both files reject symlinks and use locked atomic replacement; credential
+permission hardening is fail closed.
+
+`evopi setup` is the only interactive configuration writer. It never accepts an API key as a
+command-line argument. Its default connection test uses a temporary model adapter with 30-second
+I/O timeout, 16 output tokens, an empty Tool view, and no Session, Plugin, Memory, Skill, Policy,
+or Trace. Existing valid configuration remains active if validation fails before persistence.
+
 `config show` resolves the effective Provider, model, Base URL, fallbacks, credential presence,
 EvoPi home, Session root, Workspace Trust, Memory path, and Skill sources. It returns only a
 boolean credential-presence field.
@@ -124,6 +140,20 @@ boolean credential-presence field.
 credential presence, writable local stores, approved immutable Policy/Plugin artifacts, and Trust
 state. It does not call a model, access the network, or import unapproved Plugin candidates.
 Doctor schema v1 uses `failed > warning > passed`, mapped to exit codes `1 / 2 / 0`.
+
+## Distribution boundary
+
+The official Windows install is a user-level managed runtime. `~/.evopi/bin/evopi.cmd` reads the
+atomically selected version from `runtime/current.txt`, marks the process as managed, and launches
+that version's executable. `evopi update` queries only the stable GitHub Release for
+`WeiSuanDi/EvoPi`. It verifies HTTPS GitHub asset URLs, SHA-256, wheel package identity, and exact
+tag/version equality before installation.
+
+An update creates a fresh venv and completes import, version, and help smoke checks before the
+pointer changes. Failure leaves the previous pointer untouched. Rollback selects an earlier
+verified runtime without network access. pipx, Conda, ordinary pip, and editable installations may
+check availability but fail closed when asked to modify themselves. Ordinary startup never checks
+for updates.
 
 ## Non-goals
 

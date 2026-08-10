@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from evopi.ai import ModelEnvironmentConfig, resolve_model_environment
+from evopi.ai import ModelEnvironmentConfig
+from evopi.cli.model_configuration import resolve_cli_model_configuration
 from evopi.cli.runtime import parse_fallback_specs
 from evopi.evolution import (
     ActivationDecision,
@@ -49,6 +50,9 @@ class ConfigSnapshot:
     memory_enabled: bool
     memory_path: str
     skill_sources: tuple[str, ...]
+    configuration_sources: dict[str, str]
+    profile: str | None = None
+    profile_verified: bool | None = None
     warnings: tuple[str, ...] = ()
     schema_version: int = 1
 
@@ -60,6 +64,9 @@ class ConfigSnapshot:
             "model": self.model,
             "base_url": self.base_url,
             "credential_configured": self.credential_configured,
+            "configuration_sources": dict(self.configuration_sources),
+            "profile": self.profile,
+            "profile_verified": self.profile_verified,
             "max_turns": self.max_turns,
             "shell": {
                 "requested_mode": self.shell_environment.requested_mode,
@@ -133,13 +140,17 @@ def build_config_snapshot(
     workspace: str | Path,
     provider: str | None = None,
     model: str | None = None,
+    base_url: str | None = None,
     max_turns: int | None = None,
     shell_mode: str | None = None,
 ) -> ConfigSnapshot:
     """Resolve the effective product configuration without creating a model."""
 
     resolved_workspace = Path(workspace).expanduser().resolve()
-    primary = resolve_model_environment(provider, model=model)
+    primary_resolved = resolve_cli_model_configuration(
+        provider, model=model, base_url=base_url
+    )
+    primary = primary_resolved.safe
     resolved_max_turns = _resolve_max_turns(max_turns)
     shell_environment = resolve_shell_environment(
         shell_mode or os.getenv("EVOPI_SHELL") or "auto"
@@ -150,7 +161,7 @@ def build_config_snapshot(
         if item.strip()
     )
     fallback_configs = tuple(
-        resolve_model_environment(fallback_provider, model=fallback_model)
+        resolve_cli_model_configuration(fallback_provider, model=fallback_model).safe
         for fallback_provider, fallback_model in parse_fallback_specs(raw_fallbacks)
     )
     home = resolve_evopi_home()
@@ -194,6 +205,9 @@ def build_config_snapshot(
         memory_enabled=True,
         memory_path=str(memory_path),
         skill_sources=tuple(skill_sources),
+        configuration_sources=primary_resolved.sources,
+        profile=primary_resolved.profile,
+        profile_verified=primary_resolved.verified,
         warnings=tuple(warnings),
     )
 
@@ -203,6 +217,7 @@ def run_doctor(
     workspace: str | Path,
     provider: str | None = None,
     model: str | None = None,
+    base_url: str | None = None,
     max_turns: int | None = None,
     shell_mode: str | None = None,
 ) -> DoctorReport:
@@ -234,6 +249,7 @@ def run_doctor(
             workspace=workspace_path,
             provider=provider,
             model=model,
+            base_url=base_url,
             max_turns=max_turns,
             shell_mode=shell_mode,
         )
@@ -445,6 +461,7 @@ def config_show_main(argv: list[str]) -> int:
             workspace=args.workspace,
             provider=args.provider,
             model=args.model,
+            base_url=args.base_url,
             max_turns=args.max_turns,
             shell_mode=args.shell,
         )
@@ -467,6 +484,7 @@ def doctor_main(argv: list[str]) -> int:
         workspace=args.workspace,
         provider=args.provider,
         model=args.model,
+        base_url=args.base_url,
         max_turns=args.max_turns,
         shell_mode=args.shell,
     )
@@ -502,6 +520,7 @@ def _diagnostic_parser(prog: str, description: str) -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument("--model")
+    parser.add_argument("--base-url")
     parser.add_argument("--max-turns", type=int)
     parser.add_argument(
         "--shell",

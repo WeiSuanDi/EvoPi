@@ -50,7 +50,48 @@ flowchart LR
 
 ## 安装
 
-### Conda
+### Windows（官方受管 Runtime）
+
+请先安装 [Python 3.11+](https://www.python.org/downloads/windows/)，推荐 Python 3.12。也可执行：
+
+```powershell
+winget install --id Python.Python.3.12 -e
+```
+
+然后在 PowerShell 中安装最新稳定版 EvoPi：
+
+```powershell
+irm https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 | iex
+```
+
+在 CMD 中可调用等价的 PowerShell 命令：
+
+```cmd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 | iex"
+```
+
+如果希望先审查脚本再执行：
+
+```powershell
+Invoke-WebRequest https://github.com/WeiSuanDi/EvoPi/releases/latest/download/install.ps1 -OutFile install.ps1
+Get-Content .\install.ps1
+.\install.ps1
+```
+
+安装器会使用 `SHA256SUMS` 校验 Release wheel，在 `~/.evopi/runtime` 创建用户级版本化
+Runtime，并把 `~/.evopi/bin` 加入当前用户 PATH，不修改系统 PATH。如果当前终端尚未识别
+`evopi`，请重新打开终端。
+
+### macOS 与 Linux
+
+v1 受管安装器只承诺 Windows。其他平台请使用 pipx、Conda 或虚拟环境；这些外部管理的
+安装会明确拒绝由 `evopi update` 自行修改。
+
+```bash
+pipx install "git+https://github.com/WeiSuanDi/EvoPi.git@v0.2.0"
+```
+
+### 使用 Conda 开发
 
 ```powershell
 git clone <repository-url>
@@ -59,7 +100,7 @@ conda env create -f environment.yml
 conda activate EvoPi
 ```
 
-### pip
+### 使用 pip 开发
 
 ```bash
 python -m venv .venv
@@ -68,7 +109,22 @@ python -m pip install -e ".[dev]"
 
 ## 配置
 
-复制环境变量示例，并填写所使用模型服务的凭据：
+安装后运行首次配置向导：
+
+```powershell
+evopi setup
+```
+
+向导会询问 Provider、模型名、Base URL 和隐藏输入的 API key，然后执行一次最小连接测试。
+所选 profile 保存在 `~/.evopi/config.toml`，密钥保存在仅当前用户可访问的
+`~/.evopi/credentials.json`。两者都是本地明文文件，应像其他凭据文件一样保护。
+`evopi setup --skip-test` 可显式保存未验证配置。
+
+交互式 `evopi` 与 `evopi chat` 在配置不完整时会自动进入向导；`evopi run`、`evopi rpc`
+等自动化入口不会弹出向导，而是提示运行 `evopi setup`。环境变量与工作区 `.env` 仍然
+受支持，并且优先级高于用户配置。
+
+如需完全使用环境变量，可复制示例文件：
 
 ```powershell
 Copy-Item .env.example .env
@@ -104,7 +160,23 @@ OPENAI_MODEL=your-model-name
 `openai` 与 `openai-compatible` 继续选择 Chat Completions Adapter；只有
 `openai-responses` 会选择原生 Responses Adapter。
 
-凭据从系统环境变量或本地 `.env` 文件加载。EvoPi 不会持久化或打印解析后的 API 密钥。
+EvoPi 不会打印解析后的 API key。`config show`、`doctor`、`/settings`、JSON 输出、Session
+与 Trace 只显示“是否已配置凭据”。
+
+## 更新
+
+官方 Windows 受管 Runtime 只在用户明确执行时更新：
+
+```powershell
+evopi update --check
+evopi update
+evopi update --rollback
+```
+
+普通启动不会联网检查版本。更新只接受 `WeiSuanDi/EvoPi` 的稳定 Release，并校验 HTTPS
+资产 Host、`SHA256SUMS`、wheel 身份与版本；新版本在独立 Runtime 中完成安装及
+import/version/help 冒烟后，才原子切换活动指针。失败不会改变当前版本，`--rollback`
+完全离线。自动化环境可使用 `--yes` 和可选的 `--json`。
 
 ## 快速开始
 

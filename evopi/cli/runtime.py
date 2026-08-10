@@ -15,8 +15,8 @@ from evopi.ai import (
     ModelFailoverConfig,
     ModelRoute,
     model_from_config,
-    resolve_model_environment,
 )
+from evopi.cli.model_configuration import resolve_cli_model_configuration
 from evopi.core.model import Model
 
 
@@ -51,14 +51,19 @@ def build_model_runtime(
     if fallback_values and getattr(args, "no_failover", False):
         raise ValueError("--fallback cannot be combined with --no-failover")
 
-    primary_config = resolve_model_environment(
+    primary_resolved = resolve_cli_model_configuration(
         getattr(args, "provider", None),
         model=getattr(args, "model", None),
+        base_url=getattr(args, "base_url", None),
+        require_complete=True,
     )
-    fallback_configs = tuple(
-        resolve_model_environment(provider, model=model)
+    fallback_resolved = tuple(
+        resolve_cli_model_configuration(provider, model=model, require_complete=True)
         for provider, model in map(_parse_fallback, fallback_values)
     )
+    resolved_configs = (primary_resolved, *fallback_resolved)
+    primary_config = primary_resolved.safe
+    fallback_configs = tuple(item.safe for item in fallback_resolved)
     configs = (primary_config, *fallback_configs)
     identities = [
         (config.provider, config.model, config.base_url)
@@ -72,12 +77,13 @@ def build_model_runtime(
     max_tokens = getattr(args, "max_output_tokens", 4096)
     models = tuple(
         model_from_config(
-            config,
+            resolved.safe,
+            api_key=resolved.api_key,
             timeout=timeout,
             context_window=context_window,
             max_tokens=max_tokens,
         )
-        for config in configs
+        for resolved in resolved_configs
     )
     primary = models[0]
     if len(models) == 1:
