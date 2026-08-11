@@ -55,6 +55,7 @@ pip-wheel-metadata/
 .pyre/
 .pytype/
 .pyright/
+reasonix.toml
 .coverage
 .coverage.*
 coverage.xml
