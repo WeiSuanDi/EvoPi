@@ -197,7 +197,10 @@ def test_status_shows_interaction_snapshot_counts(tmp_path) -> None:
     assert "0" in rendered
 
 
-def test_mode_flags_reach_every_product_route(monkeypatch) -> None:
+def test_mode_flags_reach_every_product_route(
+    monkeypatch,
+    configured_anthropic_environment,
+) -> None:
     """The flags parse and reach the Harness-building step on every route."""
     import importlib
 

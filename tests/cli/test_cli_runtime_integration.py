@@ -89,6 +89,7 @@ def test_build_model_runtime_creates_stable_ordered_route(
 
 def test_fallback_validation_happens_before_models_are_constructed(
     monkeypatch,
+    configured_anthropic_environment,
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(

@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag to validate without publishing"
+        required: true
+        default: "v0.2.0"
+
+env:
+  EVOPI_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -24,7 +33,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python scripts/check_release.py --tag "${{ github.ref_name }}"
+      - run: python scripts/check_release.py --tag "${{ env.EVOPI_RELEASE_TAG }}"
       - run: python -m ruff check .
       - run: python -m mypy
       - run: python -m pytest -q
@@ -38,7 +47,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install build twine
-      - run: python scripts/check_release.py --tag "${{ github.ref_name }}"
+      - run: python scripts/check_release.py --tag "${{ env.EVOPI_RELEASE_TAG }}"
       - run: python -m build
       - run: python -m twine check dist/*
       - name: Verify wheel package data and clean install
@@ -72,13 +81,14 @@ jobs:
       - name: Install from local simulated Release assets
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".Substring(1)
+          $version = "${{ env.EVOPI_RELEASE_TAG }}".Substring(1)
           $env:EVOPI_INSTALL_TESTING = "1"
           ./install.ps1 -InstallRoot "$env:RUNNER_TEMP\evopi-managed" -LocalReleaseDirectory "$PWD\release-assets" -LocalVersion $version -SkipPathUpdate
           & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --version
           & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --help
 
   publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [build, installer]
     runs-on: ubuntu-latest
     permissions:

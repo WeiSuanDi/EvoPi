@@ -33,3 +33,12 @@ def test_install_script_parses_as_powershell() -> None:
         "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
     )
     subprocess.run([executable, "-NoProfile", "-Command", command], check=True)
+
+
+def test_release_workflow_supports_non_publishing_preflight() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "workflow_dispatch:" in workflow
+    assert "EVOPI_RELEASE_TAG:" in workflow
+    assert "github.event_name == 'push'" in workflow

@@ -68,7 +68,10 @@ def test_run_requires_prompt_or_stdin(monkeypatch, capsys) -> None:
     assert "requires a prompt or piped stdin" in capsys.readouterr().err
 
 
-def test_chat_routes_initial_prompt_to_repl(monkeypatch) -> None:
+def test_chat_routes_initial_prompt_to_repl(
+    monkeypatch,
+    configured_anthropic_environment,
+) -> None:
     observed: list[tuple[str | None, str | None]] = []
 
     async def fake_repl(args, *, initial_prompt=None):
