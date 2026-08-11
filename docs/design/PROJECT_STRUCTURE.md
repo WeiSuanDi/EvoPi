@@ -19,6 +19,7 @@ EvoPi/
 │   ├── skills/
 │   ├── session/
 │   ├── trace/
+│   ├── rpc/
 │   ├── subagents/
 │   ├── validators/
 │   ├── evolution/
@@ -224,6 +225,20 @@ Tree-ready Entry、branch/fork、证据绑定 merge、compact 上下文压缩、
 - 支持后续分析和 replay
 
 Trace 是演进的原材料。
+
+## evopi/rpc
+
+本地宿主协议层。
+
+职责：
+
+- 严格 JSONL wire codec 与固定 v1 方法表
+- 递增序号、有界回放和慢订阅者隔离的 Event Stream
+- 通过 `HarnessRpcHost` 编排 Run、Abort、steering、follow-up 与状态查询
+- 列出并响应由 Policy 创建的 Confirmation；不能自行创建确认或直接执行 Tool
+
+当前 transport 只有本地 stdio，不监听网络、不提供远程认证或多租户隔离。远程宿主必须
+在这一层之外增加独立 Trust Layer，不能把本地协议直接暴露到网络。
 
 ## evopi/subagents
 

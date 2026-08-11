@@ -1,5 +1,8 @@
 # EvoPi Distribution Design
 
+> Current public baseline: `v0.2.0`, released through the verified GitHub tag workflow on
+> 2026-08-11.
+
 ## Product boundary
 
 Distribution installs and selects an EvoPi executable. It is outside Core, Harness, Policy,
@@ -44,4 +47,6 @@ Unsupported package-manager installations return guidance rather than mutating t
 The tag workflow validates the tag against `pyproject.toml`, runs the full gate on Windows and
 Linux with Python 3.11 through 3.13, builds wheel and sdist, validates package data, exercises the
 Windows installer against local simulated assets, generates checksums and provenance, and only
-then creates a Release. Creating the tag remains a user-authorized publishing action.
+then creates a Release. It also supports a manual non-publishing preflight on `main`; the publish
+job is restricted to tag-push events. Creating or replacing a release tag remains a user-authorized
+publishing action.

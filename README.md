@@ -1,36 +1,68 @@
+<div align="center">
+
 # EvoPi
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+### Policy-governed execution for evolution-ready AI agents
 
-**An evolution-ready Python agent runtime with policy-governed execution.**
+Build agents that can use models and tools while every consequential action remains observable,
+reviewable, and explicitly governed.
 
-EvoPi provides a compact foundation for building agents that can call models, use tools, and operate inside an explicit runtime governance layer. Its stable Core handles the agent loop; Harnesses shape domain behavior; Policies inspect and control actions at well-defined lifecycle hooks.
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-## Why EvoPi
+[![Release](https://img.shields.io/github/v/release/WeiSuanDi/EvoPi?sort=semver&label=release)](https://github.com/WeiSuanDi/EvoPi/releases/latest)
+[![Release workflow](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/github/license/WeiSuanDi/EvoPi)](LICENSE)
 
-- **Stable agent core** — typed messages, streaming events, tool calls, tool results, and bounded multi-turn execution.
-- **Pluggable harnesses** — compose prompts, tools, context, lifecycle behavior, and policies for a specific domain.
-- **Policy-governed actions** — allow, block, rewrite, validate, or terminate work at runtime hooks.
-- **Reliable provider boundary** — built-in Anthropic Messages, OpenAI-compatible Chat Completions, and native OpenAI Responses adapters normalize errors, enforce streaming I/O timeouts, and support observable retries.
-- **Durable sessions** — resume workspace conversations across CLI processes with an append-only Session log and verified Run-end checkpoints.
-- **Universal PluginAPI** — extend tools, policies, commands, context, prompts, Session state, Tool views, and host UI through one governed runtime contract.
-- **Trace-first observability** — record model, tool, policy, and lifecycle events as JSONL for inspection and replay-oriented workflows.
-- **Local host protocol** — drive Runs, replay events, abort work, and resolve Policy-created confirmations over a strict JSONL RPC boundary without bypassing the Harness.
-- **Governed policy evolution** — discover confirmation patterns, generate evidence-bound inactive candidates, and keep review, approval, activation, reload, and rollback explicit.
-- **Coding runtime included** — workspace-aware file and shell tools with conservative safety policies.
+[Install](#installation) · [Quick start](#quick-start) · [Architecture](#architecture) ·
+[Governance](#runtime-governance) · [Python API](#python-api) · [Design docs](docs/design)
+
+</div>
+
+EvoPi is a Python agent runtime built around a simple separation of concerns: a stable **Core**
+executes the agent loop, **Harnesses** assemble domain behavior, and **Policies** govern actions at
+explicit lifecycle hooks. The included CodingHarness turns that runtime into an installable CLI,
+while the same contracts remain available to custom Python hosts and local RPC clients.
+
+> [!NOTE]
+> The latest release is **v0.2.0**. Windows users get a verified managed runtime, first-run model
+> setup, explicit updates, and offline rollback. macOS and Linux can install the same package with
+> pipx, Conda, or a virtual environment.
+
+## What EvoPi gives you
+
+| Runtime foundation | Governance and safety |
+| --- | --- |
+| Typed streaming agent loop, Tool batches, Abort, deadlines, retries, Provider failover, and strict Turn budgets. | Hook-based Policies can allow, block, rewrite, validate, confirm, or terminate without creating a second execution path. |
+| **Durable host state** | **Controlled evolution** |
+| Session Tree v4, checkpoints, branch/merge, compaction, steering/follow-up, Trace v2, and strict local JSONL RPC. | Trace pattern discovery, evidence-bound candidate generation, isolated review, human approval, explicit activation, reload, and rollback. |
+
+Additional product capabilities include:
+
+- **Three model protocols** — Anthropic Messages, OpenAI-compatible Chat Completions, and native
+  OpenAI Responses with Session-owned provider state.
+- **Universal PluginAPI v1** — add Tools, Policies, commands, context, prompt fragments, Session
+  state, Tool views, host UI, and observational handlers through one governed extension contract.
+- **Coding runtime included** — workspace-scoped file and shell tools, Memory, trusted Skills,
+  governed SubAgents, dynamic prompts, and conservative default Policies.
+- **Trace-first evidence** — lifecycle, model, Tool, Policy, Confirmation, retry, failover, Session,
+  and evolution events remain available for inspection without copying secrets into CLI output.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    U["Application / User"] --> H["Harness"]
+    U["CLI / Python Host / RPC"] --> H["Harness"]
     H --> C["Core Agent Loop"]
-    C --> M["Model Adapter"]
+    C --> M["Model Route"]
     C --> T["Tool Registry"]
     H --> P["Policy Engine"]
-    H --> S["Session / Checkpoint"]
-    H --> X["Trace"]
-    P -. "governs hooks" .-> C
+    H --> S["Session Tree"]
+    H --> X["Trace / Events"]
+    H --> G["Plugins / Resources"]
+    X --> E["Evolution Evidence"]
+    E --> P
+    P -. "governs lifecycle hooks" .-> C
 ```
 
 The layers have deliberately separate responsibilities:
@@ -373,7 +405,7 @@ EvoPi exposes Pi-style lifecycle events for messages, turns, and tool execution.
 
 `Agent.prompt()` continues to return an `AssistantMessage`. Structured completion details are
 available through `Agent.last_run` and `agent_end`, including `turns_used`, `max_turns`, and the
-reasons `completed`, `terminated`, `aborted`, `error`, and `turn_limit`.
+reasons `completed`, `terminated`, `aborted`, `error`, `turn_limit`, and `deadline_exceeded`.
 
 Session logs use schema v4. Active-leaf, Plugin-state, and evidence-bound branch-merge changes are
 append-only facts, keeping the Harness transcript, Agent context, Checkpoint projection, and
@@ -451,8 +483,9 @@ harness = CodingHarness(model=primary, model_route=route, workspace=".")
 
 Failure-domain values are hashed before entering events or Trace. Circuit state and Run affinity
 are deliberately not persisted or synchronized across processes; the route fingerprint is part of
-the Session runtime fingerprint so configuration drift remains observable. Model routes are an
-explicit Python host configuration in v1; the standard CLI remains a single-model entry point.
+the Session runtime fingerprint so configuration drift remains observable. Python hosts can supply
+a `ModelRoute` directly, while the standard CLI constructs the same route from repeatable
+`--fallback PROVIDER:MODEL` options.
 
 Every retry remains in the same Run and Turn. Context providers and `before_model_call` Policies run again for each attempt, while `after_model_call` runs only for a successful response. A failed attempt is retained in events and Trace with `stop_reason=error`, including partial text or tool-call diagnostics, but is never committed to model context. `model_retry_start` and `model_retry_end` make retry timing and outcome observable. Abort interrupts both the active stream and backoff wait.
 
@@ -600,6 +633,19 @@ neutral unless a `PolicyActivationService` is supplied by its host.
 > [!IMPORTANT]
 > Policy checks reduce accidental risk but are not an operating-system sandbox. Review and strengthen policies before running EvoPi against untrusted prompts, repositories, or commands.
 
+## Documentation
+
+| Guide | Scope |
+| --- | --- |
+| [Global architecture](docs/design/GLOBAL_ARCHITECTURE.md) | Runtime layers, governance boundaries, and the evolution loop. |
+| [Core design](docs/design/CORE_DESIGN.md) | Agent loop, lifecycle, messages, Tools, Abort, deadlines, and retries. |
+| [Harness design](docs/design/HARNESS_DESIGN.md) | Context assembly, Policy hooks, Confirmation, routing, and host integration. |
+| [Policy system](docs/design/POLICY_SYSTEM.md) | Decisions, replay, Supervisor evidence, candidates, approval, and activation. |
+| [Session design](docs/design/SESSION_DESIGN.md) | Session Tree v4, checkpoints, recovery, compaction, merge, and GC. |
+| [Plugin design](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1, review, immutable snapshots, state, UI, and reload. |
+| [CLI product](docs/design/CLI_PRODUCT.md) | Interactive workbench, automation, RPC, setup, and diagnostics. |
+| [Distribution](docs/design/DISTRIBUTION.md) | GitHub Releases, managed Windows runtime, update, and rollback. |
+
 ## Development
 
 Install the development dependencies, then run:
@@ -607,10 +653,10 @@ Install the development dependencies, then run:
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m mypy evopi
+python -m mypy
 ```
 
-The architecture documents under [`docs/design`](docs/design) describe the Core, Harness, Policy, and project structure in greater detail.
+The complete architecture index lives under [`docs/design`](docs/design).
 
 ## Contributing
 

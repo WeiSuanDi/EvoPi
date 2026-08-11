@@ -146,9 +146,11 @@ Session 是跨 Run、跨进程存在的任务容器，以追加式 JSONL Entry L
 Session → Run → Turn → Model Attempt
 ```
 
-Session 的 Entry 使用 `entry_id / parent_id`，v1 保持单一活动路径，但协议为后续
-branch/fork 预留 Tree 结构。裸 Core 不依赖存储；Harness 负责把正式消息和 Run 边界
-接入 Session。失败 attempt 和运行治理细节不进入 Session，仍由 Trace 保存。
+Session schema v4 的 Entry 使用 `entry_id / parent_id` 构成持久树，并通过
+`leaf_selected` 保存当前活动路径。branch、fork、compact、Plugin State 与证据绑定的
+Merge 已经进入事实协议；Checkpoint 只是可校验恢复投影，活动路径仍以追加式日志为准。
+裸 Core 不依赖存储；Harness 负责把正式消息和 Run 边界接入 Session。失败 attempt 和
+运行治理细节不进入 Session，仍由 Trace 保存。
 
 Trace 记录执行过程：
 

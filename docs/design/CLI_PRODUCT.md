@@ -157,7 +157,9 @@ for updates.
 
 ## Non-goals
 
-The first version does not add a full-screen TUI, in-REPL model switching, settings mutation,
-RPC/JSONL event streaming, direct shell syntax, Session deletion, or implicit authorization.
-`BaseHarness` remains neutral and never reads CLI/user configuration unless explicitly wired by a
-host.
+The current product does not add a full-screen TUI, in-REPL model switching, settings mutation,
+an authenticated remote RPC transport, direct shell syntax, Session deletion, or implicit
+authorization. The existing JSONL RPC is deliberately local stdio with bounded same-process event
+replay; exposing it across a trust boundary requires a separate authentication and authorization
+layer. `BaseHarness` remains neutral and never reads CLI/user configuration unless explicitly
+wired by a host.

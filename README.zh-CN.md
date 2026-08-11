@@ -1,36 +1,66 @@
+<div align="center">
+
 # EvoPi
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+### 面向持续演进 Agent 的 Policy 治理执行层
 
-**一个以 Policy 治理执行过程、面向持续演进的 Python Agent Runtime。**
+让 Agent 使用模型与工具，同时让每个关键动作都保持可观测、可审查、可明确治理。
 
-EvoPi 为构建可调用模型、使用工具并接受明确运行时治理的 Agent 提供紧凑基础。稳定的 Core 负责 Agent 主循环，Harness 组织领域行为，Policy 则在清晰定义的生命周期 Hook 上检查和控制具体动作。
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-## 为什么选择 EvoPi
+[![Release](https://img.shields.io/github/v/release/WeiSuanDi/EvoPi?sort=semver&label=release)](https://github.com/WeiSuanDi/EvoPi/releases/latest)
+[![Release workflow](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/github/license/WeiSuanDi/EvoPi)](LICENSE)
 
-- **稳定的 Agent Core** — 提供类型化消息、流式事件、工具调用、工具结果和有界多轮执行。
-- **可插拔 Harness** — 为具体领域组合 Prompt、工具、上下文、生命周期行为和 Policy。
-- **Policy 运行时治理** — 可在 Hook 上允许、阻止、改写、验证或终止操作。
-- **可靠的 Provider 边界** — 内置 Anthropic Messages、OpenAI-compatible Chat Completions 与原生 OpenAI Responses 流式适配器，统一错误分类、流式 I/O 超时和可观测重试。
-- **持久化 Session** — 通过追加式 Session Log 与可校验的 Run-end Checkpoint，让工作区对话跨 CLI 进程恢复。
-- **通用 PluginAPI** — 通过单一受治理运行时协议扩展工具、Policy、命令、上下文、Prompt、Session 状态、Tool 视图和宿主 UI。
-- **Trace 优先的可观测性** — 以 JSONL 记录模型、工具、Policy 与生命周期事件，便于检查和面向回放的工作流。
-- **本地宿主协议** — 通过严格的 JSONL RPC 边界启动 Run、回放事件、中止任务并处理 Policy 已创建的确认请求，同时不绕过 Harness。
-- **受治理的 Policy 演进** — 从人工确认模式发现机会，生成证据绑定的非启用候选，并保持审查、批准、启用、重载和回滚相互独立。
-- **内置编码运行时** — 提供感知工作区的文件与 Shell 工具，以及保守的默认安全策略。
+[安装](#安装) · [快速开始](#快速开始) · [架构](#架构) · [运行时治理](#运行时治理) ·
+[Python API](#python-api) · [设计文档](docs/design)
+
+</div>
+
+EvoPi 是一个职责分层清晰的 Python Agent Runtime：稳定的 **Core** 执行 Agent 主循环，
+**Harness** 组装领域行为，**Policy** 在明确的生命周期 Hook 上治理具体动作。内置的
+CodingHarness 将这套 Runtime 组装为可安装 CLI；同样的协议也可供自定义 Python 宿主和
+本地 RPC 客户端使用。
+
+> [!NOTE]
+> 当前最新版本为 **v0.2.0**。Windows 用户可使用经过校验的受管 Runtime、首次模型配置、
+> 显式更新与离线回滚；macOS 与 Linux 可通过 pipx、Conda 或虚拟环境安装同一 Python 包。
+
+## EvoPi 提供什么
+
+| Runtime 基础 | 治理与安全 |
+| --- | --- |
+| 类型化流式 Agent Loop、Tool 批次、Abort、Deadline、Retry、Provider Failover 与严格 Turn 预算。 | Hook Policy 可以允许、阻断、改写、验证、确认或终止，同时不建立第二条执行旁路。 |
+| **持久宿主状态** | **受控演进闭环** |
+| Session Tree v4、Checkpoint、Branch/Merge、Compaction、Steering/Follow-up、Trace v2 与严格本地 JSONL RPC。 | Trace 模式发现、证据绑定候选生成、隔离审查、人工批准、显式启用、重载与回滚。 |
+
+其他产品能力包括：
+
+- **三类模型协议** — Anthropic Messages、OpenAI-compatible Chat Completions 与原生
+  OpenAI Responses；Provider State 由 EvoPi Session 持有。
+- **通用 PluginAPI v1** — 通过统一受治理扩展协议增加 Tool、Policy、命令、上下文、
+  Prompt Fragment、Session 状态、Tool 视图、宿主 UI 与观察 Handler。
+- **内置 Coding Runtime** — 工作区文件与 Shell 工具、Memory、可信 Skills、受治理
+  SubAgent、动态 Prompt 和保守的默认 Policy。
+- **Trace 优先证据链** — Lifecycle、模型、Tool、Policy、Confirmation、Retry、Failover、
+  Session 与 Evolution 事件均可检查，同时 CLI 输出不会复制 Secret。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    U["应用 / 用户"] --> H["Harness"]
+    U["CLI / Python 宿主 / RPC"] --> H["Harness"]
     H --> C["Core Agent Loop"]
-    C --> M["模型适配器"]
-    C --> T["工具注册表"]
+    C --> M["Model Route"]
+    C --> T["Tool Registry"]
     H --> P["Policy Engine"]
-    H --> S["Session / Checkpoint"]
-    H --> X["Trace"]
-    P -. "治理 Hook" .-> C
+    H --> S["Session Tree"]
+    H --> X["Trace / Events"]
+    H --> G["Plugins / Resources"]
+    X --> E["Evolution Evidence"]
+    E --> P
+    P -. "治理生命周期 Hook" .-> C
 ```
 
 各层职责保持明确分离：
@@ -362,7 +392,7 @@ EvoPi 使用 Pi 风格的消息、Turn 和工具执行生命周期事件。客�
 
 `Agent.prompt()` 继续返回 `AssistantMessage`。结构化结束信息通过 `Agent.last_run` 和
 `agent_end` 暴露，其中包含 `turns_used`、`max_turns`，结束原因包括 `completed`、
-`terminated`、`aborted`、`error` 和 `turn_limit`。
+`terminated`、`aborted`、`error`、`turn_limit` 和 `deadline_exceeded`。
 
 Session Log 使用 schema v4。活动叶切换、Plugin 状态和证据绑定的分支合并都是追加式
 事实，因此 Harness transcript、Agent Context、Checkpoint 投影与重启恢复保持一致。
@@ -433,7 +463,8 @@ harness = CodingHarness(model=primary, model_route=route, workspace=".")
 
 原始 failure-domain 在进入 Event/Trace 前会被哈希。Circuit 状态和 Run affinity 不持久化、
 不做跨进程同步；Route 指纹会进入 Session 运行时指纹，因此配置漂移仍然可观测。v1 的
-Model Route 采用显式 Python 宿主配置，标准 CLI 入口仍使用单模型配置。
+Python 宿主可直接提供 `ModelRoute`；标准 CLI 则通过可重复的
+`--fallback PROVIDER:MODEL` 参数构建同一类路由。
 
 所有 attempt 都属于同一个 Run 和 Turn。Context Provider 与 `before_model_call` Policy 每次都会重新运行，`after_model_call` 只处理成功响应。失败 attempt 会以 `stop_reason=error` 完整保存在 Event 与 Trace 中，包括部分文本和 ToolCall 诊断信息，但不会写入模型上下文。`model_retry_start` / `model_retry_end` 暴露重试等待和最终结果；Abort 可以打断正在进行的模型流或退避等待。
 
@@ -574,6 +605,19 @@ Policy。同名替换内置或 Plugin Policy 时必须绑定目标名称和当�
 > [!IMPORTANT]
 > Policy 检查能够降低意外操作风险，但不能替代操作系统级沙箱。在处理不可信 Prompt、仓库或命令之前，请审查并强化相应策略。
 
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [全局架构](docs/design/GLOBAL_ARCHITECTURE.md) | Runtime 分层、治理边界与演进闭环。 |
+| [Core 设计](docs/design/CORE_DESIGN.md) | Agent Loop、生命周期、消息、Tool、Abort、Deadline 与 Retry。 |
+| [Harness 设计](docs/design/HARNESS_DESIGN.md) | Context 组装、Policy Hook、Confirmation、路由与宿主集成。 |
+| [Policy 系统](docs/design/POLICY_SYSTEM.md) | 决策、回放、Supervisor 证据、候选、批准与启用。 |
+| [Session 设计](docs/design/SESSION_DESIGN.md) | Session Tree v4、Checkpoint、恢复、压缩、合并与 GC。 |
+| [Plugin 设计](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1、审查、不可变快照、状态、UI 与重载。 |
+| [CLI 产品](docs/design/CLI_PRODUCT.md) | 交互工作台、自动化、RPC、Setup 与诊断。 |
+| [发行设计](docs/design/DISTRIBUTION.md) | GitHub Release、Windows 受管 Runtime、更新与回滚。 |
+
 ## 开发
 
 安装开发依赖后运行：
@@ -581,10 +625,10 @@ Policy。同名替换内置或 Plugin Policy 时必须绑定目标名称和当�
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m mypy evopi
+python -m mypy
 ```
 
-[`docs/design`](docs/design) 中的架构文档进一步介绍了 Core、Harness、Policy 与项目结构。
+完整架构索引位于 [`docs/design`](docs/design)。
 
 ## 参与贡献
 

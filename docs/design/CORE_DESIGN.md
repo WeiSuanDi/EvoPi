@@ -134,8 +134,9 @@ Run / Provider 级：Agent Abort 与 Provider aborted/error stop reason 独立�
 ```
 
 四层控制现已全部接通。`AgentEndReason` 固定为
-`completed / terminated / aborted / error / turn_limit`。`Agent.prompt()` 继续返回
-AssistantMessage，结束状态由只读 `Agent.last_run` 和 `agent_end` 暴露。
+`completed / terminated / aborted / error / turn_limit / deadline_exceeded`。
+`Agent.prompt()` 继续返回 AssistantMessage，结束状态由只读 `Agent.last_run` 和
+`agent_end` 暴露。
 
 Core 只维护严格 Turn 计数和只读 `Agent.current_turn`。Retry attempt 仍属于同一个 Turn，
 不会额外消耗预算。达到上限后 Core 保持原有 `turn_limit` 语义；“最后一轮移除工具并
