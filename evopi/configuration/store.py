@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import tomllib
 from collections.abc import Callable, Iterable
@@ -44,7 +45,7 @@ class _FileLock(AbstractContextManager["_FileLock"]):
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -72,7 +73,7 @@ class _FileLock(AbstractContextManager["_FileLock"]):
             return
         try:
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)

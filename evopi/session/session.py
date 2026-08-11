@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -148,7 +149,7 @@ class _SessionFileLock:
                 handle.write(b"\0")
                 handle.flush()
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -171,7 +172,7 @@ class _SessionFileLock:
             return
         try:
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)

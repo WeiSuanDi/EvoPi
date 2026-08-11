@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import subprocess
 from contextlib import suppress
 from pathlib import Path
@@ -112,7 +113,7 @@ async def _terminate_process_tree(
     if process.returncode is not None:
         return
 
-    if os.name == "nt":
+    if sys.platform == "win32":
         with suppress(ProcessLookupError, OSError, ValueError):
             process.send_signal(signal.CTRL_BREAK_EVENT)
     else:
@@ -122,7 +123,7 @@ async def _terminate_process_tree(
     try:
         await asyncio.wait_for(process.wait(), timeout=grace_period)
     except TimeoutError:
-        if os.name == "nt":
+        if sys.platform == "win32":
             await _force_kill_windows_tree(process.pid)
         else:
             with suppress(ProcessLookupError, PermissionError):

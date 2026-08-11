@@ -26,9 +26,10 @@ def test_install_script_parses_as_powershell() -> None:
     if executable is None:
         pytest.skip("PowerShell is unavailable")
     script = ROOT / "install.ps1"
+    escaped_script = str(script).replace("'", "''")
     command = (
         "$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("
-        f"'{str(script).replace("'", "''")}', [ref]$null, [ref]$errors) | Out-Null; "
+        f"'{escaped_script}', [ref]$null, [ref]$errors) | Out-Null; "
         "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
     )
     subprocess.run([executable, "-NoProfile", "-Command", command], check=True)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -256,7 +257,7 @@ def _memory_file_lock(path: Path) -> Iterator[None]:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
 
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -273,7 +274,7 @@ def _memory_file_lock(path: Path) -> Iterator[None]:
     finally:
         try:
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)

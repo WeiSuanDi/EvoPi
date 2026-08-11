@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import venv
 from collections.abc import Callable
@@ -35,7 +36,7 @@ class _UpdateLock(AbstractContextManager["_UpdateLock"]):
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -63,7 +64,7 @@ class _UpdateLock(AbstractContextManager["_UpdateLock"]):
             return
         try:
             handle.seek(0)
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
