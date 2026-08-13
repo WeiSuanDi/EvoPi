@@ -496,11 +496,24 @@ Policy 是普通的类型化 Python 组件，既可以单独注册，也可以�
 
 `evopi` CLI 会自动安装异步交互式 `y/N` Confirmation Handler。在确认界面按下 `Ctrl+C` 会产生明确的 `cancelled` 决策并中止当前运行。Python API 用户可以注入自己的同步或异步 Handler；未配置 Handler 时，确认请求默认被拒绝。
 
-宿主应用也可以启动 `evopi rpc`。该本地 stdio JSONL 协议会异步启动 Run，推送带序号的
-生命周期事件，支持有界回放与 Abort，并允许独立 UI 只处理已经由 Policy 放入
-Confirmation Broker 的请求。RPC 响应不能覆盖 Policy `block`、不能直接调用 Tool，
-重复或过期响应会 fail closed。该协议是本地集成面，不是带认证的远程服务；若要跨越
-信任边界暴露 stdio，宿主必须自行增加认证、授权与传输保护。
+宿主应用也可以启动 `evopi rpc`。Host 同时接受兼容 RPC v1 和严格 RPC v2，首个请求会
+锁定连接版本。v2 增加强制初始化、绑定 Run 的交互 Handle、绑定 revision 的 Confirmation
+响应，以及 `stream_id + sequence` Replay 游标。异步 Python Client 只使用 v2：
+
+```python
+from evopi.rpc import EvoPiRpcClient
+
+client = await EvoPiRpcClient.spawn()
+run = await client.start_run("总结 README.zh-CN.md")
+async for event in run.events():
+    ...  # 类型化 Replay + Live 生命周期事件
+result = await run.wait()
+await client.aclose()
+```
+
+RPC 只能处理已经由 Policy 放入 Confirmation Broker 的请求，不能覆盖 Policy `block`，
+也不能直接调用 Tool；重复或过期响应会 fail closed。该协议是同机受信 stdio 集成面，
+不是带认证的远程服务。完整契约见 [RPC v2 协议与客户端](docs/RPC_V2_PROTOCOL.md)。
 
 ### Policy 模式发现
 
@@ -616,6 +629,7 @@ Policy。同名替换内置或 Plugin Policy 时必须绑定目标名称和当�
 | [Session 设计](docs/design/SESSION_DESIGN.md) | Session Tree v4、Checkpoint、恢复、压缩、合并与 GC。 |
 | [Plugin 设计](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1、审查、不可变快照、状态、UI 与重载。 |
 | [CLI 产品](docs/design/CLI_PRODUCT.md) | 交互工作台、自动化、RPC、Setup 与诊断。 |
+| [RPC v2 协议](docs/RPC_V2_PROTOCOL.md) | 严格 JSONL、游标、类型化客户端与本地信任边界。 |
 | [发行设计](docs/design/DISTRIBUTION.md) | GitHub Release、Windows 受管 Runtime、更新与回滚。 |
 
 ## 开发

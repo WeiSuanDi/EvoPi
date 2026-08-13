@@ -232,10 +232,11 @@ Trace 是演进的原材料。
 
 职责：
 
-- 严格 JSONL wire codec 与固定 v1 方法表
+- 严格 JSONL wire codec、兼容 v1 与强制初始化的 v2 方法表
 - 递增序号、有界回放和慢订阅者隔离的 Event Stream
 - 通过 `HarnessRpcHost` 编排 Run、Abort、steering、follow-up 与状态查询
 - 列出并响应由 Policy 创建的 Confirmation；不能自行创建确认或直接执行 Tool
+- 提供只使用 v2 的异步 `EvoPiRpcClient`、RunHandle、类型化 Event 与受管子进程入口
 
 当前 transport 只有本地 stdio，不监听网络、不提供远程认证或多租户隔离。远程宿主必须
 在这一层之外增加独立 Trust Layer，不能把本地协议直接暴露到网络。
@@ -349,10 +350,11 @@ REPL `/policies` 展示装配快照，`/reload` 联合刷新 Plugin 与 Policy�
 `evopi policy discover TRACE...` 离线分析显式 Trace，并保存不可变 Opportunity
 Report；它不会构建 CodingHarness、调用模型或改变活动 Policy。
 
-`evopi rpc` 通过 stdio JSONL 暴露固定的本地宿主协议。`evopi/rpc/` 包含严格 Codec、
-有界 Event Stream、方法分派和只依赖 BaseHarness 公共接口的 `HarnessRpcHost`；
-`evopi/cli/rpc.py` 只负责标准输入输出适配。RPC 不提供独立 Tool 执行入口，确认响应也
-只能提交到 Harness 已绑定的 Confirmation Broker。
+`evopi rpc` 通过 stdio JSONL 暴露固定的本地宿主协议。`evopi/rpc/` 包含 v1/v2 严格
+Codec、有界 Event Stream、双版本方法分派、只依赖 BaseHarness 公共接口的
+`HarnessRpcHost` 以及 v2 类型化 Python Client；`evopi/cli/rpc.py` 只负责版本锁定和
+标准输入输出适配。RPC 不提供独立 Tool 执行入口，确认响应也只能提交到 Harness 已绑定
+的 Confirmation Broker。完整 v2 规范见 `docs/RPC_V2_PROTOCOL.md`。
 
 ## docs
 

@@ -121,6 +121,7 @@ class HarnessRpcHost:
         self._run_task: asyncio.Task[Any] | None = None
         self._run_started: asyncio.Future[str] | None = None
         self._active_run_id: str | None = None
+        self._last_started_run: tuple[str, int] | None = None
         self._last_run_error: str | None = None
         self._closed = False
         self._unsubscribe: Callable[[], None] = harness.subscribe(self._on_event)
@@ -128,6 +129,12 @@ class HarnessRpcHost:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def last_started_run(self) -> tuple[str, int] | None:
+        """Most recent Run ID and its exact ``agent_start`` sequence."""
+
+        return self._last_started_run
 
     async def initialize(self, params: JsonObject) -> JsonObject:
         capabilities = self.harness.capabilities
@@ -345,9 +352,10 @@ class HarnessRpcHost:
             raise failure
 
     def _on_event(self, event: CoreEvent) -> None:
-        self.events.publish(event)
+        published = self.events.publish(event)
         if event.type == "agent_start" and event.run_id is not None:
             self._active_run_id = event.run_id
+            self._last_started_run = (event.run_id, published.sequence)
             started = self._run_started
             if started is not None and not started.done():
                 started.set_result(event.run_id)

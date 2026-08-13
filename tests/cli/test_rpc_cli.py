@@ -10,7 +10,7 @@ from typing import Any
 
 from evopi.cli.main import main
 from evopi.cli.product import build_product_parser
-from evopi.cli.rpc import StdioTextReader, StdioTextWriter
+from evopi.cli.rpc import StdioTextReader, StdioTextWriter, _first_protocol_line
 from evopi.harness import ConfirmationBroker
 
 cli_main = importlib.import_module("evopi.cli.main")
@@ -76,5 +76,28 @@ def test_stdio_text_adapters_preserve_lines_and_do_not_close_streams() -> None:
         assert target.getvalue() == "response\n"
         assert source.closed is False
         assert target.closed is False
+
+    asyncio.run(scenario())
+
+
+def test_first_rpc_request_locks_v2_while_v1_remains_compatible() -> None:
+    async def scenario() -> None:
+        v2 = StdioTextReader(
+            StringIO(
+                '{"request_id":"r","method":"initialize","params":{},'
+                '"schema_version":2}\n'
+            )
+        )
+        v1 = StdioTextReader(
+            StringIO(
+                '{"request_id":"r","method":"initialize","params":{},'
+                '"schema_version":1}\n'
+            )
+        )
+
+        selected_v2 = await _first_protocol_line(v2)
+        selected_v1 = await _first_protocol_line(v1)
+        assert selected_v2 is not None and selected_v2[0] == 2
+        assert selected_v1 is not None and selected_v1[0] == 1
 
     asyncio.run(scenario())

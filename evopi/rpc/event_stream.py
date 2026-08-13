@@ -24,6 +24,7 @@ import threading
 import uuid as uuid_module
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass
 from itertools import count
 from typing import TypeAlias
 
@@ -44,6 +45,17 @@ DEFAULT_CAPACITY = 1000
 DEFAULT_SUBSCRIBER_QUEUE_CAPACITY = 100
 
 _SubscriberQueue: TypeAlias = asyncio.Queue[RpcEvent | None]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class EventReplayWindow:
+    """One atomic view of retained Event history and its identity."""
+
+    stream_id: str
+    oldest_sequence: int
+    latest_sequence: int
+    capacity: int
+    events: tuple[RpcEvent, ...]
 
 
 class _Subscriber:
@@ -123,11 +135,22 @@ class EventStream:
         ):
             raise ValueError("subscriber_queue_capacity must be a positive integer")
         self._events: deque[RpcEvent] = deque(maxlen=capacity)
+        self._stream_id = str(uuid_module.uuid4())
+        self._capacity = capacity
         self._next_sequence = 1
         self._closed = False
         self._lock = threading.RLock()
         self._subscribers: dict[int, _Subscriber] = {}
         self._subscriber_queue_capacity = subscriber_queue_capacity
+
+    @property
+    def stream_id(self) -> str:
+        return self._stream_id
+
+    @property
+    def latest_sequence(self) -> int:
+        with self._lock:
+            return self._next_sequence - 1
 
     def publish(self, event: CoreEvent) -> RpcEvent:
         """Publish a Core event and return its RpcEvent with the next sequence.
@@ -159,12 +182,25 @@ class EventStream:
 
     def replay(self, *, after_sequence: int) -> tuple[RpcEvent, ...]:
         """Return all retained events with sequence greater than the cursor."""
+        return self.snapshot(after_sequence=after_sequence).events
+
+    def snapshot(self, *, after_sequence: int) -> EventReplayWindow:
+        """Return retained events and sequence bounds from one locked snapshot."""
+
         self._check_cursor(after_sequence)
         with self._lock:
             if self._closed:
                 raise EventStreamClosedError("event stream is closed")
             self._check_expired(after_sequence)
-            return tuple(event for event in self._events if event.sequence > after_sequence)
+            return EventReplayWindow(
+                stream_id=self._stream_id,
+                oldest_sequence=self._events[0].sequence if self._events else 0,
+                latest_sequence=self._next_sequence - 1,
+                capacity=self._capacity,
+                events=tuple(
+                    event for event in self._events if event.sequence > after_sequence
+                ),
+            )
 
     async def subscribe(self, *, after_sequence: int) -> AsyncIterator[RpcEvent]:
         """Subscribe: retained events after the cursor, then live events.
@@ -257,4 +293,9 @@ class EventStream:
                 self._subscribers.pop(subscriber.subscription_id, None)
 
 
-__all__ = ["DEFAULT_CAPACITY", "DEFAULT_SUBSCRIBER_QUEUE_CAPACITY", "EventStream"]
+__all__ = [
+    "DEFAULT_CAPACITY",
+    "DEFAULT_SUBSCRIBER_QUEUE_CAPACITY",
+    "EventReplayWindow",
+    "EventStream",
+]
