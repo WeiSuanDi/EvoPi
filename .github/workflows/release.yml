@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev,remote]"
+      - run: python -m pip install -e ".[dev]"
       - run: python scripts/check_release.py --tag "${{ env.EVOPI_RELEASE_TAG }}"
       - run: python -m ruff check .
       - run: python -m mypy

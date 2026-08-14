@@ -55,6 +55,11 @@ Unsupported package-manager installations return guidance rather than mutating t
 
 ## Release authority
 
+The pull-request CI workflow runs Ruff, Mypy, and the complete Python suite on Windows and Linux
+for Python 3.11 through 3.13. It also builds and installs the wheel, verifies packaged resources
+and the Remote CLI, and checks the TypeScript Remote Client. Pushes to `main` repeat the same gate,
+so release validation is not the first time integration or packaging drift becomes visible.
+
 The tag workflow validates the tag against `pyproject.toml`, runs the full gate on Windows and
 Linux with Python 3.11 through 3.13, builds wheel and sdist, validates package data, exercises the
 Windows installer against local simulated assets, generates checksums and provenance, and only

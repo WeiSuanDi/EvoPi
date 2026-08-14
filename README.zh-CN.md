@@ -9,6 +9,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 [![Release](https://img.shields.io/github/v/release/WeiSuanDi/EvoPi?sort=semver&label=release)](https://github.com/WeiSuanDi/EvoPi/releases/latest)
+[![CI](https://github.com/WeiSuanDi/EvoPi/actions/workflows/ci.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/ci.yml)
 [![Release workflow](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/github/license/WeiSuanDi/EvoPi)](LICENSE)
@@ -524,18 +525,22 @@ Remote Gateway 通过认证 WSS 暴露同一个 RPC v2 Host。它是单用户、
 与唯一控制租约位于既有 CodingHarness 之前，因此 Policy Block 和 revision-bound
 Confirmation 始终具有最终权威。
 
-普通 Python 环境可安装可选服务端依赖：
+Remote Gateway 已在当前 `main` 分支实现，计划随 v0.3.0 发布。在正式 Release 创建前，
+请显式安装源码预览，不要引用尚不存在的 Release Tag：
 
 ```bash
-pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@v0.3.0"
+python -m pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@main"
 ```
 
-Windows 受管 Runtime 可先下载安装器并显式启用 feature，或为已有安装补充 feature：
+受管 Runtime 的 Remote feature 安装也已经在 v0.3.0 源码中实现。v0.3.0 正式发布后，
+安装器和更新器将支持：
 
 ```powershell
 .\install.ps1 -Feature remote
 evopi update --enable-feature remote --yes
 ```
+
+当前稳定版 v0.2.0 的受管 Runtime 不包含 Remote 命令，请勿对 v0.2.0 安装器启用该 feature。
 
 在本机初始化 Host、签发短期配对码、通过本地管理通道批准 pending device，然后在 TLS
 反向代理后启动：

@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, get_type_hints
 
 from evopi.remote import (
     EvoPiRemoteClient,
     RemoteFrameCodec,
+    RemoteRunHandle,
     create_auth_challenge,
     generate_device_key,
     remote_frame,
     submit_remote_pairing,
 )
+from evopi.rpc import RpcInteractionReceipt, RpcServerInfo
 from evopi.rpc.codec_v2 import decode_v2_request, encode_v2_response
 from evopi.rpc.protocol_v2 import RpcV2Response
 
@@ -184,6 +186,14 @@ class _FakeWebSocket:
     async def close(self) -> None:
         self.closed = True
         await self.incoming.put(None)
+
+
+def test_remote_client_preserves_rpc_public_result_types() -> None:
+    assert get_type_hints(RemoteRunHandle.steer)["return"] is RpcInteractionReceipt
+    assert get_type_hints(RemoteRunHandle.follow_up)["return"] is RpcInteractionReceipt
+    getter = EvoPiRemoteClient.server_info.fget
+    assert getter is not None
+    assert get_type_hints(getter)["return"] is RpcServerInfo
 
 
 def test_remote_client_authenticates_composes_rpc_and_acquires_lease() -> None:

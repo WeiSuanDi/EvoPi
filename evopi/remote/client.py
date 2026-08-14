@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 from uuid import uuid4
 
 from evopi.rpc import (
@@ -18,9 +18,11 @@ from evopi.rpc import (
     RpcConfirmationAck,
     RpcConfirmationAnswer,
     RpcConfirmationRecord,
+    RpcInteractionReceipt,
     RpcRunHandle,
     RpcRunResult,
     RpcRuntimeStatus,
+    RpcServerInfo,
     decode_v2_envelope,
     decode_v2_event,
 )
@@ -30,6 +32,9 @@ from .crypto import sign_auth_challenge
 from .errors import RemoteConnectionError, RemoteOutcomeUnknownError
 from .gateway import REMOTE_SUBPROTOCOL, challenge_from_dict
 from .protocol import RemoteFrame, RemoteFrameCodec, RemoteProtocolError, remote_frame
+
+
+_T = TypeVar("_T")
 
 
 class RemoteWebSocket(Protocol):
@@ -201,18 +206,16 @@ class RemoteRunHandle:
     async def wait(self) -> RpcRunResult:
         return await self._handle.wait()
 
-    async def steer(self, content: str) -> Any:
+    async def steer(self, content: str) -> RpcInteractionReceipt:
         return await _unknown_on_disconnect("run.steer", self._handle.steer(content))
 
-    async def follow_up(self, content: str) -> Any:
+    async def follow_up(self, content: str) -> RpcInteractionReceipt:
         return await _unknown_on_disconnect(
             "run.follow_up", self._handle.follow_up(content)
         )
 
     async def abort(self) -> bool:
-        return cast(
-            bool, await _unknown_on_disconnect("run.abort", self._handle.abort())
-        )
+        return await _unknown_on_disconnect("run.abort", self._handle.abort())
 
 
 class EvoPiRemoteClient:
@@ -318,7 +321,7 @@ class EvoPiRemoteClient:
             raise
 
     @property
-    def server_info(self) -> Any:
+    def server_info(self) -> RpcServerInfo:
         return self.rpc.server_info
 
     async def runtime_status(self) -> RpcRuntimeStatus:
@@ -338,7 +341,7 @@ class EvoPiRemoteClient:
 
     async def start_run(self, prompt: str) -> RemoteRunHandle:
         handle = await _unknown_on_disconnect("run.start", self.rpc.start_run(prompt))
-        return RemoteRunHandle(cast(RpcRunHandle, handle), self)
+        return RemoteRunHandle(handle, self)
 
     async def events(
         self, *, after: RpcEventCursor | None = None
@@ -374,7 +377,7 @@ class EvoPiRemoteClient:
         result = await _unknown_on_disconnect(
             "confirmation.respond", self.rpc.respond_confirmation(answer)
         )
-        return cast(RpcConfirmationAck, result)
+        return result
 
     async def aclose(self) -> None:
         await self.rpc.aclose()
@@ -439,7 +442,7 @@ class EvoPiRemoteClient:
                 raise RemoteProtocolError("Remote event page made no progress")
 
 
-async def _unknown_on_disconnect(operation: str, awaitable: Any) -> Any:
+async def _unknown_on_disconnect(operation: str, awaitable: Awaitable[_T]) -> _T:
     try:
         return await awaitable
     except (RpcConnectionClosedError, RemoteConnectionError) as exc:

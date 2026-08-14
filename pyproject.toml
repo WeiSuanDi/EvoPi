@@ -35,10 +35,15 @@ remote = [
 ]
 dev = [
     "build>=1.2.2",
+    "cryptography>=44.0.0",
+    "httpx2>=2.0.0",
     "mypy>=1.13.0",
     "pytest>=8.0.0",
     "ruff==0.15.22",
+    "starlette>=0.45.0",
     "twine>=5.1.1",
+    "uvicorn[standard]>=0.34.0",
+    "websockets>=14.0",
 ]
 
 [project.urls]

@@ -23,6 +23,49 @@ def test_release_metadata_and_license_are_product_ready() -> None:
     assert (ROOT / ".github" / "workflows" / "remote-client-release.yml").is_file()
 
 
+def test_pull_request_ci_covers_python_and_remote_client() -> None:
+    workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+    assert workflow_path.is_file()
+
+    workflow = workflow_path.read_text(encoding="utf-8")
+    assert "pull_request:" in workflow
+    assert "push:" in workflow
+    assert "branches: [main]" in workflow
+    assert "ubuntu-latest" in workflow
+    assert "windows-latest" in workflow
+    for version in ('"3.11"', '"3.12"', '"3.13"'):
+        assert version in workflow
+    assert 'python -m pip install -e ".[dev]"' in workflow
+    assert "python -m ruff check ." in workflow
+    assert "python -m mypy" in workflow
+    assert "python -m pytest -q" in workflow
+    assert "working-directory: packages/remote-client" in workflow
+    assert "npm ci" in workflow
+    assert "npm run typecheck" in workflow
+    assert "npm test" in workflow
+    assert "npm pack --dry-run" in workflow
+    assert "python -m build" in workflow
+    assert "python -m twine check dist/*" in workflow
+    assert "evopi remote serve --help" in workflow
+
+
+def test_development_extra_covers_remote_test_dependencies() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    optional = project["optional-dependencies"]
+    remote = set(optional["remote"])
+    development = set(optional["dev"])
+
+    assert remote <= development
+    assert "httpx2>=2.0.0" in development
+
+
+def test_unreleased_remote_install_does_not_reference_a_missing_tag() -> None:
+    for name in ("README.md", "README.zh-CN.md"):
+        content = (ROOT / name).read_text(encoding="utf-8")
+        assert "EvoPi.git@v0.3.0" not in content
+        assert "EvoPi.git@main" in content
+
+
 def test_install_script_parses_as_powershell() -> None:
     executable = shutil.which("pwsh") or shutil.which("powershell")
     if executable is None:
@@ -52,6 +95,7 @@ def test_release_workflow_supports_non_publishing_preflight() -> None:
     assert "workflow_dispatch:" in workflow
     assert "EVOPI_RELEASE_TAG:" in workflow
     assert "github.event_name == 'push'" in workflow
+    assert 'python -m pip install -e ".[dev]"' in workflow
 
 
 def test_remote_client_release_uses_independent_tag_and_provenance() -> None:

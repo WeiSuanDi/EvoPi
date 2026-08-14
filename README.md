@@ -10,6 +10,7 @@ reviewable, and explicitly governed.
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 [![Release](https://img.shields.io/github/v/release/WeiSuanDi/EvoPi?sort=semver&label=release)](https://github.com/WeiSuanDi/EvoPi/releases/latest)
+[![CI](https://github.com/WeiSuanDi/EvoPi/actions/workflows/ci.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/ci.yml)
 [![Release workflow](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml/badge.svg)](https://github.com/WeiSuanDi/EvoPi/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/github/license/WeiSuanDi/EvoPi)](LICENSE)
@@ -549,19 +550,24 @@ TLS, device authentication, `observe/control/confirm` scopes, and a single contr
 front of the existing CodingHarness, so Policy blocks and revision-bound Confirmation remain
 authoritative.
 
-Install the optional server dependencies in a normal Python environment:
+Remote Gateway is implemented on the current `main` branch and is planned for the v0.3.0 release.
+Until that release is published, install the source preview explicitly rather than referencing a
+nonexistent release tag:
 
 ```bash
-pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@v0.3.0"
+python -m pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@main"
 ```
 
-For the Windows managed runtime, download the installer and enable the feature explicitly, or add it
-to an existing managed installation:
+Managed-runtime feature installation is also implemented in the v0.3.0 source. After v0.3.0 is
+published, the managed installer and updater will support:
 
 ```powershell
 .\install.ps1 -Feature remote
 evopi update --enable-feature remote --yes
 ```
+
+The current stable v0.2.0 managed runtime does not include the Remote commands; do not enable this
+feature against the v0.2.0 installer.
 
 Initialize a Host locally, issue a short-lived pairing code, approve the pending device through the
 local management channel, and then serve behind a TLS reverse proxy:
