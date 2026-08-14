@@ -137,6 +137,18 @@ class PairingRegistry:
         self._devices[device_id] = revoked
         return revoked
 
+    def update_scopes(self, device_id: str, *, scopes: Sequence[str]) -> DeviceRecord:
+        device = self._devices.get(device_id)
+        if device is None or not device.active:
+            raise RemotePairingError("device is unknown or revoked")
+        updated = replace(
+            device,
+            scopes=normalize_scopes(tuple(scopes)),
+            revision=device.revision + 1,
+        )
+        self._devices[device_id] = updated
+        return updated
+
     def _require_pending(self, request_id: str) -> PairingRequest:
         request = self._requests.get(request_id)
         if request is None or request.status != "pending":
