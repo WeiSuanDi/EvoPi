@@ -20,7 +20,14 @@ def test_admin_service_owns_pair_approve_scope_and_revoke_transitions(
     store.initialize(RemoteHostConfig(name="host", workspace=tmp_path))
     controller = RemoteHostController(store, "host")
     disconnected: list[str] = []
-    service = RemoteAdminService(controller, disconnect_device=disconnected.append)
+    audited: list[tuple[str, str, dict[str, object]]] = []
+    service = RemoteAdminService(
+        controller,
+        disconnect_device=disconnected.append,
+        audit=lambda action, outcome, details: audited.append(
+            (action, outcome, details)
+        ),
+    )
 
     issued = service(RemoteAdminRequest(request_id="1", method="pair.issue", params={}))
     assert issued.ok and issued.result is not None
@@ -56,3 +63,9 @@ def test_admin_service_owns_pair_approve_scope_and_revoke_transitions(
     )
     assert revoked.ok
     assert disconnected == [device_id, device_id]
+    assert [item[:2] for item in audited] == [
+        ("admin.pair.issue", "allowed"),
+        ("admin.requests.approve", "allowed"),
+        ("admin.devices.scopes", "allowed"),
+        ("admin.devices.revoke", "allowed"),
+    ]

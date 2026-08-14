@@ -29,6 +29,11 @@ def build_remote_parser() -> argparse.ArgumentParser:
     init.add_argument("--profile", default="default")
     init.add_argument("--remote-root", type=Path)
     init.add_argument("--json", action="store_true", dest="json_output")
+    subparsers.add_parser(
+        "serve",
+        help="Serve one secure WSS Remote Gateway",
+        add_help=False,
+    )
     for action, help_text in (
         ("pair", "Issue a one-time pairing code through the running Host"),
         ("status", "Show the running Host security status"),
@@ -71,6 +76,37 @@ def build_remote_parser() -> argparse.ArgumentParser:
     for command in (device_list, device_scopes, device_revoke):
         command.add_argument("--remote-root", type=Path)
         command.add_argument("--json", action="store_true", dest="json_output")
+    return parser
+
+
+def build_remote_serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="evopi remote serve",
+        description="Serve one trusted CodingHarness through the secure Remote Gateway",
+        epilog="Model, Session, Tool, Policy and resource options accepted by 'evopi rpc' may follow.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("name", help="Initialized Remote Host profile name")
+    parser.add_argument("--remote-root", type=Path)
+    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--proxy", action="store_true", dest="proxy_mode")
+    parser.add_argument("--cert")
+    parser.add_argument("--key")
+    parser.add_argument("--trusted-proxy", action="append", dest="trusted_proxies")
+    parser.add_argument("--allowed-host", action="append", dest="allowed_hosts")
+    parser.add_argument("--allowed-origin", action="append", dest="allowed_origins")
+    parser.add_argument("--console", action="store_true")
+    parser.add_argument("--max-connections", type=int, default=64)
+    parser.add_argument("--max-connections-per-ip", type=int, default=8)
+    parser.add_argument("--max-connections-per-device", type=int, default=4)
+    parser.add_argument("--max-outbound-items", type=int, default=128)
+    parser.add_argument("--max-outbound-bytes", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--handshake-rate", type=int, default=10)
+    parser.add_argument("--pairing-rate", type=int, default=5)
+    parser.add_argument("--request-rate", type=int, default=120)
+    parser.add_argument("--run-rate", type=int, default=6)
+    parser.add_argument("--confirmation-rate", type=int, default=30)
     return parser
 
 
@@ -167,4 +203,4 @@ def _print_admin_result(method: str, result: dict[str, object]) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-__all__ = ["build_remote_parser", "remote_main"]
+__all__ = ["build_remote_parser", "build_remote_serve_parser", "remote_main"]

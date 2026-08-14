@@ -28,6 +28,14 @@ def build_update_parser() -> argparse.ArgumentParser:
     actions.add_argument("--check", action="store_true", help="Only check for an update")
     actions.add_argument("--rollback", action="store_true", help="Switch to the previous runtime")
     parser.add_argument("--yes", action="store_true", help="Approve the explicit update action")
+    parser.add_argument(
+        "--enable-feature",
+        action="append",
+        choices=("remote",),
+        default=[],
+        metavar="FEATURE",
+        help="Install and preserve an optional managed-runtime feature",
+    )
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -78,6 +86,7 @@ def update_main(argv: list[str]) -> int:
         return exc.code if isinstance(exc.code, int) else 1
     home = resolve_user_config_home()
     runtime = ManagedRuntime(home)
+    requested_features = tuple(sorted({*runtime.current_features, *args.enable_feature}))
     if args.rollback:
         if not runtime.is_managed_process:
             return _emit(_unsupported_result(__version__), json_output=args.json_output)
@@ -104,7 +113,8 @@ def update_main(argv: list[str]) -> int:
             available = version_key(info.version) > version_key(current)
         except DistributionError:
             available = info.version != current
-        if not available:
+        missing_features = sorted(set(requested_features) - set(runtime.current_features))
+        if not available and not missing_features:
             return _emit(
                 UpdateResult(
                     status=UpdateStatus.UP_TO_DATE,
@@ -122,7 +132,11 @@ def update_main(argv: list[str]) -> int:
                     current_version=current,
                     target_version=info.version,
                     release_url=info.release_url,
-                    message=f"EvoPi {info.version} is available: {info.release_url}",
+                    message=(
+                        f"EvoPi {info.version} is available: {info.release_url}"
+                        if available
+                        else f"Feature(s) {', '.join(missing_features)} are available."
+                    ),
                 ),
                 json_output=args.json_output,
             )
@@ -140,7 +154,12 @@ def update_main(argv: list[str]) -> int:
                     ),
                     json_output=args.json_output,
                 )
-            if not _confirmation(f"Update EvoPi {current} to {info.version}? {info.release_url}"):
+            action = (
+                f"Update EvoPi {current} to {info.version}? {info.release_url}"
+                if available
+                else f"Enable feature(s) {', '.join(missing_features)} for EvoPi {current}?"
+            )
+            if not _confirmation(action):
                 return _emit(
                     UpdateResult(
                         status=UpdateStatus.DECLINED,
@@ -152,7 +171,10 @@ def update_main(argv: list[str]) -> int:
                     json_output=args.json_output,
                 )
         wheel = client.download(info)
-        return _emit(runtime.install(info, wheel), json_output=args.json_output)
+        return _emit(
+            runtime.install(info, wheel, features=requested_features),
+            json_output=args.json_output,
+        )
     except DistributionError as exc:
         return _emit(
             UpdateResult(

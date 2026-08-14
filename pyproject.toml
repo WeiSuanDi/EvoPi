@@ -1,6 +1,6 @@
 [project]
 name = "evopi"
-version = "0.2.0"
+version = "0.3.0"
 description = "An evolution-ready Python agent runtime with pluggable harness and policy governance."
 readme = "README.md"
 requires-python = ">=3.11"

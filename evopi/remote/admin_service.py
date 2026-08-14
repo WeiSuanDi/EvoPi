@@ -16,22 +16,34 @@ class RemoteAdminService:
         controller: RemoteHostController,
         *,
         disconnect_device: Callable[[str], None] | None = None,
+        audit: Callable[[str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.controller = controller
         self._disconnect_device = disconnect_device
+        self._audit = audit
 
     def __call__(self, request: RemoteAdminRequest) -> RemoteAdminResponse:
         try:
             result = self.dispatch(request.method, dict(request.params))
         except Exception as exc:
+            if self._audit is not None:
+                self._audit(
+                    f"admin.{request.method}",
+                    "denied",
+                    _audit_details(dict(request.params)),
+                )
             return RemoteAdminResponse(
                 request_id=request.request_id,
                 ok=False,
                 error=f"management operation rejected: {type(exc).__name__}: {exc}",
             )
-        return RemoteAdminResponse(
-            request_id=request.request_id, ok=True, result=result
-        )
+        if self._audit is not None:
+            self._audit(
+                f"admin.{request.method}",
+                "allowed",
+                _audit_details(dict(request.params)),
+            )
+        return RemoteAdminResponse(request_id=request.request_id, ok=True, result=result)
 
     def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "status":
@@ -104,6 +116,14 @@ def _device_dict(item: DeviceRecord) -> dict[str, Any]:
         "revoked_at": item.revoked_at.isoformat() if item.revoked_at else None,
         "revision": item.revision,
         "active": item.active,
+    }
+
+
+def _audit_details(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in params.items()
+        if key in {"request_id", "device_id", "scopes"}
     }
 
 

@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from evopi.evolution.file_lock import EvolutionFileLock
+from evopi.configuration import harden_credential_permissions
+from evopi.evolution.file_lock import EvolutionFileLock, EvolutionStoreLockError
 
 from .errors import RemoteAuditError
 
@@ -43,7 +46,9 @@ class RemoteAuditLog:
         self.root = root.resolve()
         self.max_segment_bytes = max_segment_bytes
         self.root.mkdir(parents=True, exist_ok=True)
+        self._thread_lock = threading.Lock()
         self._last_hash = self._find_last_hash()
+        self.prune_expired_client_ips()
 
     @property
     def current_path(self) -> Path:
@@ -71,29 +76,46 @@ class RemoteAuditLog:
         if not action or not outcome:
             raise RemoteAuditError("audit action and outcome must be non-empty")
         now = datetime.now(UTC)
-        base: dict[str, Any] = {
-            "schema_version": 1,
-            "entry_id": str(uuid4()),
-            "created_at": now.isoformat(),
-            "action": action,
-            "outcome": outcome,
-            "device_id": device_id,
-            "client_ip": client_ip,
-            "details": safe_details,
-            "previous_hash": self._last_hash,
-        }
-        digest = _digest(base)
-        payload = {**base, "entry_hash": digest}
-        path = self.current_path
         try:
-            with EvolutionFileLock(self.root / "audit.lock"):
-                with path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(_canonical(payload) + "\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-        except OSError as exc:
+            with self._thread_lock:
+                base: dict[str, Any] = {
+                    "schema_version": 1,
+                    "entry_id": str(uuid4()),
+                    "created_at": now.isoformat(),
+                    "action": action,
+                    "outcome": outcome,
+                    "device_id": device_id,
+                    "client_ip_sha256": (
+                        hashlib.sha256(client_ip.encode("utf-8")).hexdigest()
+                        if client_ip is not None
+                        else None
+                    ),
+                    "details": safe_details,
+                    "previous_hash": self._last_hash,
+                }
+                digest = _digest(base)
+                payload = {**base, "entry_hash": digest}
+                path = self.current_path
+                with EvolutionFileLock(self.root / "audit.lock"):
+                    if client_ip is not None:
+                        self._append_client_ip(
+                            entry_id=base["entry_id"], created_at=now, client_ip=client_ip
+                        )
+                    created = not path.exists()
+                    descriptor = os.open(
+                        path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600
+                    )
+                    with os.fdopen(
+                        descriptor, "a", encoding="utf-8", newline="\n"
+                    ) as handle:
+                        handle.write(_canonical(payload) + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    if created:
+                        harden_credential_permissions(path)
+                self._last_hash = digest
+        except (OSError, subprocess.SubprocessError, EvolutionStoreLockError) as exc:
             raise RemoteAuditError("Remote audit write failed") from exc
-        self._last_hash = digest
         return RemoteAuditEntry(
             entry_id=base["entry_id"],
             created_at=now,
@@ -105,6 +127,60 @@ class RemoteAuditLog:
             previous_hash=base["previous_hash"],
             entry_hash=digest,
         )
+
+    def prune_expired_client_ips(
+        self,
+        *,
+        now: datetime | None = None,
+        retention_days: int = 30,
+    ) -> tuple[Path, ...]:
+        """Delete raw-IP sidecars older than the configured retention window."""
+
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        cutoff = current.astimezone(UTC).date() - timedelta(days=retention_days)
+        removed: list[Path] = []
+        try:
+            with self._thread_lock, EvolutionFileLock(self.root / "audit.lock"):
+                for path in sorted(self.root.glob("remote-client-ip-????-??-??.jsonl")):
+                    try:
+                        raw_day = path.stem.removeprefix("remote-client-ip-")
+                        day = datetime.strptime(raw_day, "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+                    if day < cutoff:
+                        path.unlink()
+                        removed.append(path)
+        except (OSError, EvolutionStoreLockError) as exc:
+            raise RemoteAuditError("Remote audit IP retention cleanup failed") from exc
+        return tuple(removed)
+
+    def _append_client_ip(
+        self, *, entry_id: str, created_at: datetime, client_ip: str
+    ) -> None:
+        path = self.root / f"remote-client-ip-{created_at:%Y-%m-%d}.jsonl"
+        payload = {
+            "schema_version": 1,
+            "entry_id": entry_id,
+            "created_at": created_at.isoformat(),
+            "client_ip": client_ip,
+        }
+        created = not path.exists()
+        descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(_canonical(payload) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            if created:
+                harden_credential_permissions(path)
+            else:
+                path.chmod(0o600)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RemoteAuditError("unable to protect Remote audit IP sidecar") from exc
 
     def _find_last_hash(self) -> str:
         paths = sorted(self.root.glob("remote-audit-*.jsonl"))

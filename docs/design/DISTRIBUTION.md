@@ -1,5 +1,16 @@
 # EvoPi Distribution Design
 
+## Optional managed features
+
+The `remote` extra is opt-in. Windows managed installations accept `install.ps1 -Feature remote`;
+an existing managed runtime accepts `evopi update --enable-feature remote`. The Runtime identity is
+the package version plus a stable feature-set digest. Future updates inherit the current feature set,
+and rollback switches to an already verified Runtime without network access. Old version-only
+runtime directories and schema-v1 markers remain readable.
+
+External pip, pipx, Conda, and editable installs use `evopi[remote]` and remain externally managed.
+The built-in updater never modifies those environments.
+
 > Current public baseline: `v0.2.0`, released through the verified GitHub tag workflow on
 > 2026-08-11.
 

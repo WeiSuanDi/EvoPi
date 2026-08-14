@@ -1,5 +1,10 @@
 # EvoPi 文件夹架构
 
+`evopi/remote/` 是可选公网边界，包含本机 Host authority、设备身份、WSS Gateway、Scope、
+Lease、限流、Audit、Python Client 与 opt-in Console。它建立在 `evopi/rpc/` 之上，不属于
+Core。浏览器优先的 TypeScript SDK 位于 `packages/remote-client/`，部署样例位于
+`docs/deployment/remote/`。
+
 本文件记录 EvoPi 当前的目标目录结构。
 
 它不是最终不可变设计，而是当前阶段的架构锚点。

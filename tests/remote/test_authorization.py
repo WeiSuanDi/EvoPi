@@ -76,3 +76,30 @@ def test_confirm_scope_is_independent_and_shutdown_is_always_denied() -> None:
             await host.shutdown({})
 
     asyncio.run(scenario())
+
+
+def test_native_rpc_replay_cannot_bypass_remote_page_limits() -> None:
+    class ReplayHost(_Host):
+        async def events_replay(self, params: dict[str, object]) -> dict[str, object]:
+            del params
+            return {
+                "stream_id": "stream-1",
+                "after_sequence": 0,
+                "oldest_sequence": 1,
+                "latest_sequence": 105,
+                "events": [{"sequence": sequence} for sequence in range(1, 106)],
+            }
+
+    async def scenario() -> None:
+        host = RemoteAuthorizedRpcHost(
+            ReplayHost(),
+            device_id="device-1",
+            connection_id="connection-1",
+            scopes=(DeviceScope.OBSERVE,),
+            leases=ControlLeaseManager(),
+        )
+
+        result = await host.events_replay({})
+        assert len(result["events"]) == 100
+
+    asyncio.run(scenario())

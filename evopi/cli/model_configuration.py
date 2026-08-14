@@ -77,13 +77,27 @@ def resolve_cli_model_configuration(
     model: str | None = None,
     base_url: str | None = None,
     home: Path | None = None,
+    profile_name: str | None = None,
     require_complete: bool = False,
 ) -> ResolvedCliModelConfiguration:
     """Resolve CLI > environment/.env > user profile > product defaults."""
 
     load_dotenv()
     config = UserConfigStore((home / "config.toml") if home else None).load_optional()
-    profile = config.active if config is not None else None
+    if profile_name is not None:
+        if config is None:
+            raise IncompleteModelConfigurationError(
+                f"model profile '{profile_name}' is not configured; run 'evopi setup'"
+            )
+        profile = next(
+            (item for item in config.profiles if item.name == profile_name), None
+        )
+        if profile is None:
+            raise IncompleteModelConfigurationError(
+                f"model profile '{profile_name}' is not configured; run 'evopi setup'"
+            )
+    else:
+        profile = config.active if config is not None else None
     env_provider = os.getenv("EVOPI_PROVIDER")
     selected_provider = _normalize_provider(
         provider or env_provider or (profile.provider if profile else "anthropic")

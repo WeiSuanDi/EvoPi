@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from typing import cast
 
 from evopi.core.types import JsonObject
 from evopi.rpc.errors import RpcHostError
@@ -10,6 +12,7 @@ from evopi.rpc.server_v2 import RpcV2Host
 
 from .lease import ControlLeaseManager
 from .models import DeviceScope
+from .protocol import MAX_OUTBOUND_FRAME_BYTES
 
 
 class RemoteAuthorizedRpcHost:
@@ -39,7 +42,21 @@ class RemoteAuthorizedRpcHost:
 
     async def events_replay(self, params: JsonObject) -> JsonObject:
         self._require(DeviceScope.OBSERVE)
-        return await self._host.events_replay(params)
+        result = await self._host.events_replay(params)
+        raw_events = result.get("events")
+        if not isinstance(raw_events, list):
+            return result
+        bounded: list[object] = []
+        for event in raw_events[:100]:
+            candidate = {**result, "events": [*bounded, event]}
+            if len(
+                json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ) > MAX_OUTBOUND_FRAME_BYTES:
+                break
+            bounded.append(event)
+        return cast(JsonObject, {**result, "events": bounded})
 
     async def run_start(self, params: JsonObject) -> JsonObject:
         self._require_control()

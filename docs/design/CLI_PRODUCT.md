@@ -1,5 +1,15 @@
 # EvoPi CLI Product
 
+## Remote product surface
+
+`evopi remote` is an optional management and serving surface layered on RPC v2. `init`, pairing,
+pending-request approval, device scopes, and revocation are local-authority operations. `serve`
+constructs one shared CodingHarness and exposes it through authenticated WSS; it does not create a
+second CLI execution path. Remote server dependencies are installed with the `remote` feature.
+
+The public Gateway never exposes Policy/Plugin approval, activation, reload, Host reconfiguration,
+or RPC `shutdown`. Those remain local product operations.
+
 ## Product boundary
 
 The CLI is the first product host for `CodingHarness`; it is not a second runtime and does not

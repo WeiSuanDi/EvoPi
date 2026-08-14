@@ -251,6 +251,21 @@ def test_gateway_health_is_local_and_reports_audit_readiness(tmp_path: Path) -> 
     assert response.status_code == 503
 
 
+def test_gateway_ready_allows_only_local_or_explicit_trusted_proxy(tmp_path: Path) -> None:
+    gateway, _, _ = _gateway(tmp_path)
+    remote = TestClient(gateway.create_app(), client=("198.51.100.5", 50000))
+    assert remote.get("/health/ready").status_code == 404
+
+    gateway.config = RemoteGatewayConfig(
+        bind="127.0.0.1",
+        proxy_mode=True,
+        trusted_proxy_cidrs=("198.51.100.0/24",),
+        allowed_hosts=("testserver",),
+    )
+    trusted = TestClient(gateway.create_app(), client=("198.51.100.5", 50000))
+    assert trusted.get("/health/ready").status_code == 200
+
+
 def test_gateway_streams_live_events_after_rpc_initialize(tmp_path: Path) -> None:
     host = _StreamingRpcHost()
     gateway, private_key, device_id = _gateway(tmp_path, rpc_host=host)
@@ -314,3 +329,6 @@ def test_console_is_opt_in_and_has_strict_security_headers(tmp_path: Path) -> No
     assert response.headers["x-content-type-options"] == "nosniff"
     script = client.get("/console/app.js").text
     assert "innerHTML" not in script
+    assert 'sendRpc("run.steer"' in script
+    assert 'sendRpc("run.follow_up"' in script
+    assert 'sendRpc("confirmation.respond"' in script

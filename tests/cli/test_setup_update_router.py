@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from evopi.cli.main import main
+from evopi.cli.update import build_update_parser
 from evopi.distribution import ReleaseInfo
+from evopi.distribution import UpdateResult, UpdateStatus
 
 
 def _clear_model_environment(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
@@ -30,6 +32,12 @@ def test_setup_and_update_help_are_product_commands(capsys: pytest.CaptureFixtur
     assert "evopi setup" in capsys.readouterr().out
     assert main(["update", "--help"]) == 0
     assert "evopi update" in capsys.readouterr().out
+
+
+def test_update_parser_accepts_remote_feature() -> None:
+    args = build_update_parser().parse_args(["--enable-feature", "remote", "--yes"])
+
+    assert args.enable_feature == ["remote"]
 
 
 def test_noninteractive_run_and_rpc_require_setup(
@@ -109,3 +117,56 @@ def test_external_install_refuses_self_update(
 
     assert main(["update", "--yes"]) == 2
     assert "externally managed" in capsys.readouterr().out
+
+
+def test_managed_update_can_enable_remote_without_a_newer_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    info = ReleaseInfo(
+        version="0.3.0",
+        release_url="https://github.com/WeiSuanDi/EvoPi/releases/tag/v0.3.0",
+        wheel_name="evopi-0.3.0-py3-none-any.whl",
+        wheel_url="https://github.com/WeiSuanDi/EvoPi/releases/download/v0.3.0/x.whl",
+        sha256="a" * 64,
+        checksum_url="https://github.com/WeiSuanDi/EvoPi/releases/download/v0.3.0/SHA256SUMS",
+    )
+    installed: list[tuple[str, ...]] = []
+
+    class Runtime:
+        is_managed_process = True
+        current_version = "0.3.0"
+        current_features: tuple[str, ...] = ()
+
+        def __init__(self, home: Path) -> None:
+            del home
+
+        def install(
+            self, release: ReleaseInfo, wheel: bytes, *, features: tuple[str, ...]
+        ) -> UpdateResult:
+            assert release is info and wheel == b"wheel"
+            installed.append(features)
+            return UpdateResult(
+                status=UpdateStatus.UPDATED,
+                current_version=release.version,
+                target_version=release.version,
+                message="remote enabled",
+            )
+
+    class Client:
+        def latest_info(self) -> ReleaseInfo:
+            return info
+
+        def download(self, release: ReleaseInfo) -> bytes:
+            assert release is info
+            return b"wheel"
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("EVOPI_HOME", str(tmp_path))
+    monkeypatch.setattr("evopi.cli.update.ManagedRuntime", Runtime)
+    monkeypatch.setattr("evopi.cli.update.GitHubReleaseClient", Client)
+
+    assert main(["update", "--enable-feature", "remote", "--yes"]) == 0
+    assert installed == [("remote",)]

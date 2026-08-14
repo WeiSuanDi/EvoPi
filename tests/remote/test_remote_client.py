@@ -10,12 +10,15 @@ from evopi.remote import (
     create_auth_challenge,
     generate_device_key,
     remote_frame,
+    submit_remote_pairing,
 )
 from evopi.rpc.codec_v2 import decode_v2_request, encode_v2_response
 from evopi.rpc.protocol_v2 import RpcV2Response
 
 
 class _FakeWebSocket:
+    stream_id = "11111111-1111-1111-1111-111111111111"
+
     def __init__(self, private_key: Any) -> None:
         self.private_key = private_key
         self.incoming: asyncio.Queue[str | None] = asyncio.Queue()
@@ -34,7 +37,7 @@ class _FakeWebSocket:
                     "host_id": "host-1",
                     "session_id": "session-1",
                     "stream": {
-                        "stream_id": "stream-1",
+                        "stream_id": self.stream_id,
                         "cursor": 0,
                         "oldest_sequence": 0,
                         "latest_sequence": 0,
@@ -132,6 +135,45 @@ class _FakeWebSocket:
                     )
                 )
             )
+        elif frame.type == "pairing.submit":
+            await self.incoming.put(
+                RemoteFrameCodec.encode(
+                    remote_frame(
+                        "pairing.pending",
+                        frame.request_id,
+                        {"request_id": "pending-1"},
+                    )
+                )
+            )
+        elif frame.type == "events.page":
+            sequence = frame.data["after_sequence"] + 1
+            await self.incoming.put(
+                RemoteFrameCodec.encode(
+                    remote_frame(
+                        "events.page",
+                        frame.request_id,
+                        {
+                            "stream_id": self.stream_id,
+                            "after_sequence": frame.data["after_sequence"],
+                            "snapshot_latest": sequence,
+                            "next_sequence": sequence,
+                            "complete": True,
+                            "events": [
+                                {
+                                    "event_id": "22222222-2222-2222-2222-222222222222",
+                                    "stream_id": self.stream_id,
+                                    "sequence": sequence,
+                                    "type": "plugin.extension.event",
+                                    "data": {"safe": True},
+                                    "run_id": None,
+                                    "created_at": datetime.now(UTC).isoformat(),
+                                    "schema_version": 2,
+                                }
+                            ],
+                        },
+                    )
+                )
+            )
 
     async def recv(self) -> str:
         value = await self.incoming.get()
@@ -161,5 +203,44 @@ def test_remote_client_authenticates_composes_rpc_and_acquires_lease() -> None:
         assert lease.revision == 1
         await client.aclose()
         assert socket.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_can_submit_pairing_without_authentication() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        socket = _FakeWebSocket(private_key)
+
+        result = await submit_remote_pairing(
+            socket,
+            code="ABCD-EFGH-JKLM",
+            device_name="laptop",
+            public_jwk={"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+        )
+
+        assert result.request_id == "pending-1"
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_uses_remote_event_pages_before_live_delivery() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        socket = _FakeWebSocket(private_key)
+        client = await EvoPiRemoteClient.connect(
+            socket,
+            device_id="device-1",
+            private_key=private_key,
+            owns_transport=True,
+        )
+
+        iterator = client.events()
+        event = await anext(iterator)
+        assert event.cursor.stream_id == socket.stream_id
+        assert event.cursor.sequence == 1
+        assert event.event_type == "plugin.extension.event"
+        await iterator.aclose()
+        await client.aclose()
 
     asyncio.run(scenario())

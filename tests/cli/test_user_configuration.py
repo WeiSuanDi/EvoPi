@@ -171,6 +171,64 @@ def test_stored_key_is_not_reused_for_changed_base_url(tmp_path: Path) -> None:
     assert "stored-secret" not in json.dumps(resolved.to_safe_dict())
 
 
+def test_cli_can_resolve_an_explicit_non_active_host_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in (
+        "EVOPI_PROVIDER",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_MODEL",
+        "EVOPI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.setenv(name, "")
+    UserConfigStore(tmp_path / "config.toml").save(
+        UserConfig(
+            active_profile="default",
+            profiles=(
+                ModelProfile(
+                    name="default",
+                    provider="anthropic",
+                    model="default-model",
+                    base_url="https://default.example",
+                    verified=True,
+                ),
+                ModelProfile(
+                    name="remote-host",
+                    provider="openai-responses",
+                    model="remote-model",
+                    base_url="https://remote.example/v1",
+                    verified=True,
+                ),
+            ),
+        )
+    )
+    CredentialStore(
+        tmp_path / "credentials.json", permission_hardener=lambda path: None
+    ).save(
+        (
+            CredentialRecord(
+                profile="remote-host",
+                provider="openai-responses",
+                base_url="https://remote.example/v1",
+                api_key="remote-secret",
+            ),
+        )
+    )
+
+    resolved = resolve_cli_model_configuration(
+        home=tmp_path, profile_name="remote-host", require_complete=True
+    )
+
+    assert resolved.profile == "remote-host"
+    assert resolved.safe.model == "remote-model"
+    assert resolved.api_key == "remote-secret"
+
+
 def test_repl_settings_use_the_same_persisted_configuration_resolver(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

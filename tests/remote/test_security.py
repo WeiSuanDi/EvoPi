@@ -7,6 +7,7 @@ import pytest
 from evopi.remote import (
     RemoteGatewayConfig,
     RemoteSecurityError,
+    is_trusted_proxy_peer,
     resolve_remote_client_ip,
     validate_remote_request,
 )
@@ -46,6 +47,8 @@ def test_forwarded_header_is_only_trusted_from_explicit_proxy() -> None:
         )
         == "198.51.100.2"
     )
+    assert is_trusted_proxy_peer("127.0.0.1", config) is True
+    assert is_trusted_proxy_peer("198.51.100.2", config) is False
 
 
 def test_host_and_browser_origin_require_exact_allowlist_match() -> None:
@@ -66,3 +69,12 @@ def test_host_and_browser_origin_require_exact_allowlist_match() -> None:
         validate_remote_request(
             host="agent.example", origin="https://evil.example", config=config
         )
+
+
+def test_ipv6_host_header_is_parsed_without_losing_the_address() -> None:
+    config = RemoteGatewayConfig(bind="::1", allowed_hosts=("::1",))
+
+    validate_remote_request(host="[::1]:8765", origin=None, config=config)
+
+    with pytest.raises(RemoteSecurityError, match="Host"):
+        validate_remote_request(host="[::2]:8765", origin=None, config=config)
