@@ -27,11 +27,31 @@ class RemoteAuthorizationError(RemoteError):
     """Raised when a device lacks the required scope."""
 
 
+class RemoteLeaseError(RemoteError):
+    """Raised when a control lease transition is invalid."""
+
+
+class RemoteRateLimitError(RemoteError):
+    """Raised when a Remote resource or request limit is exceeded."""
+
+
+class RemoteSecurityError(RemoteError):
+    """Raised when network security configuration or metadata is unsafe."""
+
+
+class RemoteAuditError(RemoteError):
+    """Raised when the mandatory Remote audit trail cannot be trusted."""
+
+
 __all__ = [
     "RemoteAuthenticationError",
+    "RemoteAuditError",
     "RemoteAuthorizationError",
     "RemoteContractError",
     "RemoteError",
     "RemotePairingError",
+    "RemoteLeaseError",
+    "RemoteRateLimitError",
+    "RemoteSecurityError",
     "RemoteStoreError",
 ]

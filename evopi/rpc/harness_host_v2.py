@@ -13,6 +13,7 @@ from .errors import EventCursorExpiredError, RpcHostError
 from .harness_host import HarnessRpcHost
 from .protocol import RpcEvent
 from .protocol_v2 import RpcV2Event
+from .event_stream import EventStream
 
 
 class HarnessRpcV2Host:
@@ -33,6 +34,12 @@ class HarnessRpcV2Host:
     @property
     def stream_id(self) -> str:
         return self._host.events.stream_id
+
+    @property
+    def event_stream(self) -> EventStream:
+        """Shared bounded event source for transport adapters."""
+
+        return self._host.events
 
     def project_event(self, event: RpcEvent) -> RpcV2Event:
         """Bind one retained legacy event to this Host's v2 stream identity."""
