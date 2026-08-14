@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "valid": [
+    {"schema_version": 1, "type": "auth.begin", "request_id": "auth-1", "data": {"device_id": "device-1"}},
+    {"schema_version": 1, "type": "lease.acquire", "request_id": "lease-1", "data": {}},
+    {"schema_version": 1, "type": "events.page", "request_id": "events-1", "data": {"stream_id": "stream-1", "after_sequence": 42}}
+  ],
+  "invalid": [
+    {"schema_version": 2, "type": "auth.begin", "request_id": "auth-1", "data": {}},
+    {"schema_version": 1, "type": "auth.begin", "request_id": "", "data": {}},
+    {"schema_version": 1, "type": "auth.begin", "request_id": "auth-1", "data": [], "extra": true}
+  ]
+}

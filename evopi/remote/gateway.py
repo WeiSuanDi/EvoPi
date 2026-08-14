@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
+from functools import partial
 from typing import Any, cast
 from uuid import uuid4
 
 from evopi.core.types import JsonObject
 from evopi.rpc.codec_v2 import decode_v2_envelope, encode_v2_event, encode_v2_response
-from evopi.rpc.errors import RpcCodecError
+from evopi.rpc.errors import EventStreamError, RpcCodecError
+from evopi.rpc.event_stream import EventStream
 from evopi.rpc.protocol_v2 import RpcV2Event, RpcV2Request, RpcV2Response
 from evopi.rpc.server_v2 import RpcV2Host, RpcV2Server
 
@@ -36,7 +38,12 @@ from .protocol import (
     RemoteProtocolError,
     remote_frame,
 )
-from .security import RemoteGatewayConfig, resolve_remote_client_ip, validate_remote_request
+from .security import (
+    RemoteGatewayConfig,
+    is_trusted_proxy_peer,
+    resolve_remote_client_ip,
+    validate_remote_request,
+)
 from .store import RemoteHostConfig
 
 REMOTE_SUBPROTOCOL = "evopi.remote.v1"
@@ -64,11 +71,18 @@ class RemoteGateway:
         self.audit = audit
         self.leases = leases or ControlLeaseManager()
         self.rate_limiter = rate_limiter or RemoteRateLimiter()
-        self.connections = connections or RemoteConnectionRegistry()
+        self.connections = connections or RemoteConnectionRegistry(
+            max_global=gateway_config.max_connections,
+            max_per_ip=gateway_config.max_connections_per_ip,
+            max_per_device=gateway_config.max_connections_per_device,
+        )
         self.ready = True
         self._websockets: dict[str, Any] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._event_stream = getattr(rpc_host, "event_stream", None)
+        candidate_stream = getattr(rpc_host, "event_stream", None)
+        self._event_stream = (
+            candidate_stream if isinstance(candidate_stream, EventStream) else None
+        )
         self._project_event = getattr(rpc_host, "project_event", None)
 
     def create_app(self) -> Any:
@@ -102,7 +116,11 @@ class RemoteGateway:
         from starlette.responses import JSONResponse
 
         peer = getattr(request.client, "host", "") if request.client is not None else ""
-        if peer not in {"127.0.0.1", "::1", "testclient"}:
+        local_peer = peer in {"127.0.0.1", "::1", "testclient"}
+        trusted_proxy = self.config.proxy_mode and is_trusted_proxy_peer(
+            peer, self.config
+        )
+        if not local_peer and not trusted_proxy:
             return JSONResponse({"status": "not_found"}, status_code=404)
         status = "ready" if self.ready else "not_ready"
         return JSONResponse({"status": status}, status_code=200 if self.ready else 503)
@@ -154,7 +172,10 @@ class RemoteGateway:
 
         await websocket.accept(subprotocol=REMOTE_SUBPROTOCOL)
         self._websockets[connection_id] = websocket
-        queue = RemoteSendQueue()
+        queue = RemoteSendQueue(
+            max_items=self.config.max_outbound_items,
+            max_bytes=self.config.max_outbound_bytes,
+        )
         sender = asyncio.create_task(self._send_loop(websocket, queue))
         device: DeviceRecord | None = None
         pending_device: DeviceRecord | None = None
@@ -188,11 +209,16 @@ class RemoteGateway:
                                     queue=queue,
                                 )
                             )
+                            event_task.add_done_callback(
+                                partial(self._event_forwarding_done, websocket)
+                            )
                         continue
                 frame = RemoteFrameCodec.decode(payload)
                 if frame.type == "auth.begin" and device is None:
                     if not self.rate_limiter.allow(
-                        f"handshake:{client_ip}", limit=10, window=_minute()
+                        f"handshake:{client_ip}",
+                        limit=self.config.handshake_rate_per_minute,
+                        window=_minute(),
                     ):
                         raise RemoteRateLimitError("authentication rate limit exceeded")
                     device_id = _required_string(frame.data, "device_id")
@@ -259,7 +285,9 @@ class RemoteGateway:
                     continue
                 if frame.type == "pairing.submit" and device is None:
                     if not self.rate_limiter.allow(
-                        f"pairing:{client_ip}", limit=5, window=_minute()
+                        f"pairing:{client_ip}",
+                        limit=self.config.pairing_rate_per_minute,
+                        window=_minute(),
                     ):
                         raise RemoteRateLimitError("pairing rate limit exceeded")
                     request = self.controller.submit_pairing(
@@ -327,9 +355,40 @@ class RemoteGateway:
             if websocket is not None:
                 loop.call_soon_threadsafe(self._schedule_close, websocket)
 
+    def fail_closed(self) -> None:
+        """Make the Gateway unavailable and disconnect every remote transport."""
+
+        self.ready = False
+        loop = self._loop
+        if loop is None:
+            return
+        for websocket in tuple(self._websockets.values()):
+            loop.call_soon_threadsafe(self._schedule_close, websocket)
+
+    def record_security_operation(
+        self, action: str, outcome: str, details: dict[str, Any]
+    ) -> None:
+        """Record a local management operation through the mandatory audit path."""
+
+        self._audit(action=action, outcome=outcome, details=details)
+
     @staticmethod
     def _schedule_close(websocket: Any) -> None:
         asyncio.create_task(websocket.close(code=4003))
+
+    def _event_forwarding_done(
+        self, websocket: Any, task: asyncio.Task[None]
+    ) -> None:
+        """Disconnect a client whose bounded live event stream failed."""
+
+        if task.cancelled():
+            return
+        try:
+            failure = task.exception()
+        except asyncio.CancelledError:
+            return
+        if failure is not None and self._loop is not None:
+            self._loop.call_soon_threadsafe(self._schedule_close, websocket)
 
     async def _handle_control(
         self,
@@ -393,15 +452,21 @@ class RemoteGateway:
         queue: RemoteSendQueue,
     ) -> RpcV2Response:
         if not self.rate_limiter.allow(
-            f"request:{device.device_id}", limit=120, window=_minute()
+            f"request:{device.device_id}",
+            limit=self.config.request_rate_per_minute,
+            window=_minute(),
         ):
             raise RemoteRateLimitError("authenticated request rate limit exceeded")
         if request.method == "run.start" and not self.rate_limiter.allow(
-            f"run:{device.device_id}", limit=6, window=_minute()
+            f"run:{device.device_id}",
+            limit=self.config.run_rate_per_minute,
+            window=_minute(),
         ):
             raise RemoteRateLimitError("Run start rate limit exceeded")
         if request.method in {"confirmation.respond", "confirmation.respond_batch"} and not self.rate_limiter.allow(
-            f"confirmation:{device.device_id}", limit=30, window=_minute()
+            f"confirmation:{device.device_id}",
+            limit=self.config.confirmation_rate_per_minute,
+            window=_minute(),
         ):
             raise RemoteRateLimitError("Confirmation write rate limit exceeded")
         response = await server.dispatch(request)
@@ -446,7 +511,12 @@ class RemoteGateway:
         after_sequence = frame.data.get("after_sequence")
         if type(after_sequence) is not int or after_sequence < 0:
             raise RemoteProtocolError("after_sequence must be non-negative")
-        window = self._event_stream.snapshot(after_sequence=after_sequence)
+        try:
+            window = self._event_stream.snapshot(after_sequence=after_sequence)
+        except EventStreamError as exc:
+            raise RemoteProtocolError(
+                f"event replay failed: {exc.code}"
+            ) from exc
         events: list[JsonObject] = []
         last_sequence = after_sequence
         for event in window.events[:100]:
@@ -470,6 +540,8 @@ class RemoteGateway:
                 break
             events.append(raw)
             last_sequence = projected.sequence
+        if window.events and not events:
+            raise RemoteRateLimitError("one replay Event exceeds the 1 MiB page limit")
         complete = last_sequence == window.latest_sequence
         queue.put_nowait(
             RemoteFrameCodec.encode(
@@ -524,7 +596,7 @@ class RemoteGateway:
                 details=details,
             )
         except RemoteAuditError:
-            self.ready = False
+            self.fail_closed()
             raise
 
 

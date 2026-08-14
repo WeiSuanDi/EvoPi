@@ -22,12 +22,14 @@ reviewable, and explicitly governed.
 EvoPi is a Python agent runtime built around a simple separation of concerns: a stable **Core**
 executes the agent loop, **Harnesses** assemble domain behavior, and **Policies** govern actions at
 explicit lifecycle hooks. The included CodingHarness turns that runtime into an installable CLI,
-while the same contracts remain available to custom Python hosts and local RPC clients.
+while the same contracts remain available to custom Python hosts, local RPC clients, and an
+optional authenticated Remote Gateway.
 
 > [!NOTE]
 > The latest release is **v0.2.0**. Windows users get a verified managed runtime, first-run model
 > setup, explicit updates, and offline rollback. macOS and Linux can install the same package with
-> pipx, Conda, or a virtual environment.
+> pipx, Conda, or a virtual environment. The current source tree targets **v0.3.0** and adds the
+> optional Remote Gateway described below; publishing still requires an explicit Release tag.
 
 ## What EvoPi gives you
 
@@ -35,7 +37,7 @@ while the same contracts remain available to custom Python hosts and local RPC c
 | --- | --- |
 | Typed streaming agent loop, Tool batches, Abort, deadlines, retries, Provider failover, and strict Turn budgets. | Hook-based Policies can allow, block, rewrite, validate, confirm, or terminate without creating a second execution path. |
 | **Durable host state** | **Controlled evolution** |
-| Session Tree v4, checkpoints, branch/merge, compaction, steering/follow-up, Trace v2, and strict local JSONL RPC. | Trace pattern discovery, evidence-bound candidate generation, isolated review, human approval, explicit activation, reload, and rollback. |
+| Session Tree v4, checkpoints, branch/merge, compaction, steering/follow-up, Trace v2, strict local JSONL RPC, and an optional authenticated WSS Gateway. | Trace pattern discovery, evidence-bound candidate generation, isolated review, human approval, explicit activation, reload, and rollback. |
 
 Additional product capabilities include:
 
@@ -52,7 +54,8 @@ Additional product capabilities include:
 
 ```mermaid
 flowchart LR
-    U["CLI / Python Host / RPC"] --> H["Harness"]
+    U["CLI / Python Host / local RPC"] --> H["Harness"]
+    R["Remote TLS / Device Trust / Lease"] --> U
     H --> C["Core Agent Loop"]
     C --> M["Model Route"]
     C --> T["Tool Registry"]
@@ -538,6 +541,51 @@ overrides a Policy `block` or invokes a Tool directly, and duplicate or stale re
 closed. This is a trusted local stdio integration surface, not an authenticated remote service.
 See the [RPC v2 protocol and client contract](docs/RPC_V2_PROTOCOL.md).
 
+### Remote Gateway (optional)
+
+Remote Gateway exposes that same RPC v2 Host through authenticated WSS. It is a single-user,
+single-workspace control surface—not a multi-tenant cloud service and not another execution path.
+TLS, device authentication, `observe/control/confirm` scopes, and a single control lease sit in
+front of the existing CodingHarness, so Policy blocks and revision-bound Confirmation remain
+authoritative.
+
+Install the optional server dependencies in a normal Python environment:
+
+```bash
+pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@v0.3.0"
+```
+
+For the Windows managed runtime, download the installer and enable the feature explicitly, or add it
+to an existing managed installation:
+
+```powershell
+.\install.ps1 -Feature remote
+evopi update --enable-feature remote --yes
+```
+
+Initialize a Host locally, issue a short-lived pairing code, approve the pending device through the
+local management channel, and then serve behind a TLS reverse proxy:
+
+```powershell
+evopi remote init default --workspace C:\work\project
+evopi remote pair default
+evopi remote requests list default
+evopi remote requests approve default REQUEST_ID --scope control --scope confirm
+evopi remote serve default --proxy --bind 127.0.0.1 --port 8765 `
+  --allowed-host agent.example.com --trusted-proxy 127.0.0.0/8
+```
+
+Direct non-loopback listening requires a certificate and private key and enforces TLS 1.2+. Browser
+Origins are exact-match allowlisted; Python clients omit Origin. In-process limits protect bounded
+application resources, while a reverse proxy, WAF, or tunnel remains responsible for volumetric
+DDoS. The opt-in console is enabled with `--console`; it cannot manage devices, Policies, Plugins,
+or Host configuration.
+
+`observe` may expose sensitive Agent Events, and `confirm` can approve high-risk actions. Device
+private keys, Session, Trace, and Remote Audit remain local security-sensitive material. See the
+[Remote design](docs/design/REMOTE_GATEWAY.md), [wire protocol](docs/REMOTE_PROTOCOL_V1.md), and
+[deployment examples](docs/deployment/remote/README.md).
+
 ### Policy pattern discovery
 
 EvoPi can turn repeated human Tool-confirmation decisions in historical Trace files into a
@@ -659,6 +707,8 @@ neutral unless a `PolicyActivationService` is supplied by its host.
 | [Plugin design](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1, review, immutable snapshots, state, UI, and reload. |
 | [CLI product](docs/design/CLI_PRODUCT.md) | Interactive workbench, automation, RPC, setup, and diagnostics. |
 | [RPC v2 protocol](docs/RPC_V2_PROTOCOL.md) | Strict JSONL envelopes, cursors, typed client, and local trust boundary. |
+| [Remote Gateway](docs/design/REMOTE_GATEWAY.md) | TLS, device trust, scopes, control lease, audit, clients, and threat boundary. |
+| [Remote Protocol v1](docs/REMOTE_PROTOCOL_V1.md) | WSS authentication, control frames, RPC v2 reuse, replay, and retry rules. |
 | [Distribution](docs/design/DISTRIBUTION.md) | GitHub Releases, managed Windows runtime, update, and rollback. |
 
 ## Development

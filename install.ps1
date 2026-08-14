@@ -3,6 +3,8 @@ param(
     [string]$InstallRoot = (Join-Path $HOME ".evopi"),
     [string]$LocalReleaseDirectory,
     [string]$LocalVersion,
+    [ValidateSet("remote")]
+    [string[]]$Feature = @(),
     [switch]$SkipPathUpdate
 )
 
@@ -126,6 +128,20 @@ function Set-EvoPiUserPath([string]$BinDirectory) {
     }
 }
 
+function Get-EvoPiRuntimeId([string]$Version, [string[]]$Features) {
+    $selected = @($Features | Sort-Object -Unique)
+    if ($selected.Count -eq 0) { return $Version }
+    $featureText = $selected -join ","
+    $bytes = [Text.Encoding]::ASCII.GetBytes($featureText)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+    return "$Version--$($selected -join '-')-$($digest.Substring(0, 8))"
+}
+
 $python = Get-EvoPiPython
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ("evopi-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporary | Out-Null
@@ -143,16 +159,56 @@ try {
     $digest = Test-EvoPiWheel $release $python
     $versionsRoot = Join-Path $runtimeRoot "versions"
     $currentPath = Join-Path $runtimeRoot "current.txt"
-    $target = Join-Path $versionsRoot $release.Version
+    $preservedFeatures = @()
+    if (Test-Path -LiteralPath $currentPath) {
+        $currentRuntimeId = (Get-Content -LiteralPath $currentPath -Raw).Trim()
+        $currentMarker = Join-Path (Join-Path $versionsRoot $currentRuntimeId) ".evopi-runtime.json"
+        if (Test-Path -LiteralPath $currentMarker -PathType Leaf) {
+            try {
+                $marker = Get-Content -LiteralPath $currentMarker -Raw | ConvertFrom-Json
+                $preservedFeatures = @($marker.features | Where-Object { $_ -eq "remote" })
+            } catch {
+                throw "The current EvoPi runtime marker is invalid"
+            }
+        }
+    }
+    $selectedFeatures = @($preservedFeatures + $Feature | Sort-Object -Unique)
+    $runtimeId = Get-EvoPiRuntimeId $release.Version $selectedFeatures
+    $target = Join-Path $versionsRoot $runtimeId
     if ((Test-Path -LiteralPath $currentPath) -and
-        ((Get-Content -LiteralPath $currentPath -Raw).Trim() -eq $release.Version) -and
+        ((Get-Content -LiteralPath $currentPath -Raw).Trim() -eq $runtimeId) -and
         (Test-Path -LiteralPath (Join-Path $target ".evopi-runtime.json"))) {
-        Write-Host "EvoPi $($release.Version) is already installed."
+        Write-Host "EvoPi $($release.Version) is already installed with the requested features."
     } else {
         New-Item -ItemType Directory -Force -Path $versionsRoot | Out-Null
         if ((Test-Path -LiteralPath $target) -and
             -not (Test-Path -LiteralPath (Join-Path $target ".evopi-runtime.json"))) {
             throw "The target runtime exists without a verification marker"
+        }
+        if (Test-Path -LiteralPath $target) {
+            try {
+                $existingMarker = Get-Content -LiteralPath (Join-Path $target ".evopi-runtime.json") -Raw | ConvertFrom-Json
+            } catch {
+                throw "The target runtime verification marker is invalid"
+            }
+            $existingFeatures = @($existingMarker.features | Sort-Object -Unique)
+            $expectedFeatureText = $selectedFeatures -join ","
+            $actualFeatureText = $existingFeatures -join ","
+            $propertyText = @($existingMarker.PSObject.Properties.Name | Sort-Object) -join ","
+            $validSchema = ($existingMarker.schema_version -eq 2) -or
+                (($existingMarker.schema_version -eq 1) -and $selectedFeatures.Count -eq 0)
+            $expectedProperties = if ($existingMarker.schema_version -eq 2) {
+                "features,schema_version,sha256,version"
+            } else {
+                "schema_version,sha256,version"
+            }
+            if (-not $validSchema -or
+                $propertyText -ne $expectedProperties -or
+                $existingMarker.version -ne $release.Version -or
+                $existingMarker.sha256 -ne $digest -or
+                $actualFeatureText -ne $expectedFeatureText) {
+                throw "The target runtime verification marker does not match the Release"
+            }
         }
         if (-not (Test-Path -LiteralPath $target)) {
             try {
@@ -160,7 +216,12 @@ try {
                 if ($LASTEXITCODE -ne 0) { throw "Unable to create the EvoPi runtime" }
                 $runtimePython = Join-Path $target "Scripts\python.exe"
                 $runtimeExe = Join-Path $target "Scripts\evopi.exe"
-                & $runtimePython -m pip install --disable-pip-version-check $release.WheelPath
+                $wheelSpec = if ($selectedFeatures.Count -gt 0) {
+                    "$($release.WheelPath)[$($selectedFeatures -join ',')]"
+                } else {
+                    $release.WheelPath
+                }
+                & $runtimePython -m pip install --disable-pip-version-check $wheelSpec
                 if ($LASTEXITCODE -ne 0) { throw "Unable to install the EvoPi wheel" }
                 & $runtimePython -c "import evopi"
                 if ($LASTEXITCODE -ne 0) { throw "EvoPi import smoke test failed" }
@@ -168,7 +229,16 @@ try {
                 if ($LASTEXITCODE -ne 0) { throw "EvoPi version smoke test failed" }
                 & $runtimeExe --help *> $null
                 if ($LASTEXITCODE -ne 0) { throw "EvoPi help smoke test failed" }
-                @{ schema_version = 1; version = $release.Version; sha256 = $digest } |
+                if ($selectedFeatures -contains "remote") {
+                    & $runtimeExe remote serve --help *> $null
+                    if ($LASTEXITCODE -ne 0) { throw "EvoPi Remote help smoke test failed" }
+                }
+                @{
+                    schema_version = 2
+                    version = $release.Version
+                    features = $selectedFeatures
+                    sha256 = $digest
+                } |
                     ConvertTo-Json -Compress |
                     Set-Content -LiteralPath (Join-Path $target ".evopi-runtime.json") -Encoding UTF8
             } catch {
@@ -177,7 +247,7 @@ try {
             }
         }
         $pointerTemp = Join-Path $runtimeRoot (".current." + [guid]::NewGuid().ToString("N"))
-        $release.Version | Set-Content -LiteralPath $pointerTemp -Encoding ASCII
+        $runtimeId | Set-Content -LiteralPath $pointerTemp -Encoding ASCII
         Move-Item -LiteralPath $pointerTemp -Destination $currentPath -Force
         Write-Host "Installed EvoPi $($release.Version) from $($release.ReleaseUrl)"
         $versions = @(Get-ChildItem -LiteralPath $versionsRoot -Directory | Where-Object {

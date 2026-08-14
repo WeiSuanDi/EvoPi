@@ -1,5 +1,9 @@
 # Harness 设计笔记
 
+> Remote Gateway 共享一个普通 `CodingHarness`。Remote Scope 只决定设备可请求哪些 RPC
+> 方法，Harness Policy 与 Confirmation 仍是最终裁决者；传输层不得直接调用 Tool 或修改
+> Session。
+
 Harness 是 EvoPi 的运行治理框架。
 
 它包在 Core 外面，负责把一个“能跑的 Agent Loop”组织成一个“可治理、可扩展、可产品化”的 Agent Runtime。

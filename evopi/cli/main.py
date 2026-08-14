@@ -40,7 +40,6 @@ from evopi.cli.product import (
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
-from evopi.cli.remote import remote_main
 from evopi.cli.rpc import run_stdio_rpc
 from evopi.cli.repl import (
     ReplCommandContext,
@@ -342,6 +341,8 @@ def _build_harness(
         model_options["max_tokens"] = args.max_output_tokens
     if getattr(args, "base_url", None) is not None:
         model_options["base_url"] = args.base_url
+    if getattr(args, "model_profile", None) is not None:
+        model_options["profile_name"] = args.model_profile
     fallback_values = fallback_values_from_args(args)
     if fallback_values or getattr(args, "no_failover", False):
         model, model_route, _ = build_model_runtime(args)
@@ -442,6 +443,7 @@ def model_from_environment(
     base_url: str | None = None,
     context_window: int = 0,
     max_tokens: int = 4096,
+    profile_name: str | None = None,
 ) -> Model:
     """Compatibility seam backed by the CLI's persisted configuration resolver."""
 
@@ -449,6 +451,7 @@ def model_from_environment(
         provider,
         model=model,
         base_url=base_url,
+        profile_name=profile_name,
         require_complete=True,
     )
     return model_from_config(
@@ -768,8 +771,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"EvoPi update error: {exc}", file=sys.stderr)
             return 1
+    if raw_args[:2] == ["remote", "serve"]:
+        try:
+            return _remote_serve_main(raw_args[2:])
+        except KeyboardInterrupt:
+            print("\nEvoPi Remote Gateway stopped.", file=sys.stderr)
+            return 130
+        except (OSError, ValueError, RuntimeError, RpcError) as exc:
+            print(f"EvoPi remote error: {exc}", file=sys.stderr)
+            return 1
     if raw_args[:1] == ["remote"]:
         try:
+            from evopi.cli.remote import remote_main
+
             return remote_main(raw_args[1:])
         except KeyboardInterrupt:
             print("\nEvoPi remote command aborted.", file=sys.stderr)
@@ -872,6 +886,74 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nEvoPi aborted.")
         return 130
+
+
+def _remote_serve_main(argv: Sequence[str]) -> int:
+    from evopi.cli.remote import build_remote_serve_parser
+    from evopi.configuration import resolve_user_config_home
+    from evopi.remote import (
+        RemoteGatewayConfig,
+        RemoteHostStore,
+        ensure_tls_files,
+        serve_remote_gateway,
+    )
+
+    remote_args, runtime_argv = build_remote_serve_parser().parse_known_args(list(argv))
+    runtime_parser = build_parser()
+    runtime_parser.prog = "evopi remote serve"
+    runtime_args = runtime_parser.parse_args(runtime_argv)
+    if runtime_args.prompt is not None:
+        raise ValueError("Remote Gateway does not accept a positional prompt")
+    root = remote_args.remote_root or resolve_user_config_home() / "remote"
+    store = RemoteHostStore(root)
+    host_config = store.load_config(remote_args.name)
+    runtime_args.workspace = host_config.workspace
+    runtime_args.model_profile = host_config.model_profile
+    allowed_hosts = tuple(remote_args.allowed_hosts or ())
+    if not allowed_hosts:
+        if remote_args.bind in {"127.0.0.1", "::1"}:
+            allowed_hosts = ("localhost", "127.0.0.1", "::1")
+        else:
+            raise ValueError("non-loopback Remote serve requires --allowed-host")
+    gateway_config = RemoteGatewayConfig(
+        bind=remote_args.bind,
+        port=remote_args.port,
+        proxy_mode=remote_args.proxy_mode,
+        cert_file=remote_args.cert,
+        key_file=remote_args.key,
+        trusted_proxy_cidrs=tuple(
+            remote_args.trusted_proxies or ("127.0.0.0/8", "::1/128")
+        ),
+        allowed_hosts=allowed_hosts,
+        allowed_origins=tuple(remote_args.allowed_origins or ()),
+        console_enabled=remote_args.console,
+        max_connections=remote_args.max_connections,
+        max_connections_per_ip=remote_args.max_connections_per_ip,
+        max_connections_per_device=remote_args.max_connections_per_device,
+        max_outbound_items=remote_args.max_outbound_items,
+        max_outbound_bytes=remote_args.max_outbound_bytes,
+        handshake_rate_per_minute=remote_args.handshake_rate,
+        pairing_rate_per_minute=remote_args.pairing_rate,
+        request_rate_per_minute=remote_args.request_rate,
+        run_rate_per_minute=remote_args.run_rate,
+        confirmation_rate_per_minute=remote_args.confirmation_rate,
+    )
+    ensure_tls_files(gateway_config)
+    broker = ConfirmationBroker(InMemoryConfirmationStore())
+    harness = _build_harness(
+        runtime_args,
+        confirmation_handler=None,
+        confirmation_broker=broker,
+    )
+    return asyncio.run(
+        serve_remote_gateway(
+            harness,
+            broker,
+            store=store,
+            host_name=remote_args.name,
+            gateway_config=gateway_config,
+        )
+    )
 
 
 def _read_piped_stdin() -> str:

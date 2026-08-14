@@ -2,8 +2,11 @@ const status = document.querySelector("#status");
 const output = document.querySelector("#output");
 const runButton = document.querySelector("#run");
 const abortButton = document.querySelector("#abort");
+const steerButton = document.querySelector("#steer");
+const followUpButton = document.querySelector("#follow-up");
 let socket;
 let activeRunId;
+let deviceScopes = [];
 const pending = new Map();
 
 function append(value) {
@@ -30,9 +33,14 @@ function receive(event) {
       output.textContent += message.data.delta ?? "";
     } else if (message.type === "confirmation_state_changed") {
       append(`Confirmation ${message.data.request_id}: ${message.data.status}`);
+      if (message.data.status === "pending" && deviceScopes.includes("confirm")) {
+        processConfirmations();
+      }
     } else if (message.type === "agent_end") {
       activeRunId = undefined;
       abortButton.disabled = true;
+      steerButton.disabled = true;
+      followUpButton.disabled = true;
       append(`\nRun ended: ${message.data.end_reason}`);
     }
     return;
@@ -67,7 +75,9 @@ document.querySelector("#connect").addEventListener("click", async () => {
       await sendRemote("lease.acquire", {});
       status.textContent = `Authenticated as ${deviceId}`;
       runButton.disabled = false;
-      append(`Scopes: ${(authenticated.data.scopes ?? []).join(", ")}`);
+      deviceScopes = authenticated.data.scopes ?? [];
+      if (deviceScopes.includes("confirm")) processConfirmations();
+      append(`Scopes: ${deviceScopes.join(", ")}`);
     } catch (error) {
       append(error instanceof Error ? error.message : "Authentication failed");
       socket.close(1008, "authentication failed");
@@ -103,11 +113,38 @@ runButton.addEventListener("click", async () => {
   const result = await sendRpc("run.start", { prompt });
   activeRunId = result.run_id;
   abortButton.disabled = false;
+  steerButton.disabled = false;
+  followUpButton.disabled = false;
 });
 
 abortButton.addEventListener("click", async () => {
   if (activeRunId) await sendRpc("run.abort", { run_id: activeRunId });
 });
+
+steerButton.addEventListener("click", async () => {
+  const content = document.querySelector("#interaction").value;
+  if (activeRunId && content) await sendRpc("run.steer", { run_id: activeRunId, content });
+});
+
+followUpButton.addEventListener("click", async () => {
+  const content = document.querySelector("#interaction").value;
+  if (activeRunId && content) await sendRpc("run.follow_up", { run_id: activeRunId, content });
+});
+
+async function processConfirmations() {
+  const result = await sendRpc("confirmation.list", {});
+  for (const record of result.pending ?? []) {
+    const request = record.request;
+    const approved = window.confirm(`Approve ${request.tool_name ?? request.hook}?\n${request.reason}`);
+    await sendRpc("confirmation.respond", {
+      request_id: request.id,
+      expected_revision: record.revision,
+      decision: approved ? "approve" : "deny",
+      reason: "answered by EvoPi Remote console",
+      metadata: {},
+    });
+  }
+}
 
 async function getOrCreateIdentity() {
   const existing = await loadIdentity();

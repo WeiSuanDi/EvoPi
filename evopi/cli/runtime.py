@@ -55,6 +55,7 @@ def build_model_runtime(
         getattr(args, "provider", None),
         model=getattr(args, "model", None),
         base_url=getattr(args, "base_url", None),
+        profile_name=getattr(args, "model_profile", None),
         require_complete=True,
     )
     fallback_resolved = tuple(

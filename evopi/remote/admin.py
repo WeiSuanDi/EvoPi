@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
@@ -204,6 +205,7 @@ class RemoteAdminServer:
         self.secret = secret
         self.handler = handler
         self._listener: Listener | None = None
+        self._closing = threading.Event()
 
     def serve_once(self) -> None:
         listener = Listener(
@@ -222,8 +224,31 @@ class RemoteAdminServer:
             self._listener = None
 
     def close(self) -> None:
+        self._closing.set()
         if self._listener is not None:
             self._listener.close()
+
+    def serve_forever(self) -> None:
+        listener = Listener(
+            self.endpoint.address,
+            family=self.endpoint.family,
+            authkey=self.secret,
+        )
+        self._listener = listener
+        if self.endpoint.family == "AF_UNIX":
+            os.chmod(self.endpoint.address, 0o600)
+        try:
+            while not self._closing.is_set():
+                try:
+                    connection = listener.accept()
+                except (OSError, EOFError):
+                    if self._closing.is_set():
+                        return
+                    raise
+                self._handle(connection)
+        finally:
+            listener.close()
+            self._listener = None
 
     def _handle(self, connection: Any) -> None:
         try:

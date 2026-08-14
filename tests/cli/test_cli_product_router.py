@@ -50,7 +50,7 @@ def test_management_group_help_lists_supported_actions(
 
 def test_version_uses_package_version(capsys) -> None:
     assert cli_main.main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == "EvoPi 0.2.0"
+    assert capsys.readouterr().out.strip() == "EvoPi 0.3.0"
 
 
 def test_run_prompt_combines_pipe_and_argument() -> None:

@@ -21,11 +21,12 @@
 EvoPi 是一个职责分层清晰的 Python Agent Runtime：稳定的 **Core** 执行 Agent 主循环，
 **Harness** 组装领域行为，**Policy** 在明确的生命周期 Hook 上治理具体动作。内置的
 CodingHarness 将这套 Runtime 组装为可安装 CLI；同样的协议也可供自定义 Python 宿主和
-本地 RPC 客户端使用。
+本地 RPC 客户端以及可选的认证 Remote Gateway 使用。
 
 > [!NOTE]
 > 当前最新版本为 **v0.2.0**。Windows 用户可使用经过校验的受管 Runtime、首次模型配置、
 > 显式更新与离线回滚；macOS 与 Linux 可通过 pipx、Conda 或虚拟环境安装同一 Python 包。
+> 当前源码面向 **v0.3.0**，新增下文所述的可选 Remote Gateway；正式发布仍需显式创建 Tag。
 
 ## EvoPi 提供什么
 
@@ -33,7 +34,7 @@ CodingHarness 将这套 Runtime 组装为可安装 CLI；同样的协议也可�
 | --- | --- |
 | 类型化流式 Agent Loop、Tool 批次、Abort、Deadline、Retry、Provider Failover 与严格 Turn 预算。 | Hook Policy 可以允许、阻断、改写、验证、确认或终止，同时不建立第二条执行旁路。 |
 | **持久宿主状态** | **受控演进闭环** |
-| Session Tree v4、Checkpoint、Branch/Merge、Compaction、Steering/Follow-up、Trace v2 与严格本地 JSONL RPC。 | Trace 模式发现、证据绑定候选生成、隔离审查、人工批准、显式启用、重载与回滚。 |
+| Session Tree v4、Checkpoint、Branch/Merge、Compaction、Steering/Follow-up、Trace v2、严格本地 JSONL RPC 与可选认证 WSS Gateway。 | Trace 模式发现、证据绑定候选生成、隔离审查、人工批准、显式启用、重载与回滚。 |
 
 其他产品能力包括：
 
@@ -50,7 +51,8 @@ CodingHarness 将这套 Runtime 组装为可安装 CLI；同样的协议也可�
 
 ```mermaid
 flowchart LR
-    U["CLI / Python 宿主 / RPC"] --> H["Harness"]
+    U["CLI / Python 宿主 / 本地 RPC"] --> H["Harness"]
+    R["Remote TLS / 设备信任 / Lease"] --> U
     H --> C["Core Agent Loop"]
     C --> M["Model Route"]
     C --> T["Tool Registry"]
@@ -515,6 +517,47 @@ RPC 只能处理已经由 Policy 放入 Confirmation Broker 的请求，不能�
 也不能直接调用 Tool；重复或过期响应会 fail closed。该协议是同机受信 stdio 集成面，
 不是带认证的远程服务。完整契约见 [RPC v2 协议与客户端](docs/RPC_V2_PROTOCOL.md)。
 
+### Remote Gateway（可选）
+
+Remote Gateway 通过认证 WSS 暴露同一个 RPC v2 Host。它是单用户、单 Workspace 的控制面，
+不是多租户云服务，也不建立第二条执行通道。TLS、设备认证、`observe/control/confirm` Scope
+与唯一控制租约位于既有 CodingHarness 之前，因此 Policy Block 和 revision-bound
+Confirmation 始终具有最终权威。
+
+普通 Python 环境可安装可选服务端依赖：
+
+```bash
+pip install "evopi[remote] @ git+https://github.com/WeiSuanDi/EvoPi.git@v0.3.0"
+```
+
+Windows 受管 Runtime 可先下载安装器并显式启用 feature，或为已有安装补充 feature：
+
+```powershell
+.\install.ps1 -Feature remote
+evopi update --enable-feature remote --yes
+```
+
+在本机初始化 Host、签发短期配对码、通过本地管理通道批准 pending device，然后在 TLS
+反向代理后启动：
+
+```powershell
+evopi remote init default --workspace C:\work\project
+evopi remote pair default
+evopi remote requests list default
+evopi remote requests approve default REQUEST_ID --scope control --scope confirm
+evopi remote serve default --proxy --bind 127.0.0.1 --port 8765 `
+  --allowed-host agent.example.com --trusted-proxy 127.0.0.0/8
+```
+
+非 loopback 直连必须提供证书和私钥，并至少使用 TLS 1.2。浏览器 Origin 精确匹配
+allowlist；Python Client 不发送 Origin。进程内限制只保护有界应用资源，体量型 DDoS 仍应
+交给反向代理、WAF 或 Tunnel。`--console` 显式开启的最小控制台不能管理设备、Policy、
+Plugin 或 Host 配置。
+
+`observe` 可能读取敏感 Agent Event，`confirm` 可以批准高风险动作。设备私钥、Session、
+Trace 与 Remote Audit 都是本地敏感材料。详见 [Remote 设计](docs/design/REMOTE_GATEWAY.md)、
+[线协议](docs/REMOTE_PROTOCOL_V1.md)与[部署样例](docs/deployment/remote/README.md)。
+
 ### Policy 模式发现
 
 EvoPi 可以把历史 Trace 中反复出现的人工 Tool Confirmation 决策整理成确定性、可审查
@@ -630,6 +673,8 @@ Policy。同名替换内置或 Plugin Policy 时必须绑定目标名称和当�
 | [Plugin 设计](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1、审查、不可变快照、状态、UI 与重载。 |
 | [CLI 产品](docs/design/CLI_PRODUCT.md) | 交互工作台、自动化、RPC、Setup 与诊断。 |
 | [RPC v2 协议](docs/RPC_V2_PROTOCOL.md) | 严格 JSONL、游标、类型化客户端与本地信任边界。 |
+| [Remote Gateway](docs/design/REMOTE_GATEWAY.md) | TLS、设备信任、Scope、控制租约、Audit、客户端与威胁边界。 |
+| [Remote Protocol v1](docs/REMOTE_PROTOCOL_V1.md) | WSS 认证、控制帧、RPC v2 复用、Replay 与重试规则。 |
 | [发行设计](docs/design/DISTRIBUTION.md) | GitHub Release、Windows 受管 Runtime、更新与回滚。 |
 
 ## 开发

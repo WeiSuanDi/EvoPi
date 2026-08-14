@@ -9,7 +9,7 @@ on:
       release_tag:
         description: "Version tag to validate without publishing"
         required: true
-        default: "v0.2.0"
+        default: "v0.3.0"
 
 env:
   EVOPI_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,remote]"
       - run: python scripts/check_release.py --tag "${{ env.EVOPI_RELEASE_TAG }}"
       - run: python -m ruff check .
       - run: python -m mypy
@@ -53,12 +53,14 @@ jobs:
       - name: Verify wheel package data and clean install
         run: |
           python -m venv wheel-test
-          wheel-test/bin/python -m pip install dist/evopi-*.whl
-          wheel-test/bin/python -c "import importlib.resources as r; import evopi; assert r.files('evopi.plugins').joinpath('sdk_templates').is_dir(); assert r.files('evopi.evolution').joinpath('policy_templates').is_dir()"
+          wheel=$(echo dist/evopi-*.whl)
+          wheel-test/bin/python -m pip install "${wheel}[remote]"
+          wheel-test/bin/python -c "import importlib.resources as r; import evopi; assert r.files('evopi.plugins').joinpath('sdk_templates').is_dir(); assert r.files('evopi.evolution').joinpath('policy_templates').is_dir(); assert r.files('evopi.remote').joinpath('console/index.html').is_file()"
           wheel-test/bin/evopi --version
           wheel-test/bin/evopi --help
           wheel-test/bin/evopi setup --help
           wheel-test/bin/evopi update --help
+          wheel-test/bin/evopi remote serve --help
       - name: Generate release checksums
         run: |
           cp install.ps1 dist/install.ps1
@@ -83,9 +85,10 @@ jobs:
         run: |
           $version = "${{ env.EVOPI_RELEASE_TAG }}".Substring(1)
           $env:EVOPI_INSTALL_TESTING = "1"
-          ./install.ps1 -InstallRoot "$env:RUNNER_TEMP\evopi-managed" -LocalReleaseDirectory "$PWD\release-assets" -LocalVersion $version -SkipPathUpdate
+          ./install.ps1 -InstallRoot "$env:RUNNER_TEMP\evopi-managed" -LocalReleaseDirectory "$PWD\release-assets" -LocalVersion $version -Feature remote -SkipPathUpdate
           & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --version
           & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" --help
+          & "$env:RUNNER_TEMP\evopi-managed\bin\evopi.cmd" remote serve --help
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

@@ -1,5 +1,9 @@
 # EvoPi 全局架构图景
 
+> Remote 是最外层信任与传输边界：TLS、设备认证、Scope 与控制租约之后仍进入同一个
+> RPC v2 Host 和 CodingHarness，不建立第二条 Tool 或授权通道。详见
+> [REMOTE_GATEWAY.md](REMOTE_GATEWAY.md)。
+
 本文件用于固定当前阶段对 EvoPi 最终形态的理解。
 
 ## 一句话定位

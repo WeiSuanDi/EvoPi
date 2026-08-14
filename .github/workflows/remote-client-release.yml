@@ -1,0 +1,58 @@
+name: Remote Client Release
+
+on:
+  push:
+    tags:
+      - "remote-client-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Remote client tag to validate without publishing"
+        required: true
+        default: "remote-client-v0.1.0"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/remote-client
+    env:
+      REMOTE_CLIENT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: packages/remote-client/package-lock.json
+      - name: Verify tag matches package version
+        run: node -e "const p=require('./package.json'); if (process.env.REMOTE_CLIENT_TAG !== 'remote-client-v'+p.version) process.exit(1)"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm pack --dry-run
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/remote-client-v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/remote-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --access public --provenance

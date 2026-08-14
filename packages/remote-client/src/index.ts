@@ -35,6 +35,30 @@ export interface RpcV2Event {
   created_at: string;
 }
 
+export interface RpcEventCursor {
+  stream_id: string;
+  sequence: number;
+}
+
+export interface RemoteEventPage {
+  stream_id: string;
+  after_sequence: number;
+  snapshot_latest: number;
+  next_sequence: number;
+  complete: boolean;
+  events: RpcV2Event[];
+}
+
+export interface RpcConfirmationRecord {
+  schema_version: 1;
+  request: Record<string, unknown>;
+  status: string;
+  runtime_id: string;
+  revision: number;
+  response: Record<string, unknown> | null;
+  updated_at: string;
+}
+
 export interface DeviceIdentity {
   publicJwk: JsonWebKey;
   privateKey: CryptoKey;
@@ -101,19 +125,80 @@ function requestId(): string {
   return crypto.randomUUID().replaceAll("-", "");
 }
 
+export async function submitPairing(
+  url: string,
+  code: string,
+  deviceName: string,
+  publicJwk: JsonWebKey,
+): Promise<string> {
+  const socket = new WebSocket(url, REMOTE_SUBPROTOCOL);
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(), { once: true });
+    socket.addEventListener("error", () => reject(new RemoteProtocolError("WSS failed")), {
+      once: true,
+    });
+  });
+  const id = requestId();
+  try {
+    socket.send(
+      JSON.stringify({
+        schema_version: 1,
+        type: "pairing.submit",
+        request_id: id,
+        data: { code, device_name: deviceName, public_jwk: publicJwk },
+      }),
+    );
+    const frame = await new Promise<RemoteFrame>((resolve, reject) => {
+      socket.addEventListener(
+        "message",
+        (event) => {
+          if (typeof event.data !== "string") {
+            reject(new RemoteProtocolError("text frame required"));
+            return;
+          }
+          resolve(JSON.parse(event.data) as RemoteFrame);
+        },
+        { once: true },
+      );
+      socket.addEventListener(
+        "close",
+        () => reject(new RemoteProtocolError("remote connection closed")),
+        { once: true },
+      );
+    });
+    const pendingId = frame.data.request_id;
+    if (frame.type !== "pairing.pending" || frame.request_id !== id || typeof pendingId !== "string") {
+      throw new RemoteProtocolError("invalid pairing response");
+    }
+    return pendingId;
+  } finally {
+    socket.close(1000, "pairing submitted");
+  }
+}
+
 export class EvoPiRemoteClient extends EventTarget {
   readonly socket: WebSocket;
   readonly deviceId: string;
   scopes: readonly DeviceScope[] = [];
+  serverInfo: Record<string, unknown> | undefined;
+  private readonly url: string;
+  private readonly privateKey: CryptoKey;
+  private readonly eventQueue: RpcV2Event[] = [];
+  private readonly eventWaiters: Array<{
+    resolve: (value: RpcV2Event) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
   private readonly pending = new Map<
     string,
     { resolve: (value: unknown) => void; reject: (reason: unknown) => void; sideEffect: boolean }
   >();
 
-  private constructor(socket: WebSocket, deviceId: string) {
+  private constructor(socket: WebSocket, url: string, deviceId: string, privateKey: CryptoKey) {
     super();
     this.socket = socket;
+    this.url = url;
     this.deviceId = deviceId;
+    this.privateKey = privateKey;
     socket.addEventListener("message", (event) => this.receive(event.data));
     socket.addEventListener("close", () => this.disconnect());
   }
@@ -131,7 +216,7 @@ export class EvoPiRemoteClient extends EventTarget {
         once: true,
       });
     });
-    const client = new EvoPiRemoteClient(socket, deviceId);
+    const client = new EvoPiRemoteClient(socket, url, deviceId, privateKey);
     const challenge = await client.remoteRequest("auth.begin", { device_id: deviceId });
     if (challenge.type !== "auth.challenge" || typeof challenge.data.challenge !== "object") {
       throw new RemoteProtocolError("invalid auth challenge");
@@ -149,7 +234,12 @@ export class EvoPiRemoteClient extends EventTarget {
   }
 
   async initialize(clientName = "evopi-typescript", clientVersion = "0.1.0") {
-    return this.rpcRequest("initialize", { client_name: clientName, client_version: clientVersion });
+    const result = await this.rpcRequest("initialize", {
+      client_name: clientName,
+      client_version: clientVersion,
+    });
+    this.serverInfo = result;
+    return result;
   }
 
   async acquireControl() {
@@ -158,6 +248,10 @@ export class EvoPiRemoteClient extends EventTarget {
 
   async renewControl() {
     return this.remoteRequest("lease.renew", {}, true);
+  }
+
+  async releaseControl() {
+    return this.remoteRequest("lease.release", {}, true);
   }
 
   async startRun(prompt: string) {
@@ -178,6 +272,74 @@ export class EvoPiRemoteClient extends EventTarget {
 
   async respondConfirmation(answer: Record<string, unknown>) {
     return this.rpcRequest("confirmation.respond", answer, true);
+  }
+
+  async listConfirmations(): Promise<readonly RpcConfirmationRecord[]> {
+    const result = await this.rpcRequest("confirmation.list", {});
+    if (!Array.isArray(result.pending)) {
+      throw new RemoteProtocolError("invalid confirmation list");
+    }
+    return result.pending as RpcConfirmationRecord[];
+  }
+
+  async replayEvents(after: RpcEventCursor): Promise<RemoteEventPage> {
+    const frame = await this.remoteRequest("events.page", {
+      stream_id: after.stream_id,
+      after_sequence: after.sequence,
+    });
+    if (frame.type !== "events.page" || !Array.isArray(frame.data.events)) {
+      throw new RemoteProtocolError("invalid Remote event page");
+    }
+    return frame.data as unknown as RemoteEventPage;
+  }
+
+  async *events(): AsyncGenerator<RpcV2Event> {
+    while (this.socket.readyState !== WebSocket.CLOSED || this.eventQueue.length > 0) {
+      if (this.eventQueue.length > 0) {
+        yield this.eventQueue.shift() as RpcV2Event;
+        continue;
+      }
+      yield await new Promise<RpcV2Event>((resolve, reject) => {
+        this.eventWaiters.push({ resolve, reject });
+      });
+    }
+  }
+
+  async *resilientEvents(after: RpcEventCursor): AsyncGenerator<RpcV2Event> {
+    let client: EvoPiRemoteClient = this;
+    let cursor = after;
+    for (;;) {
+      try {
+        let page: RemoteEventPage;
+        do {
+          page = await client.replayEvents(cursor);
+          for (const event of page.events) {
+            if (event.stream_id !== cursor.stream_id || event.sequence <= cursor.sequence) continue;
+            cursor = { stream_id: event.stream_id, sequence: event.sequence };
+            yield event;
+          }
+        } while (!page.complete);
+        for await (const event of client.events()) {
+          if (event.stream_id !== cursor.stream_id) {
+            throw new RemoteProtocolError("Remote Host event stream changed");
+          }
+          if (event.sequence <= cursor.sequence) continue;
+          cursor = { stream_id: event.stream_id, sequence: event.sequence };
+          yield event;
+        }
+      } catch (error) {
+        if (!(error instanceof RemoteProtocolError) || error.message !== "remote connection closed") {
+          throw error;
+        }
+      }
+      client = await EvoPiRemoteClient.connect(this.url, this.deviceId, this.privateKey);
+      const initialized = await client.initialize();
+      const stream = initialized.stream as Record<string, unknown> | undefined;
+      if (stream?.stream_id !== cursor.stream_id) {
+        client.close();
+        throw new RemoteProtocolError("Remote Host event stream changed");
+      }
+    }
   }
 
   close(): void {
@@ -224,7 +386,11 @@ export class EvoPiRemoteClient extends EventTarget {
     }
     const value = JSON.parse(data) as Record<string, unknown>;
     if (value.schema_version === 2 && "event_id" in value) {
-      this.dispatchEvent(new CustomEvent("event", { detail: value as unknown as RpcV2Event }));
+      const event = value as unknown as RpcV2Event;
+      const waiter = this.eventWaiters.shift();
+      if (waiter === undefined) this.eventQueue.push(event);
+      else waiter.resolve(event);
+      this.dispatchEvent(new CustomEvent("event", { detail: event }));
       return;
     }
     const id = value.request_id;
@@ -244,5 +410,8 @@ export class EvoPiRemoteClient extends EventTarget {
       );
     }
     this.pending.clear();
+    const failure = new RemoteProtocolError("remote connection closed");
+    for (const waiter of this.eventWaiters) waiter.reject(failure);
+    this.eventWaiters.length = 0;
   }
 }

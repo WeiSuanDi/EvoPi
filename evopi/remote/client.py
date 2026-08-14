@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,7 +22,9 @@ from evopi.rpc import (
     RpcRunResult,
     RpcRuntimeStatus,
     decode_v2_envelope,
+    decode_v2_event,
 )
+from evopi.rpc.client_codec import client_event_from_wire
 
 from .crypto import sign_auth_challenge
 from .errors import RemoteConnectionError, RemoteOutcomeUnknownError
@@ -49,6 +52,43 @@ class RemoteLeaseInfo:
     connection_id: str
     expires_at: datetime
     revision: int
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RemotePairingSubmission:
+    request_id: str
+
+
+async def submit_remote_pairing(
+    socket: RemoteWebSocket,
+    *,
+    code: str,
+    device_name: str,
+    public_jwk: dict[str, str],
+    timeout: float = 30.0,
+) -> RemotePairingSubmission:
+    """Submit a public key for local approval without creating a trusted client."""
+
+    request_id = uuid4().hex
+    await socket.send(
+        RemoteFrameCodec.encode(
+            remote_frame(
+                "pairing.submit",
+                request_id,
+                {"code": code, "device_name": device_name, "public_jwk": public_jwk},
+            )
+        )
+    )
+    response = RemoteFrameCodec.decode(await asyncio.wait_for(socket.recv(), timeout=timeout))
+    pending_id = response.data.get("request_id")
+    if (
+        response.type != "pairing.pending"
+        or response.request_id != request_id
+        or not isinstance(pending_id, str)
+        or not pending_id
+    ):
+        raise RemoteProtocolError("Gateway returned an invalid pairing response")
+    return RemotePairingSubmission(request_id=pending_id)
 
 
 class _RpcReader:
@@ -142,8 +182,9 @@ class _RemoteTransport:
 
 
 class RemoteRunHandle:
-    def __init__(self, handle: RpcRunHandle) -> None:
+    def __init__(self, handle: RpcRunHandle, client: EvoPiRemoteClient) -> None:
         self._handle = handle
+        self._client = client
         self.run_id = handle.run_id
 
     @property
@@ -151,8 +192,11 @@ class RemoteRunHandle:
         return self._handle.done
 
     async def events(self) -> AsyncIterator[RpcClientEvent]:
-        async for event in self._handle.events():
-            yield event
+        async for event in self._client.events(after=self._handle.start_cursor):
+            if event.run_id == self.run_id:
+                yield event
+                if event.event_type == "agent_end":
+                    return
 
     async def wait(self) -> RpcRunResult:
         return await self._handle.wait()
@@ -294,12 +338,16 @@ class EvoPiRemoteClient:
 
     async def start_run(self, prompt: str) -> RemoteRunHandle:
         handle = await _unknown_on_disconnect("run.start", self.rpc.start_run(prompt))
-        return RemoteRunHandle(cast(RpcRunHandle, handle))
+        return RemoteRunHandle(cast(RpcRunHandle, handle), self)
 
     async def events(
         self, *, after: RpcEventCursor | None = None
     ) -> AsyncIterator[RpcClientEvent]:
-        async for event in self.rpc.events(after=after):
+        cursor = after or self.rpc.server_info.cursor
+        async for event in self._replay_pages(cursor):
+            cursor = event.cursor
+            yield event
+        async for event in self.rpc.live_events(cursor):
             yield event
 
     async def resilient_events(
@@ -310,7 +358,7 @@ class EvoPiRemoteClient:
         cursor = after or self.rpc.server_info.cursor
         while True:
             try:
-                async for event in self.rpc.events(after=cursor):
+                async for event in self.events(after=cursor):
                     cursor = event.cursor
                     yield event
                 return
@@ -345,6 +393,51 @@ class EvoPiRemoteClient:
         self.rpc = replacement.rpc
         self._transport = replacement._transport
 
+    async def _replay_pages(
+        self, cursor: RpcEventCursor
+    ) -> AsyncIterator[RpcClientEvent]:
+        expected = cursor.sequence + 1
+        while True:
+            frame = await self._transport.request(
+                "events.page",
+                {
+                    "stream_id": cursor.stream_id,
+                    "after_sequence": cursor.sequence,
+                },
+            )
+            if frame.type != "events.page":
+                raise RemoteProtocolError("Gateway returned an invalid event page")
+            raw_events = frame.data.get("events")
+            next_sequence = frame.data.get("next_sequence")
+            complete = frame.data.get("complete")
+            if (
+                not isinstance(raw_events, list)
+                or type(next_sequence) is not int
+                or type(complete) is not bool
+            ):
+                raise RemoteProtocolError("Gateway returned an invalid event page")
+            for raw in raw_events:
+                if not isinstance(raw, dict):
+                    raise RemoteProtocolError("Gateway returned an invalid Remote event")
+                wire = decode_v2_event(
+                    json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+                )
+                event = client_event_from_wire(wire)
+                if (
+                    event.cursor.stream_id != cursor.stream_id
+                    or event.cursor.sequence != expected
+                ):
+                    raise RemoteProtocolError("Remote event page contains a cursor gap")
+                expected += 1
+                cursor = event.cursor
+                yield event
+            if next_sequence != cursor.sequence:
+                raise RemoteProtocolError("Remote event page cursor is inconsistent")
+            if complete:
+                return
+            if not raw_events:
+                raise RemoteProtocolError("Remote event page made no progress")
+
 
 async def _unknown_on_disconnect(operation: str, awaitable: Any) -> Any:
     try:
@@ -378,6 +471,8 @@ __all__ = [
     "EvoPiRemoteClient",
     "RemoteClientConfig",
     "RemoteLeaseInfo",
+    "RemotePairingSubmission",
     "RemoteRunHandle",
     "RemoteWebSocket",
+    "submit_remote_pairing",
 ]

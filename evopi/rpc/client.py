@@ -104,6 +104,10 @@ class RpcRunHandle:
     def done(self) -> bool:
         return self._wait_task.done()
 
+    @property
+    def start_cursor(self) -> RpcEventCursor:
+        return self._start_cursor
+
     async def events(self) -> AsyncIterator[RpcClientEvent]:
         async for event in self._client.events(after=self._start_cursor):
             if event.run_id == self.run_id:
@@ -342,6 +346,19 @@ class EvoPiRpcClient:
         for event in replayed:
             sequence = event.cursor.sequence
             yield event
+        async for event in self.live_events(
+            RpcEventCursor(stream_id=cursor.stream_id, sequence=sequence)
+        ):
+            yield event
+
+    async def live_events(
+        self,
+        after: RpcEventCursor,
+    ) -> AsyncIterator[RpcClientEvent]:
+        """Consume only the local live buffer after a validated cursor."""
+
+        self._require_cursor(after)
+        sequence = after.sequence
         while True:
             async with self._condition:
                 available = [item for item in self._history if item.cursor.sequence > sequence]

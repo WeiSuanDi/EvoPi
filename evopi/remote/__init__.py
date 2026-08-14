@@ -20,8 +20,10 @@ from .client import (
     EvoPiRemoteClient,
     RemoteClientConfig,
     RemoteLeaseInfo,
+    RemotePairingSubmission,
     RemoteRunHandle,
     RemoteWebSocket,
+    submit_remote_pairing,
 )
 from .crypto import (
     create_auth_challenge,
@@ -70,9 +72,11 @@ from .protocol import (
 from .security import (
     RemoteGatewayConfig,
     create_server_ssl_context,
+    is_trusted_proxy_peer,
     resolve_remote_client_ip,
     validate_remote_request,
 )
+from .serve import ensure_tls_files, serve_remote_gateway
 from .store import RemoteHostConfig, RemoteHostStore
 
 __all__ = [
@@ -116,6 +120,7 @@ __all__ = [
     "RemoteHostStore",
     "RemoteLeaseError",
     "RemoteLeaseInfo",
+    "RemotePairingSubmission",
     "RemoteOutcomeUnknownError",
     "RemotePairingError",
     "RemoteFrame",
@@ -131,14 +136,18 @@ __all__ = [
     "create_auth_challenge",
     "challenge_from_dict",
     "create_server_ssl_context",
+    "ensure_tls_files",
     "generate_device_key",
     "jwk_fingerprint",
+    "is_trusted_proxy_peer",
     "normalize_scopes",
     "public_jwk_from_private_key",
     "resolve_admin_endpoint",
     "resolve_remote_client_ip",
     "remote_frame",
     "sign_auth_challenge",
+    "serve_remote_gateway",
+    "submit_remote_pairing",
     "verify_auth_challenge",
     "validate_remote_request",
     "verify_remote_audit_chain",
