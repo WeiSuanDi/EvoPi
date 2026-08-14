@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO, Self
+from typing import Any, BinaryIO, Self
 
 from evopi.configuration.models import (
     CredentialRecord,
@@ -94,6 +94,19 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
 def _encode_config(config: UserConfig) -> bytes:
     lines = [
         f"schema_version = {config.schema_version}",
@@ -139,7 +152,9 @@ def _decode_config(payload: bytes) -> UserConfig:
         if not isinstance(item["verified"], bool):
             raise UserConfigError(f"profile {index} verified must be boolean")
         profiles.append(ModelProfile(**item))
-    if not isinstance(raw["schema_version"], int) or not isinstance(raw["active_profile"], str):
+    if type(raw["schema_version"]) is not int or not isinstance(
+        raw["active_profile"], str
+    ):
         raise UserConfigError("config root fields have invalid types")
     return UserConfig(
         schema_version=raw["schema_version"],
@@ -235,12 +250,20 @@ class CredentialStore:
             return ()
         with _FileLock(self._lock_path):
             try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raw = json.loads(
+                    self.path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_pairs,
+                    parse_constant=_reject_json_constant,
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                 raise UserConfigError(f"invalid credentials.json: {exc}") from exc
         if not isinstance(raw, dict) or set(raw) != {"schema_version", "credentials"}:
             raise UserConfigError("credentials.json has invalid root fields")
-        if raw["schema_version"] != 1 or not isinstance(raw["credentials"], list):
+        if (
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 1
+            or not isinstance(raw["credentials"], list)
+        ):
             raise UserConfigError("credentials.json has unsupported structure")
         expected = {"profile", "provider", "base_url", "api_key"}
         records: list[CredentialRecord] = []
@@ -252,7 +275,7 @@ class CredentialStore:
             ):
                 raise UserConfigError(f"credential {index} has invalid fields")
             records.append(CredentialRecord(**item))
-        identities = [(item.profile, item.provider, item.base_url) for item in records]
+        identities = [_credential_identity(item) for item in records]
         if len(identities) != len(set(identities)):
             raise UserConfigError("credential identities must be unique")
         return tuple(records)
@@ -260,6 +283,9 @@ class CredentialStore:
     def save(self, records: Iterable[CredentialRecord]) -> None:
         _reject_symlink(self.path)
         items = tuple(records)
+        identities = [_credential_identity(item) for item in items]
+        if len(identities) != len(set(identities)):
+            raise UserConfigError("credential identities must be unique")
         payload = json.dumps(
             {
                 "schema_version": 1,
@@ -296,6 +322,10 @@ class CredentialStore:
             ):
                 return record.api_key
         return None
+
+
+def _credential_identity(record: CredentialRecord) -> tuple[str, str, str]:
+    return record.profile, record.provider, record.base_url.rstrip("/")
 
 
 __all__ = [

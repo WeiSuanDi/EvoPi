@@ -140,7 +140,9 @@ profile > product default` precedence. `~/.evopi/config.toml` is a strict schema
 `~/.evopi/credentials.json` binds each plaintext credential to its profile, Provider, and Base
 URL. An environment credential always wins. A stored credential is never reused for a different
 Provider or Base URL. Both files reject symlinks and use locked atomic replacement; credential
-permission hardening is fail closed.
+permission hardening is fail closed. Schema versions must be actual integers. Credential JSON
+rejects duplicate keys and non-finite constants, and semantically duplicate
+`profile / Provider / Base URL` bindings are rejected before persistence.
 
 `evopi setup` is the only interactive configuration writer. It never accepts an API key as a
 command-line argument. Its default connection test uses a temporary model adapter with 30-second

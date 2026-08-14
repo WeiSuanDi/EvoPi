@@ -74,6 +74,59 @@ def test_config_rejects_unknown_fields_and_symlinks(tmp_path: Path) -> None:
         UserConfigStore(link).load()
 
 
+def test_config_rejects_boolean_schema_version(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "\n".join(
+            (
+                "schema_version = true",
+                'active_profile = "default"',
+                "[[profiles]]",
+                'name = "default"',
+                'provider = "anthropic"',
+                'model = "model"',
+                'base_url = "https://api.anthropic.com"',
+                "verified = false",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UserConfigError, match="root fields"):
+        UserConfigStore(path).load()
+    with pytest.raises(UserConfigError, match="schema_version"):
+        UserConfig(active_profile="default", profiles=(), schema_version=True)
+
+
+def test_credentials_reject_duplicate_json_keys_and_boolean_schema(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    store = CredentialStore(path, permission_hardener=lambda _: None)
+    malformed = (
+        '{"schema_version":1,"schema_version":1,"credentials":[]}',
+        '{"schema_version":true,"credentials":[]}',
+    )
+
+    for payload in malformed:
+        path.write_text(payload, encoding="utf-8")
+        with pytest.raises(UserConfigError, match="credentials.json|unsupported"):
+            store.load()
+
+
+def test_credentials_refuse_duplicate_identity_before_writing(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    store = CredentialStore(path, permission_hardener=lambda _: None)
+    record = CredentialRecord(
+        profile="default",
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="secret",
+    )
+
+    with pytest.raises(UserConfigError, match="unique"):
+        store.save((record, record))
+    assert not path.exists()
+
+
 def test_permission_failure_refuses_to_save_api_key(tmp_path: Path) -> None:
     def fail(_: Path) -> None:
         raise OSError("ACL failed")
