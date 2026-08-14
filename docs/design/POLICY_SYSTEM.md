@@ -520,6 +520,11 @@ Activation Store v2/v3 恢复使用严格 JSON 与精确 DTO：拒绝重复 key�
 转换、非法 Artifact kind/risk、重复 Record ID 和非 JSON-safe metadata。Record ID、摘要、
 操作者、时间与 evidence 在进入 `ActivationGate` 前完成验证；Store symlink 同样 fail closed。
 
+全局 `PolicySelectionStore` 采用同等严格的恢复边界：schema v1 根对象、活动/回滚记录和
+replacement 绑定都必须字段精确、类型精确，记录与 Approval ID 使用规范 32 位十六进制，
+候选摘要使用 SHA-256。重复 JSON key、重复 Selection ID、非 UTC 时间和 Store symlink
+均在运行时装配活动 Policy 之前 fail closed；`add()` 也不会写出下一次无法恢复的重复 ID。
+
 旧 `ApprovalRecord` 仍可读取。warn 模式允许迁移期加载并记录 warning；strict 模式下
 Harness 注册 Policy 必须匹配当前实现摘要，同名同版本但源码或声明契约变化会失效。
 Plugin 额外复制到内容寻址不可变快照，批准不等于 OS 沙箱。

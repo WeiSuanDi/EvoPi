@@ -8,7 +8,7 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 from uuid import uuid4
 
 from evopi.evolution.activation import (
@@ -35,7 +35,7 @@ class PolicyReplacement:
     expected_digest: str
 
     def __post_init__(self) -> None:
-        if not self.policy_name.strip():
+        if not isinstance(self.policy_name, str) or not self.policy_name.strip():
             raise ValueError("replacement Policy name must not be empty")
         _validate_digest(self.expected_digest)
         object.__setattr__(self, "expected_digest", self.expected_digest.lower())
@@ -55,22 +55,30 @@ class PolicyActivationRecord:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
-        if not self.policy_name.strip():
+        if not isinstance(self.policy_name, str) or not self.policy_name.strip():
             raise ValueError("Policy activation name must not be empty")
         if self.action not in {"activate", "deactivate", "rollback"}:
             raise ValueError(f"unsupported Policy activation action: {self.action}")
-        if not self.operator.strip():
+        if not isinstance(self.operator, str) or not self.operator.strip():
             raise ValueError("Policy activation operator must not be empty")
-        if not self.record_id.strip():
-            raise ValueError("Policy activation record ID must not be empty")
+        if not _is_hex(self.record_id, length=32):
+            raise ValueError(
+                "Policy activation record ID must be 32 lowercase hexadecimal characters"
+            )
+        if not isinstance(self.created_at, datetime):
+            raise ValueError("Policy activation timestamp must be a datetime")
         if self.created_at.tzinfo is None:
             raise ValueError("Policy activation timestamp must include timezone")
         for label, value in (
             ("approval record ID", self.approval_record_id),
             ("previous approval ID", self.previous_approval_id),
         ):
-            if value is not None and not value.strip():
-                raise ValueError(f"{label} must not be empty")
+            if value is not None and not _is_hex(value, length=32):
+                raise ValueError(
+                    f"{label} must be 32 lowercase hexadecimal characters"
+                )
+        if self.reason is not None and not isinstance(self.reason, str):
+            raise ValueError("Policy activation reason must be a string or null")
         if self.action in {"activate", "rollback"}:
             if self.approval_record_id is None:
                 raise ValueError(f"{self.action} requires an approval record ID")
@@ -92,6 +100,7 @@ class PolicyActivationRecord:
             )
         ):
             raise ValueError("deactivate cannot retain an approval or replacement binding")
+        object.__setattr__(self, "created_at", self.created_at.astimezone(UTC))
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -231,7 +240,9 @@ class PolicySelectionStore:
     """Append-only audit log whose projection selects one digest per Policy."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path).expanduser().resolve()
+        expanded = Path(path).expanduser()
+        _reject_selection_store_symlink(expanded)
+        self.path = expanded.resolve()
         self._records: list[PolicyActivationRecord] = []
         if self.path.exists():
             self._load()
@@ -252,6 +263,10 @@ class PolicySelectionStore:
         with EvolutionFileLock(self.path.with_name(f"{self.path.name}.lock")):
             if self.path.exists():
                 self._load()
+            if any(existing.record_id == record.record_id for existing in self._records):
+                raise ArtifactActivationError(
+                    f"duplicate Policy selection record ID: {record.record_id}"
+                )
             self._records.append(record)
             try:
                 self._save()
@@ -261,6 +276,7 @@ class PolicySelectionStore:
         return record
 
     def _save(self) -> None:
+        _reject_selection_store_symlink(self.path)
         payload = {
             "schema_version": POLICY_SELECTION_SCHEMA_VERSION,
             "records": [_selection_to_dict(record) for record in self._records],
@@ -281,16 +297,30 @@ class PolicySelectionStore:
             ) from exc
 
     def _load(self) -> None:
+        _reject_selection_store_symlink(self.path)
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_pairs,
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ArtifactActivationError(f"invalid Policy selection store: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"schema_version", "records"}
+            or type(raw.get("schema_version")) is not int
+            or raw["schema_version"] != POLICY_SELECTION_SCHEMA_VERSION
+        ):
             raise ArtifactActivationError("unsupported Policy selection store schema")
         records = raw.get("records")
         if not isinstance(records, list):
             raise ArtifactActivationError("Policy selection records must be an array")
-        self._records = [_selection_from_dict(item) for item in records]
+        loaded = [_selection_from_dict(item) for item in records]
+        record_ids = [record.record_id for record in loaded]
+        if len(record_ids) != len(set(record_ids)):
+            raise ArtifactActivationError("duplicate Policy selection record ID")
+        self._records = loaded
 
 
 class PolicyActivationService:
@@ -459,31 +489,57 @@ def _selection_to_dict(record: PolicyActivationRecord) -> dict[str, Any]:
 
 
 def _selection_from_dict(raw: object) -> PolicyActivationRecord:
-    if not isinstance(raw, dict):
+    fields = {
+        "record_id",
+        "policy_name",
+        "action",
+        "operator",
+        "approval_record_id",
+        "candidate_digest",
+        "previous_approval_id",
+        "replacement",
+        "reason",
+        "created_at",
+    }
+    if not isinstance(raw, dict) or set(raw) != fields:
         raise ArtifactActivationError("Policy selection record must be an object")
-    replacement_raw = raw.get("replacement")
     try:
-        created_at = datetime.fromisoformat(str(raw["created_at"]))
+        created_at = datetime.fromisoformat(_string(raw["created_at"], "created_at"))
         if created_at.tzinfo is None:
             raise ValueError("created_at must include timezone")
-        replacement = (
-            PolicyReplacement(
-                policy_name=str(replacement_raw["policy_name"]),
-                expected_digest=str(replacement_raw["expected_digest"]),
+        replacement_raw = raw["replacement"]
+        if replacement_raw is None:
+            replacement = None
+        elif isinstance(replacement_raw, dict) and set(replacement_raw) == {
+            "policy_name",
+            "expected_digest",
+        }:
+            replacement = PolicyReplacement(
+                policy_name=_string(
+                    replacement_raw["policy_name"],
+                    "replacement policy_name",
+                ),
+                expected_digest=_string(
+                    replacement_raw["expected_digest"],
+                    "replacement expected_digest",
+                ),
             )
-            if isinstance(replacement_raw, dict)
-            else None
-        )
+        else:
+            raise ValueError("replacement must be null or an exact replacement object")
+        action = _string(raw["action"], "action")
+        reason = raw["reason"]
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("reason must be a string or null")
         return PolicyActivationRecord(
-            record_id=str(raw["record_id"]),
-            policy_name=str(raw["policy_name"]),
-            action=raw["action"],
-            operator=str(raw["operator"]),
-            approval_record_id=_optional_string(raw.get("approval_record_id")),
-            candidate_digest=_optional_string(raw.get("candidate_digest")),
-            previous_approval_id=_optional_string(raw.get("previous_approval_id")),
+            record_id=_string(raw["record_id"], "record_id"),
+            policy_name=_string(raw["policy_name"], "policy_name"),
+            action=cast(PolicyActivationAction, action),
+            operator=_string(raw["operator"], "operator"),
+            approval_record_id=_optional_string(raw["approval_record_id"]),
+            candidate_digest=_optional_string(raw["candidate_digest"]),
+            previous_approval_id=_optional_string(raw["previous_approval_id"]),
             replacement=replacement,
-            reason=_optional_string(raw.get("reason")),
+            reason=reason,
             created_at=created_at.astimezone(UTC),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -498,6 +554,12 @@ def _optional_string(value: object) -> str | None:
     return value
 
 
+def _string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
+
+
 def _operator(value: str) -> str:
     if not value.strip():
         raise ValueError("operator must not be empty")
@@ -505,9 +567,39 @@ def _operator(value: str) -> str:
 
 
 def _validate_digest(value: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError("expected a SHA-256 hexadecimal digest")
     digest = value.lower()
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ValueError("expected a SHA-256 hexadecimal digest")
+
+
+def _is_hex(value: object, *, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _reject_selection_store_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise ArtifactActivationError(
+            f"refusing symbolic link Policy selection store: {path}"
+        )
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 __all__ = [

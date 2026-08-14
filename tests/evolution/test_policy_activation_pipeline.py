@@ -324,3 +324,127 @@ def test_selection_store_rejects_unknown_action(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactActivationError, match="action"):
         PolicySelectionStore(path)
+
+
+def _selection_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "records": [
+            {
+                "record_id": "a" * 32,
+                "policy_name": "demo_policy",
+                "action": "activate",
+                "operator": "tester",
+                "approval_record_id": "b" * 32,
+                "candidate_digest": "c" * 64,
+                "previous_approval_id": None,
+                "replacement": None,
+                "reason": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema_version": True, "records": []},
+        {"schema_version": 1, "records": [], "unexpected": "field"},
+    ],
+)
+def test_selection_store_rejects_noncanonical_root(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    path = tmp_path / "policy-selections.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ArtifactActivationError, match="schema"):
+        PolicySelectionStore(path)
+
+
+def test_selection_store_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    path = tmp_path / "policy-selections.json"
+    path.write_text(
+        '{"schema_version":1,"schema_version":1,"records":[]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ArtifactActivationError, match="duplicate JSON key"):
+        PolicySelectionStore(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("policy_name", 7, "policy_name"),
+        ("record_id", 7, "record_id"),
+        ("created_at", 7, "created_at"),
+    ],
+)
+def test_selection_store_rejects_record_field_coercion(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    payload = _selection_payload()
+    record = payload["records"][0]
+    assert isinstance(record, dict)
+    record[field] = value
+    path = tmp_path / "policy-selections.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ArtifactActivationError, match=match):
+        PolicySelectionStore(path)
+
+
+def test_selection_store_rejects_unknown_record_and_replacement_fields(
+    tmp_path: Path,
+) -> None:
+    payload = _selection_payload()
+    record = payload["records"][0]
+    assert isinstance(record, dict)
+    record["replacement"] = {
+        "policy_name": "shell_safety",
+        "expected_digest": "d" * 64,
+        "unexpected": True,
+    }
+    path = tmp_path / "policy-selections.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ArtifactActivationError, match="replacement"):
+        PolicySelectionStore(path)
+
+
+def test_selection_store_rejects_duplicate_record_ids(tmp_path: Path) -> None:
+    payload = _selection_payload()
+    records = payload["records"]
+    assert isinstance(records, list)
+    records.append(dict(records[0]))
+    path = tmp_path / "policy-selections.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ArtifactActivationError, match="duplicate.*record ID"):
+        PolicySelectionStore(path)
+
+
+def test_selection_store_does_not_persist_duplicate_record_id(tmp_path: Path) -> None:
+    path = tmp_path / "policy-selections.json"
+    store = PolicySelectionStore(path)
+    first = PolicyActivationRecord(
+        record_id="a" * 32,
+        policy_name="demo_policy",
+        action="activate",
+        operator="tester",
+        approval_record_id="b" * 32,
+        candidate_digest="c" * 64,
+    )
+    store.add(first)
+
+    with pytest.raises(ArtifactActivationError, match="duplicate.*record ID"):
+        store.add(first)
+
+    restored = PolicySelectionStore(path)
+    assert restored.records() == (first,)
