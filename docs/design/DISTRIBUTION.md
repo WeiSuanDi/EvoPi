@@ -50,7 +50,14 @@ the final, not-yet-referenced version path; failure removes it. A verification m
 before `current.txt` is atomically replaced. The current and previous versions are retained; old
 cleanup failure is a warning.
 
-Rollback is offline and accepts only a retained directory carrying a valid verification marker.
+`ManagedRuntime` independently revalidates stable SemVer, wheel filename, and wheel SHA-256 before
+constructing a target path, even when it is called without the GitHub Release client. `current.txt`
+accepts only canonical version/feature runtime IDs. Verification markers use strict JSON, exact
+fields, canonical feature sets, and a directory-bound identity; boolean schema versions, duplicate
+keys, malformed digests, and mismatched directory names fail closed.
+
+Rollback is offline and accepts only a retained directory carrying a fully decoded valid
+verification marker; malformed higher-version directories are skipped rather than selected.
 Unsupported package-manager installations return guidance rather than mutating their environment.
 
 ## Release authority

@@ -12,14 +12,22 @@ import tempfile
 import venv
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO, Self
+from typing import Any, BinaryIO, Self
 
 from evopi.distribution.models import ReleaseInfo, UpdateResult, UpdateStatus
-from evopi.distribution.release import version_key
+from evopi.distribution.release import parse_stable_tag, version_key
 
 RuntimeInstaller = Callable[[ReleaseInfo, bytes, Path], None]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _RuntimeMarker:
+    version: str
+    features: tuple[str, ...]
+    sha256: str
 
 
 class _UpdateLock(AbstractContextManager["_UpdateLock"]):
@@ -107,25 +115,24 @@ class ManagedRuntime:
 
     @property
     def current_runtime_id(self) -> str | None:
-        if not self.current_path.exists():
+        if self.current_path.is_symlink() or not self.current_path.is_file():
             return None
-        value = self.current_path.read_text(encoding="utf-8").strip()
-        return value or None
+        try:
+            value = self.current_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return value if _valid_runtime_id(value) else None
 
     @property
     def current_features(self) -> tuple[str, ...]:
         runtime_id = self.current_runtime_id
         if runtime_id is None:
             return ()
-        marker = self.versions_root / runtime_id / ".evopi-runtime.json"
         try:
-            raw = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return ("remote",) if "--remote-" in runtime_id else ()
-        features = raw.get("features", [])
-        if not isinstance(features, list) or any(not isinstance(item, str) for item in features):
+            marker = _read_runtime_marker(self.versions_root / runtime_id)
+        except RuntimeError:
             return ()
-        return tuple(sorted(set(features)))
+        return marker.features
 
     def install(
         self,
@@ -135,6 +142,16 @@ class ManagedRuntime:
         features: tuple[str, ...] | None = None,
     ) -> UpdateResult:
         current = self.current_version
+        try:
+            _validate_release_input(info, wheel)
+        except RuntimeError as exc:
+            return UpdateResult(
+                status=UpdateStatus.FAILED,
+                current_version=current,
+                target_version=info.version,
+                release_url=info.release_url,
+                message=f"update failed: {type(exc).__name__}: {str(exc)[:500]}",
+            )
         selected_features = _normalize_features(
             self.current_features if features is None else features
         )
@@ -185,20 +202,22 @@ class ManagedRuntime:
         try:
             with _UpdateLock(self.lock_path):
                 current_id = self.current_runtime_id
-                candidates = [
-                    path.name
-                    for path in self.versions_root.iterdir()
-                    if path.is_dir()
-                    and path.name != current_id
-                    and (path / ".evopi-runtime.json").is_file()
-                ]
+                candidates: list[_RuntimeMarker] = []
+                for path in self.versions_root.iterdir():
+                    if not path.is_dir() or path.name == current_id:
+                        continue
+                    try:
+                        candidates.append(_read_runtime_marker(path))
+                    except RuntimeError:
+                        continue
                 candidates.sort(
-                    key=lambda item: version_key(item.split("--", 1)[0]),
+                    key=lambda item: version_key(item.version),
                     reverse=True,
                 )
                 if not candidates:
                     raise RuntimeError("no previous verified EvoPi runtime is available")
-                target = candidates[0]
+                selected = candidates[0]
+                target = _runtime_id(selected.version, selected.features)
                 self._switch(target)
         except (OSError, RuntimeError) as exc:
             return UpdateResult(
@@ -251,27 +270,11 @@ class ManagedRuntime:
     def _validate_marker(
         target: Path, info: ReleaseInfo, features: tuple[str, ...]
     ) -> None:
-        marker = target / ".evopi-runtime.json"
-        if target.is_symlink() or marker.is_symlink() or not marker.is_file():
-            raise RuntimeError("target runtime has no trusted verification marker")
-        try:
-            raw = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError("target runtime verification marker is invalid") from exc
-        expected_features = list(features)
-        if raw.get("schema_version") == 1:
-            expected_keys = {"schema_version", "version", "sha256"}
-            actual_features: object = []
-        elif raw.get("schema_version") == 2:
-            expected_keys = {"schema_version", "version", "features", "sha256"}
-            actual_features = raw.get("features")
-        else:
-            raise RuntimeError("target runtime verification marker version is unsupported")
+        marker = _read_runtime_marker(target)
         if (
-            set(raw) != expected_keys
-            or raw.get("version") != info.version
-            or raw.get("sha256") != info.sha256
-            or actual_features != expected_features
+            marker.version != info.version
+            or marker.sha256 != info.sha256
+            or marker.features != features
         ):
             raise RuntimeError("target runtime verification marker does not match the Release")
 
@@ -333,6 +336,94 @@ def _runtime_id(version: str, features: tuple[str, ...]) -> str:
     label = "-".join(features)
     digest = hashlib.sha256(",".join(features).encode("ascii")).hexdigest()[:8]
     return f"{version}--{label}-{digest}"
+
+
+def _valid_runtime_id(value: str) -> bool:
+    if not value:
+        return False
+    version = value.split("--", 1)[0]
+    try:
+        parse_stable_tag(f"v{version}")
+    except Exception:
+        return False
+    return value in {version, _runtime_id(version, ("remote",))}
+
+
+def _validate_release_input(info: ReleaseInfo, wheel: bytes) -> None:
+    try:
+        parse_stable_tag(f"v{info.version}")
+    except Exception as exc:
+        raise RuntimeError("release version is not stable SemVer") from exc
+    if (
+        not info.wheel_name.startswith(f"evopi-{info.version}-")
+        or not info.wheel_name.endswith(".whl")
+        or "/" in info.wheel_name
+        or "\\" in info.wheel_name
+    ):
+        raise RuntimeError("release wheel filename is invalid")
+    actual_digest = hashlib.sha256(wheel).hexdigest()
+    if info.sha256 != actual_digest:
+        raise RuntimeError("release wheel SHA-256 does not match")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _read_runtime_marker(target: Path) -> _RuntimeMarker:
+    marker_path = target / ".evopi-runtime.json"
+    if target.is_symlink() or marker_path.is_symlink() or not marker_path.is_file():
+        raise RuntimeError("target runtime has no trusted verification marker")
+    try:
+        raw = json.loads(
+            marker_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("target runtime verification marker is invalid") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("target runtime verification marker is invalid")
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise RuntimeError("target runtime verification marker version is unsupported")
+    expected_keys = (
+        {"schema_version", "version", "sha256"}
+        if schema_version == 1
+        else {"schema_version", "version", "features", "sha256"}
+    )
+    version = raw.get("version")
+    sha256 = raw.get("sha256")
+    if (
+        set(raw) != expected_keys
+        or not isinstance(version, str)
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise RuntimeError("target runtime verification marker is invalid")
+    try:
+        parse_stable_tag(f"v{version}")
+    except Exception as exc:
+        raise RuntimeError("target runtime verification marker is invalid") from exc
+    features_raw = raw.get("features", [])
+    if not isinstance(features_raw, list) or any(
+        not isinstance(item, str) for item in features_raw
+    ):
+        raise RuntimeError("target runtime verification marker is invalid")
+    features = _normalize_features(tuple(features_raw))
+    if list(features) != features_raw or target.name != _runtime_id(version, features):
+        raise RuntimeError("target runtime verification marker is invalid")
+    return _RuntimeMarker(version=version, features=features, sha256=sha256)
 
 
 __all__ = ["ManagedRuntime", "RuntimeInstaller"]
