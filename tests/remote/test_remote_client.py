@@ -4,9 +4,12 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any, get_type_hints
 
+import pytest
+
 from evopi.remote import (
     EvoPiRemoteClient,
     RemoteFrameCodec,
+    RemoteOutcomeUnknownError,
     RemoteRunHandle,
     create_auth_challenge,
     generate_device_key,
@@ -26,12 +29,15 @@ class _FakeWebSocket:
         self.incoming: asyncio.Queue[str | None] = asyncio.Queue()
         self.closed = False
         self.connection_id = "c" * 32
+        self.ignore_lease_requests = False
+        self.rpc_methods: list[str] = []
 
     async def send(self, payload: str) -> None:
         try:
             frame = RemoteFrameCodec.decode(payload)
         except Exception:
             request = decode_v2_request(payload)
+            self.rpc_methods.append(request.method)
             if request.method == "initialize":
                 result = {
                     "protocol": "evopi.rpc.v2",
@@ -124,6 +130,8 @@ class _FakeWebSocket:
                 )
             )
         elif frame.type == "lease.acquire":
+            if self.ignore_lease_requests:
+                return
             await self.incoming.put(
                 RemoteFrameCodec.encode(
                     remote_frame(
@@ -213,6 +221,29 @@ def test_remote_client_authenticates_composes_rpc_and_acquires_lease() -> None:
         assert lease.revision == 1
         await client.aclose()
         assert socket.closed is True
+        assert "shutdown" not in socket.rpc_methods
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_close_completes_pending_remote_requests() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        socket = _FakeWebSocket(private_key)
+        socket.ignore_lease_requests = True
+        client = await EvoPiRemoteClient.connect(
+            socket,
+            device_id="device-1",
+            private_key=private_key,
+            owns_transport=True,
+        )
+
+        pending = asyncio.create_task(client.acquire_control())
+        await asyncio.sleep(0)
+        await client.aclose()
+
+        with pytest.raises(RemoteOutcomeUnknownError):
+            await asyncio.wait_for(pending, timeout=0.1)
 
     asyncio.run(scenario())
 

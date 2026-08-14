@@ -67,12 +67,17 @@ automatically resend operations with side effects: Run start, steering, follow-u
 responses, or lease mutations. If the transport fails after one of these writes, its outcome is
 unknown and must be queried before a human or application decides what to do.
 
+Closing the Python Remote Client never sends the locally meaningful RPC `shutdown` method. Pending
+Remote control requests are completed with an outcome-unknown error instead of being left waiting
+after the transport reader stops.
+
 ## Security boundary
 
 Remote Gateway is a single-user, single-workspace control surface for a trusted local Agent. It is not
 a multi-tenant service or an OS sandbox. `observe` can reveal sensitive model and Tool events, while
 `confirm` can authorize high-risk actions. Production exposure should use a reverse proxy, WAF, or
 tunnel for volumetric protection. Remote Audit stores a hash-chained redacted record; raw client IPs
-are isolated in protected sidecars and removed after 30 days.
+are isolated in protected sidecars and removed after 30 days. Sensitive-key rejection traverses the
+entire JSON container tree, and each locked append refreshes a chain head changed by another writer.
 
 Canonical frames used by all clients are in `tests/conformance/remote_v1/`.

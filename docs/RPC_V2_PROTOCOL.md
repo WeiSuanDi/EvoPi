@@ -109,6 +109,10 @@ independent Event consumers, optional FIFO Confirmation handling, bounded stderr
 graceful shutdown with forced subprocess cleanup as a fallback. It never reconnects or replays a
 side-effecting request automatically.
 
+`connect(..., request_shutdown_on_close=False)` is available to transport adapters whose remote
+trust boundary forbids Host shutdown. The default remains `True` for local RPC compatibility;
+EvoPi's Remote Client disables the request and closes only its authenticated transport.
+
 ## Trust boundary
 
 RPC v2 has no network listener, authentication, TLS, multi-tenant isolation, or remote

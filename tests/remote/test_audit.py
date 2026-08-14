@@ -65,6 +65,13 @@ def test_remote_audit_rejects_sensitive_detail_keys(tmp_path: Path) -> None:
             details={"prompt": "secret"},
         )
 
+    with pytest.raises(RemoteAuditError, match="sensitive"):
+        audit.append(
+            action="plugin.event",
+            outcome="denied",
+            details={"items": [{"token": "nested-secret"}]},
+        )
+
 
 def test_remote_audit_detects_tampering(tmp_path: Path) -> None:
     audit = RemoteAuditLog(tmp_path)
@@ -94,3 +101,13 @@ def test_remote_audit_serializes_gateway_and_admin_threads(tmp_path: Path) -> No
         )
 
     assert verify_remote_audit_chain(audit.current_path) == 20
+
+
+def test_remote_audit_refreshes_chain_head_across_instances(tmp_path: Path) -> None:
+    first = RemoteAuditLog(tmp_path)
+    second = RemoteAuditLog(tmp_path)
+
+    first.append(action="auth.verify", outcome="allowed")
+    second.append(action="runtime.status", outcome="allowed")
+
+    assert verify_remote_audit_chain(first.current_path) == 2

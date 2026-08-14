@@ -124,11 +124,14 @@ class _RemoteTransport:
         self.pending: dict[str, asyncio.Future[RemoteFrame]] = {}
         self.task: asyncio.Task[None] | None = None
         self.error: Exception | None = None
+        self.closed = False
 
     def start(self) -> None:
         self.task = asyncio.create_task(self._read_loop())
 
     async def request(self, frame_type: str, data: dict[str, Any]) -> RemoteFrame:
+        if self.closed:
+            raise RemoteConnectionError("Remote transport is closed")
         request_id = uuid4().hex
         future: asyncio.Future[RemoteFrame] = asyncio.get_running_loop().create_future()
         self.pending[request_id] = future
@@ -148,12 +151,16 @@ class _RemoteTransport:
             raise
 
     async def aclose(self) -> None:
-        if self.owns_transport:
-            await self.socket.close()
+        if self.closed:
+            return
+        self.closed = True
+        self._fail_pending()
         if self.task is not None and not self.task.done():
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
         await self.reader.queue.put("")
+        if self.owns_transport:
+            await self.socket.close()
 
     async def _read_loop(self) -> None:
         try:
@@ -178,12 +185,15 @@ class _RemoteTransport:
             raise
         except Exception as exc:
             self.error = exc
-            failure = RemoteConnectionError("Remote connection closed")
-            for future in tuple(self.pending.values()):
-                if not future.done():
-                    future.set_exception(failure)
-            self.pending.clear()
+            self.closed = True
+            self._fail_pending()
             await self.reader.queue.put("")
+
+    def _fail_pending(self) -> None:
+        for future in tuple(self.pending.values()):
+            if not future.done():
+                future.set_exception(RemoteConnectionError("Remote connection closed"))
+        self.pending.clear()
 
 
 class RemoteRunHandle:
@@ -287,6 +297,7 @@ class EvoPiRemoteClient:
                 transport.writer,
                 owns_transport=False,
                 handshake_timeout=handshake_timeout,
+                request_shutdown_on_close=False,
             )
         except BaseException:
             await transport.aclose()

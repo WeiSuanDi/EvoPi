@@ -65,8 +65,11 @@ class RemoteSendQueue:
         self._queue: asyncio.Queue[tuple[str, int] | None] = asyncio.Queue(maxsize=max_items)
         self._max_bytes = max_bytes
         self._bytes = 0
+        self._closed = False
 
     def put_nowait(self, payload: str) -> None:
+        if self._closed:
+            raise RemoteRateLimitError("outbound queue is closed")
         size = len(payload.encode("utf-8"))
         if self._queue.full() or self._bytes + size > self._max_bytes:
             raise RemoteRateLimitError("outbound queue limit exceeded")
@@ -74,6 +77,8 @@ class RemoteSendQueue:
         self._bytes += size
 
     async def get(self) -> str | None:
+        if self._closed and self._queue.empty():
+            return None
         item = await self._queue.get()
         if item is None:
             return None
@@ -82,6 +87,9 @@ class RemoteSendQueue:
         return payload
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         try:
             self._queue.put_nowait(None)
         except asyncio.QueueFull:

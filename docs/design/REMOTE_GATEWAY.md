@@ -54,12 +54,15 @@ Gateway 重启会创建新 Event Stream。Session v4 与 Trace v2 仍是持久�
 安全操作写入脱敏、append-only 的 SHA-256 摘要链，并按天或 50 MiB 分段。Prompt、消息正文、
 Tool 参数、凭据、签名和 Provider State 禁止写入。原始客户端 IP 位于独立受保护 sidecar，
 30 天后删除；永久链只保留 IP 摘要。Audit 失效时 Gateway 进入 not-ready、断开远程连接并拒绝
-后续安全操作。
+后续安全操作。敏感字段检查递归覆盖 JSON 数组与对象；追加操作在文件锁内检测其他实例更新
+的链头，避免虽然串行写入却使用过期 `previous_hash`。
 
 ## 客户端与控制台
 
 Python Client 组合 `EvoPiRpcClient`；TypeScript package 使用浏览器 Web Crypto 实现同一
-Remote/RPC v2 协议。可选控制台使用 IndexedDB 不可导出密钥、纯文本渲染和严格 CSP。
+Remote/RPC v2 协议。Remote 关闭只关闭认证传输，不发送被公网边界禁止的 RPC `shutdown`；
+关闭时所有已发送但未决的 Remote 请求以 outcome-unknown 结束。可选控制台使用 IndexedDB
+不可导出密钥、纯文本渲染和严格 CSP。
 
 完整契约见 [Remote Protocol v1](../REMOTE_PROTOCOL_V1.md)，部署样例见
 [`docs/deployment/remote`](../deployment/remote/README.md)。

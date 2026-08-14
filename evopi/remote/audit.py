@@ -48,6 +48,7 @@ class RemoteAuditLog:
         self.root.mkdir(parents=True, exist_ok=True)
         self._thread_lock = threading.Lock()
         self._last_hash = self._find_last_hash()
+        self._head_signature = self._audit_head_signature()
         self.prune_expired_client_ips()
 
     @property
@@ -78,25 +79,29 @@ class RemoteAuditLog:
         now = datetime.now(UTC)
         try:
             with self._thread_lock:
-                base: dict[str, Any] = {
-                    "schema_version": 1,
-                    "entry_id": str(uuid4()),
-                    "created_at": now.isoformat(),
-                    "action": action,
-                    "outcome": outcome,
-                    "device_id": device_id,
-                    "client_ip_sha256": (
-                        hashlib.sha256(client_ip.encode("utf-8")).hexdigest()
-                        if client_ip is not None
-                        else None
-                    ),
-                    "details": safe_details,
-                    "previous_hash": self._last_hash,
-                }
-                digest = _digest(base)
-                payload = {**base, "entry_hash": digest}
-                path = self.current_path
                 with EvolutionFileLock(self.root / "audit.lock"):
+                    signature = self._audit_head_signature()
+                    if signature != self._head_signature:
+                        self._last_hash = self._find_last_hash()
+                        self._head_signature = signature
+                    base: dict[str, Any] = {
+                        "schema_version": 1,
+                        "entry_id": str(uuid4()),
+                        "created_at": now.isoformat(),
+                        "action": action,
+                        "outcome": outcome,
+                        "device_id": device_id,
+                        "client_ip_sha256": (
+                            hashlib.sha256(client_ip.encode("utf-8")).hexdigest()
+                            if client_ip is not None
+                            else None
+                        ),
+                        "details": safe_details,
+                        "previous_hash": self._last_hash,
+                    }
+                    digest = _digest(base)
+                    payload = {**base, "entry_hash": digest}
+                    path = self.current_path
                     if client_ip is not None:
                         self._append_client_ip(
                             entry_id=base["entry_id"], created_at=now, client_ip=client_ip
@@ -113,7 +118,8 @@ class RemoteAuditLog:
                         os.fsync(handle.fileno())
                     if created:
                         harden_credential_permissions(path)
-                self._last_hash = digest
+                    self._last_hash = digest
+                    self._head_signature = self._audit_head_signature()
         except (OSError, subprocess.SubprocessError, EvolutionStoreLockError) as exc:
             raise RemoteAuditError("Remote audit write failed") from exc
         return RemoteAuditEntry(
@@ -191,6 +197,14 @@ class RemoteAuditLog:
             previous = _verify_path(path, expected_previous=previous)[1]
         return previous
 
+    def _audit_head_signature(self) -> tuple[str, int, int] | None:
+        paths = sorted(self.root.glob("remote-audit-*.jsonl"))
+        if not paths:
+            return None
+        path = paths[-1]
+        stat = path.stat()
+        return path.name, stat.st_size, stat.st_mtime_ns
+
 
 def verify_remote_audit_chain(path: Path) -> int:
     return _verify_path(path, expected_previous=_GENESIS)[0]
@@ -233,11 +247,14 @@ def _canonical(value: Mapping[str, Any]) -> str:
         raise RemoteAuditError("audit value is not JSON-safe") from exc
 
 
-def _reject_sensitive(value: Mapping[str, Any]) -> None:
-    for key, item in value.items():
-        if key.lower() in _SENSITIVE_KEYS:
-            raise RemoteAuditError("sensitive audit detail key is forbidden")
-        if isinstance(item, dict):
+def _reject_sensitive(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS:
+                raise RemoteAuditError("sensitive audit detail key is forbidden")
+            _reject_sensitive(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
             _reject_sensitive(item)
 
 

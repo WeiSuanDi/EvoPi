@@ -147,12 +147,14 @@ class EvoPiRpcClient:
         writer: AsyncTextWriter,
         confirmation_handler: ConfirmationHandler | None,
         local_event_capacity: int,
+        request_shutdown_on_close: bool,
     ) -> None:
         self._connection = connection
         self._owns_transport = owns_transport
         self._reader = reader
         self._writer = writer
         self._confirmation_handler = confirmation_handler
+        self._request_shutdown_on_close = request_shutdown_on_close
         self._history: deque[RpcClientEvent] = deque(maxlen=local_event_capacity)
         self._condition = asyncio.Condition()
         self._background_errors: asyncio.Queue[RpcClientError | None] = asyncio.Queue()
@@ -182,6 +184,7 @@ class EvoPiRpcClient:
         confirmation_handler: ConfirmationHandler | None = None,
         handshake_timeout: float = 30.0,
         inbound_event_capacity: int = 1000,
+        request_shutdown_on_close: bool = True,
     ) -> EvoPiRpcClient:
         if handshake_timeout <= 0:
             raise ValueError("handshake_timeout must be positive")
@@ -197,6 +200,7 @@ class EvoPiRpcClient:
             writer=writer,
             confirmation_handler=confirmation_handler,
             local_event_capacity=inbound_event_capacity,
+            request_shutdown_on_close=request_shutdown_on_close,
         )
         client._connection_task = asyncio.create_task(connection.run())
         try:
@@ -418,7 +422,7 @@ class EvoPiRpcClient:
         if self._closed:
             return
         self._closing = True
-        if not self._connection.closed:
+        if self._request_shutdown_on_close and not self._connection.closed:
             with suppress(Exception):
                 await asyncio.wait_for(
                     self._request("shutdown", {}),
