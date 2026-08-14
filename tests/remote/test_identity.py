@@ -7,6 +7,8 @@ import pytest
 from evopi.remote import (
     DeviceScope,
     RemoteAuthenticationError,
+    RemoteProtocolError,
+    challenge_from_dict,
     create_auth_challenge,
     generate_device_key,
     normalize_scopes,
@@ -55,4 +57,19 @@ def test_expired_challenge_is_rejected() -> None:
     with pytest.raises(RemoteAuthenticationError, match="expired"):
         verify_auth_challenge(
             public_jwk_from_private_key(private_key), challenge, signature
+        )
+
+
+def test_remote_challenge_codec_rejects_naive_timestamps() -> None:
+    with pytest.raises(RemoteProtocolError, match="timestamp"):
+        challenge_from_dict(
+            {
+                "protocol": "evopi.remote.v1",
+                "host_id": "a" * 32,
+                "device_id": "b" * 32,
+                "connection_id": "c" * 32,
+                "nonce": "nonce",
+                "issued_at": "2026-08-14T12:00:00",
+                "expires_at": "2026-08-14T12:00:30",
+            }
         )

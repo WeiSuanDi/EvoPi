@@ -17,6 +17,7 @@ from uuid import uuid4
 from evopi.configuration import harden_credential_permissions
 from evopi.evolution.file_lock import EvolutionFileLock, EvolutionStoreLockError
 
+from ._json import StrictRemoteJsonError, decode_strict_json_object
 from .errors import RemoteAuditError
 
 _SENSITIVE_KEYS = frozenset(
@@ -219,8 +220,10 @@ def _verify_path(path: Path, *, expected_previous: str) -> tuple[int, str]:
         raise RemoteAuditError("Remote audit read failed") from exc
     for line_number, line in enumerate(lines, start=1):
         try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
+            value = decode_strict_json_object(line)
+        except StrictRemoteJsonError as exc:
+            if "duplicate JSON key" in str(exc):
+                raise RemoteAuditError(f"{exc} at line {line_number}") from exc
             raise RemoteAuditError(f"invalid audit JSON at line {line_number}") from exc
         if not isinstance(value, dict) or value.get("previous_hash") != previous:
             raise RemoteAuditError(f"audit chain mismatch at line {line_number}")

@@ -74,7 +74,8 @@ class RemoteAdminCodec:
         method = raw["method"]
         params = raw["params"]
         if (
-            raw["schema_version"] != 1
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 1
             or not isinstance(request_id, str)
             or not request_id
             or not isinstance(method, str)
@@ -101,7 +102,11 @@ class RemoteAdminCodec:
         raw = _decode(payload)
         if set(raw) != {"schema_version", "request_id", "ok", "result", "error"}:
             raise RemoteAdminProtocolError("admin response has invalid fields")
-        if raw["schema_version"] != 1 or not isinstance(raw["request_id"], str):
+        if (
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 1
+            or not isinstance(raw["request_id"], str)
+        ):
             raise RemoteAdminProtocolError("admin response has invalid identity")
         if not isinstance(raw["ok"], bool):
             raise RemoteAdminProtocolError("admin response ok must be boolean")

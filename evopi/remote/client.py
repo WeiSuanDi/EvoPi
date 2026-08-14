@@ -28,6 +28,7 @@ from evopi.rpc import (
 )
 from evopi.rpc.client_codec import client_event_from_wire
 
+from ._json import parse_utc_datetime
 from .crypto import sign_auth_challenge
 from .errors import RemoteConnectionError, RemoteOutcomeUnknownError
 from .gateway import REMOTE_SUBPROTOCOL, challenge_from_dict
@@ -473,7 +474,7 @@ def _lease_from_frame(frame: RemoteFrame) -> RemoteLeaseInfo:
     ):
         raise RemoteProtocolError("Gateway returned an invalid lease")
     try:
-        parsed = datetime.fromisoformat(expires_at)
+        parsed = parse_utc_datetime(expires_at)
     except ValueError as exc:
         raise RemoteProtocolError("Gateway returned an invalid lease timestamp") from exc
     return RemoteLeaseInfo(

@@ -15,6 +15,7 @@ from uuid import uuid4
 from evopi.configuration import harden_credential_permissions
 from evopi.evolution.file_lock import EvolutionFileLock, EvolutionStoreLockError
 
+from ._json import StrictRemoteJsonError, decode_strict_json_object
 from .errors import RemoteContractError, RemoteStoreError
 from .pairing import PairingRegistry
 
@@ -37,7 +38,7 @@ class RemoteHostConfig:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise RemoteContractError("unsupported Remote Host schema_version")
         if not _NAME.fullmatch(self.name):
             raise RemoteContractError("Host name must use lowercase letters, digits, and hyphens")
@@ -100,7 +101,7 @@ class RemoteHostStore:
         config_name = raw.get("name")
         workspace = raw.get("workspace")
         model_profile = raw.get("model_profile")
-        if schema_version != 1 or not all(
+        if type(schema_version) is not int or schema_version != 1 or not all(
             isinstance(value, str)
             for value in (host_id, config_name, workspace, model_profile)
         ):
@@ -160,11 +161,9 @@ class RemoteHostStore:
     @staticmethod
     def _read_json(path: Path) -> dict[str, object]:
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = decode_strict_json_object(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, StrictRemoteJsonError) as exc:
             raise RemoteStoreError(f"invalid Remote Store JSON: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise RemoteStoreError("Remote Store JSON root must be an object")
         return raw
 
     def _atomic_json(self, path: Path, value: object) -> None:

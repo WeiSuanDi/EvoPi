@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from ._json import parse_utc_datetime
 from .crypto import jwk_fingerprint, public_key_from_jwk
 from .errors import RemotePairingError
 from .models import (
@@ -195,7 +196,7 @@ class PairingRegistry:
     def from_dict(cls, raw: Mapping[str, Any]) -> PairingRegistry:
         if set(raw) != {"schema_version", "codes", "requests", "devices"}:
             raise RemotePairingError("Remote security state has invalid fields")
-        if raw.get("schema_version") != 1:
+        if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
             raise RemotePairingError("unsupported Remote security state")
         codes = raw.get("codes")
         requests = raw.get("requests")
@@ -210,8 +211,8 @@ class PairingRegistry:
             for value in codes:
                 if not isinstance(value, dict) or set(value) != {"digest", "expires_at"}:
                     raise ValueError
-                registry._codes[str(value["digest"])] = datetime.fromisoformat(
-                    str(value["expires_at"])
+                registry._codes[str(value["digest"])] = parse_utc_datetime(
+                    value["expires_at"]
                 )
             for value in requests:
                 if not isinstance(value, dict):
@@ -221,7 +222,7 @@ class PairingRegistry:
                     device_name=str(value["device_name"]),
                     public_jwk=dict(value["public_jwk"]),
                     fingerprint=str(value["fingerprint"]),
-                    created_at=datetime.fromisoformat(str(value["created_at"])),
+                    created_at=parse_utc_datetime(value["created_at"]),
                     status=value["status"],
                 )
                 registry._requests[request.request_id] = request
@@ -235,10 +236,10 @@ class PairingRegistry:
                     public_jwk=dict(value["public_jwk"]),
                     fingerprint=str(value["fingerprint"]),
                     scopes=normalize_scopes(tuple(value["scopes"])),
-                    created_at=datetime.fromisoformat(str(value["created_at"])),
-                    approved_at=datetime.fromisoformat(str(value["approved_at"])),
+                    created_at=parse_utc_datetime(value["created_at"]),
+                    approved_at=parse_utc_datetime(value["approved_at"]),
                     revoked_at=(
-                        datetime.fromisoformat(str(revoked_raw))
+                        parse_utc_datetime(revoked_raw)
                         if revoked_raw is not None
                         else None
                     ),

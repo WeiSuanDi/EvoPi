@@ -21,8 +21,8 @@ Remote control frames use this strict envelope:
 {"schema_version":1,"type":"auth.begin","request_id":"req-1","data":{}}
 ```
 
-Unknown top-level fields, duplicate JSON keys, non-finite numbers, binary frames, and malformed
-values are rejected.
+Schema versions must be actual integers rather than JSON booleans. Unknown top-level fields,
+duplicate JSON keys, non-finite numbers, binary frames, and malformed values are rejected.
 
 ## Device authentication
 
@@ -79,5 +79,8 @@ a multi-tenant service or an OS sandbox. `observe` can reveal sensitive model an
 tunnel for volumetric protection. Remote Audit stores a hash-chained redacted record; raw client IPs
 are isolated in protected sidecars and removed after 30 days. Sensitive-key rejection traverses the
 entire JSON container tree, and each locked append refreshes a chain head changed by another writer.
+Host configuration, device identity, pairing state, and Audit verification use the same
+duplicate-key and non-finite-number rejection. Challenge, lease, and persisted security timestamps
+must carry an explicit UTC offset.
 
 Canonical frames used by all clients are in `tests/conformance/remote_v1/`.

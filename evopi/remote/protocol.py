@@ -31,7 +31,7 @@ class RemoteFrameCodec:
 
     @classmethod
     def encode(cls, frame: RemoteFrame) -> str:
-        if frame.schema_version != 1:
+        if type(frame.schema_version) is not int or frame.schema_version != 1:
             raise RemoteProtocolError("unsupported Remote frame version")
         if not frame.type or not frame.request_id or not isinstance(frame.data, dict):
             raise RemoteProtocolError("Remote frame fields are invalid")
@@ -71,7 +71,7 @@ class RemoteFrameCodec:
             raise RemoteProtocolError("Remote frame is not valid JSON") from exc
         if not isinstance(raw, dict) or frozenset(raw) != cls._FIELDS:
             raise RemoteProtocolError("Remote frame has invalid fields")
-        if raw["schema_version"] != 1:
+        if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
             raise RemoteProtocolError("unsupported Remote frame version")
         if not isinstance(raw["type"], str) or not raw["type"]:
             raise RemoteProtocolError("Remote frame type is invalid")

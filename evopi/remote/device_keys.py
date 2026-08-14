@@ -17,6 +17,7 @@ from .crypto import (
     jwk_fingerprint,
     public_jwk_from_private_key,
 )
+from ._json import decode_strict_json_object
 from .errors import RemoteStoreError
 
 _NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
@@ -88,10 +89,10 @@ class RemoteDeviceKeyStore:
         key_path = directory / "private-key.pem"
         self._reject_links(metadata_path, key_path)
         try:
-            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            raw = decode_strict_json_object(metadata_path.read_text(encoding="utf-8"))
             pem = key_path.read_bytes()
             private_key = serialization.load_pem_private_key(pem, password=None)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             raise RemoteStoreError("device identity is invalid") from exc
         if (
             not isinstance(private_key, ec.EllipticCurvePrivateKey)
@@ -101,6 +102,7 @@ class RemoteDeviceKeyStore:
         if (
             not isinstance(raw, dict)
             or set(raw) != {"schema_version", "device_name", "public_jwk", "fingerprint"}
+            or type(raw.get("schema_version")) is not int
             or raw.get("schema_version") != 1
             or raw.get("device_name") != name
             or not isinstance(raw.get("public_jwk"), dict)

@@ -85,6 +85,19 @@ def test_remote_audit_detects_tampering(tmp_path: Path) -> None:
         verify_remote_audit_chain(audit.current_path)
 
 
+def test_remote_audit_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    audit = RemoteAuditLog(tmp_path)
+    audit.append(action="auth.verify", outcome="allowed")
+    path = audit.current_path
+    payload = path.read_text(encoding="utf-8").replace(
+        '"outcome":"allowed"', '"outcome":"allowed","outcome":"allowed"'
+    )
+    path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(RemoteAuditError, match="duplicate"):
+        verify_remote_audit_chain(path)
+
+
 def test_remote_audit_serializes_gateway_and_admin_threads(tmp_path: Path) -> None:
     audit = RemoteAuditLog(tmp_path)
 

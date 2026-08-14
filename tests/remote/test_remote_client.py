@@ -10,6 +10,7 @@ from evopi.remote import (
     EvoPiRemoteClient,
     RemoteFrameCodec,
     RemoteOutcomeUnknownError,
+    RemoteProtocolError,
     RemoteRunHandle,
     create_auth_challenge,
     generate_device_key,
@@ -31,6 +32,7 @@ class _FakeWebSocket:
         self.connection_id = "c" * 32
         self.ignore_lease_requests = False
         self.rpc_methods: list[str] = []
+        self.lease_expires_at: str | None = None
 
     async def send(self, payload: str) -> None:
         try:
@@ -139,7 +141,8 @@ class _FakeWebSocket:
                         frame.request_id,
                         {
                             "connection_id": self.connection_id,
-                            "expires_at": (datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+                            "expires_at": self.lease_expires_at
+                            or (datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
                             "revision": 1,
                         },
                     )
@@ -244,6 +247,25 @@ def test_remote_client_close_completes_pending_remote_requests() -> None:
 
         with pytest.raises(RemoteOutcomeUnknownError):
             await asyncio.wait_for(pending, timeout=0.1)
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_rejects_naive_lease_timestamp() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        socket = _FakeWebSocket(private_key)
+        socket.lease_expires_at = "2026-08-14T12:00:30"
+        client = await EvoPiRemoteClient.connect(
+            socket,
+            device_id="device-1",
+            private_key=private_key,
+            owns_transport=True,
+        )
+
+        with pytest.raises(RemoteProtocolError, match="timestamp"):
+            await client.acquire_control()
+        await client.aclose()
 
     asyncio.run(scenario())
 

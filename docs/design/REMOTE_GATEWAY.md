@@ -31,6 +31,10 @@ Scope 固定为：
 Policy 始终是唯一执行裁决链。设备不能直接调用 Tool、创建 Confirmation、覆盖 `block`、
 批准工件或修改 Host 配置。
 
+Remote Frame、管理 IPC、Host/Device Store 和配对安全状态使用严格版本化 Codec。未知字段、
+重复 JSON key、非有限数值和布尔值伪装的整数 schema version 均 fail closed。Challenge、
+Lease 与持久安全状态时间必须带显式 UTC offset。
+
 ## 网络边界
 
 非 loopback 直连必须使用 TLS 1.2 或以上。生产环境推荐由反向代理、WAF 或 Tunnel 终止 TLS

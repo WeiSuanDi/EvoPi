@@ -19,6 +19,12 @@ def test_remote_frame_codec_is_strict_and_rejects_duplicate_keys() -> None:
             '"request_id":"r1","data":{}}'
         )
 
+    with pytest.raises(RemoteProtocolError, match="version"):
+        RemoteFrameCodec.decode(
+            '{"schema_version":true,"type":"auth.begin","request_id":"r1",'
+            '"data":{"device_id":"d1"}}'
+        )
+
 
 def test_remote_frame_codec_rejects_large_frames_and_non_json_values() -> None:
     with pytest.raises(RemoteProtocolError, match="128 KiB"):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from functools import partial
 from typing import Any, cast
 from uuid import uuid4
@@ -17,6 +16,7 @@ from evopi.rpc.protocol_v2 import RpcV2Event, RpcV2Request, RpcV2Response
 from evopi.rpc.server_v2 import RpcV2Host, RpcV2Server
 
 from .audit import RemoteAuditLog
+from ._json import parse_utc_datetime
 from .authorization import RemoteAuthorizedRpcHost
 from .connections import RemoteConnectionRegistry, RemoteSendQueue
 from .controller import RemoteHostController
@@ -647,8 +647,8 @@ def challenge_from_dict(value: JsonObject) -> AuthChallenge:
             device_id=_required_string(value, "device_id"),
             connection_id=_required_string(value, "connection_id"),
             nonce=_required_string(value, "nonce"),
-            issued_at=datetime.fromisoformat(_required_string(value, "issued_at")),
-            expires_at=datetime.fromisoformat(_required_string(value, "expires_at")),
+            issued_at=parse_utc_datetime(_required_string(value, "issued_at")),
+            expires_at=parse_utc_datetime(_required_string(value, "expires_at")),
         )
     except ValueError as exc:
         raise RemoteProtocolError("authentication challenge timestamp is malformed") from exc
