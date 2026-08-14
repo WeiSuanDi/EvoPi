@@ -335,6 +335,10 @@ Trust；源码变化只产生 stale 状态，运行时继续使用已批准快�
 的受治理子运行，安全 Policy、Confirmation、Abort、Deadline 与 Tool capability
 ceiling 均不可弱化。
 
+Workspace Trust 本身也是严格的安全状态：Store 拒绝符号链接、重复 JSON key、布尔版本、
+未知/强制转换字段、重复 workspace digest 和非 UTC 时间，并重新计算规范工作区摘要后才允许
+项目资源进入装配。
+
 ## 两层产品入口
 
 Coding CLI 将现有能力组织成“交互工作台 + 管理与自动化命令”两层入口。它只是
