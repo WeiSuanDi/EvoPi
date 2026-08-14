@@ -62,6 +62,7 @@ def build_product_parser() -> argparse.ArgumentParser:
             "  evopi run [PROMPT] [--json]   Run once for scripts and automation\n\n"
             "Host integration:\n"
             "  evopi rpc                     Run the local JSONL host over stdio\n\n"
+            "  evopi remote ...              Manage and serve a secure Remote Host\n\n"
             "Setup and updates:\n"
             "  evopi setup                   Configure a model provider and API key\n"
             "  evopi update                  Check, install, or roll back a managed runtime\n\n"
