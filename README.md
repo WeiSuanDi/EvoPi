@@ -517,12 +517,26 @@ Policies are ordinary typed Python components and can be registered individually
 
 The `evopi` CLI installs an asynchronous interactive `y/N` confirmation handler automatically. Pressing `Ctrl+C` at a confirmation returns an explicit `cancelled` decision and aborts the run. Library users can inject their own synchronous or asynchronous handler; without one, confirmation requests are denied by default.
 
-Host applications can instead launch `evopi rpc`. This local stdio JSONL protocol starts Runs
-asynchronously, streams sequenced lifecycle events, supports bounded replay and Abort, and lets a
-separate UI resolve only requests that Policy has already placed in the Confirmation Broker. A
-response never overrides a Policy `block`, never invokes a Tool directly, and duplicate or stale
-responses fail closed. The RPC protocol is a local integration surface, not an authenticated remote
-service; do not expose its stdio transport across a trust boundary without adding one.
+Host applications can instead launch `evopi rpc`. The Host accepts legacy RPC v1 and strict RPC
+v2; the first request locks the connection version. V2 adds mandatory initialization, Run-bound
+interaction handles, revision-bound Confirmation responses, and `stream_id + sequence` replay
+cursors. The asynchronous Python client uses v2 exclusively:
+
+```python
+from evopi.rpc import EvoPiRpcClient
+
+client = await EvoPiRpcClient.spawn()
+run = await client.start_run("Summarize README.md")
+async for event in run.events():
+    ...  # typed replay + live lifecycle events
+result = await run.wait()
+await client.aclose()
+```
+
+RPC only resolves requests that Policy has already placed in the Confirmation Broker. It never
+overrides a Policy `block` or invokes a Tool directly, and duplicate or stale responses fail
+closed. This is a trusted local stdio integration surface, not an authenticated remote service.
+See the [RPC v2 protocol and client contract](docs/RPC_V2_PROTOCOL.md).
 
 ### Policy pattern discovery
 
@@ -644,6 +658,7 @@ neutral unless a `PolicyActivationService` is supplied by its host.
 | [Session design](docs/design/SESSION_DESIGN.md) | Session Tree v4, checkpoints, recovery, compaction, merge, and GC. |
 | [Plugin design](docs/design/PLUGIN_DESIGN.md) | PluginAPI v1, review, immutable snapshots, state, UI, and reload. |
 | [CLI product](docs/design/CLI_PRODUCT.md) | Interactive workbench, automation, RPC, setup, and diagnostics. |
+| [RPC v2 protocol](docs/RPC_V2_PROTOCOL.md) | Strict JSONL envelopes, cursors, typed client, and local trust boundary. |
 | [Distribution](docs/design/DISTRIBUTION.md) | GitHub Releases, managed Windows runtime, update, and rollback. |
 
 ## Development

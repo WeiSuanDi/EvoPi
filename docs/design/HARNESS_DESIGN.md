@@ -153,6 +153,10 @@ require_confirmation
 - 进程异常恢复时，未完成请求标记为 `orphaned`，不会自动重建 Run、Confirmation 等待者
   或 Tool 执行。优雅关闭则先持久化 `cancelled`，再唤醒等待者。
 - CLI、Web UI 和 RPC 宿主只实现交互或 Broker 响应，不改变 Policy 或 Core。
+- RPC v2 的 `expected_revision` 是 Broker revision 的乐观并发绑定；批量响应先完整校验，
+  再由 Broker 原子提交，不能覆盖另一调用方已经完成的决定。
+- RPC RunHandle 必须携带创建时的 `run_id`；旧 Handle 的 steer、follow-up 或 abort 在
+  Harness 公共入口之前即 fail closed，不能作用于后续 Run。
 
 ### 3. Policy 调度
 

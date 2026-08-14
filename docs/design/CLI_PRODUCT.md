@@ -24,11 +24,16 @@ changes Core, Policy, Session, or Plugin runtime semantics.
 
 `evopi "PROMPT"` remains a compatibility alias for one-shot execution.
 
-`evopi rpc` is the local host-integration entry point. It speaks strict JSONL over stdio and
-exposes a fixed v1 method set for initialize/status, asynchronous Run start and Abort,
-Confirmation list/respond/batch, bounded event replay, and shutdown. Unsolicited lifecycle events
-share the same output stream as RPC responses but remain sequence-addressable. Stdout is reserved
-for protocol envelopes; application logging belongs on stderr.
+`evopi rpc` is the local host-integration entry point. It speaks strict JSONL over stdio and is a
+dual-protocol Host: the first request locks a connection to legacy v1 or v2. V2 requires
+`initialize`, binds steering/follow-up/abort to a Run ID, binds Confirmation responses to the
+observed revision, and binds replay cursors to `stream_id + sequence`. Unsolicited lifecycle Events
+share stdout with responses but remain sequence-addressable; diagnostics belong on stderr.
+
+The public asynchronous `EvoPiRpcClient` only speaks v2. It can connect to caller-owned text
+streams or spawn the official CLI, and provides RunHandle, replay/live continuity, typed lifecycle
+Events, optional Confirmation handling, and graceful shutdown. The normative protocol is
+documented in `docs/RPC_V2_PROTOCOL.md`.
 
 This transport has no listener, authentication, or remote authorization layer. It must remain
 inside a trusted local host unless an embedding application adds those controls. RPC can only

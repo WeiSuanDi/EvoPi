@@ -350,6 +350,11 @@ Foundation 由三部分组成：Confirmation Broker 负责可恢复的确认状�
 Run、Abort、steering、follow-up 和状态查询。Core 仅提供 Run 内、安全点驱动的通用消息
 调度原语；宿主交互和治理仍不下沉，也不建立第二条 Tool 或 Policy 执行通道。
 
+RPC v2 在该边界上增加连接级初始化、Run 身份绑定、Confirmation revision 和
+`stream_id + sequence` 游标；`EvoPiRpcClient` 只负责类型化传输、Replay/Live 连续性与
+宿主生命周期。v1 作为兼容协议保留一个正式版本。两种版本仍复用同一个
+`HarnessRpcHost`、Confirmation Broker 和 Event Stream。
+
 RPC 客户端只能答复由 Policy 创建的 pending request；不能自行创建 Confirmation、
 越过 `block` 或直接调用 Tool。当前 JSONL stdio 传输只面向同机受信宿主，不包含网络
 监听、认证或多租户隔离。

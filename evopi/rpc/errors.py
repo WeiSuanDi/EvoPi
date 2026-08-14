@@ -1,4 +1,4 @@
-"""Structured errors for the RPC v1 package.
+"""Structured errors shared by RPC protocol versions and the Python client.
 
 Every error carries a stable machine-readable ``code``. Codes are the only
 error identifiers that cross the RPC boundary; messages are safe by design
@@ -107,6 +107,46 @@ class RpcConnectionProtocolError(RpcError):
     code: str = "connection_protocol_error"
 
 
+class RpcClientError(RpcError):
+    """Base class for typed Python client failures."""
+
+    code: str = "client_error"
+
+
+class RpcHandshakeError(RpcClientError):
+    """The v2 initialization handshake did not complete."""
+
+    code: str = "handshake_failed"
+
+
+class RpcRemoteError(RpcClientError):
+    """A stable error returned by the RPC Host."""
+
+    def __init__(self, code: str, message: str, *, details: JsonObject | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details if details is not None else {}
+
+
+class RpcEventGapError(RpcClientError):
+    """Replay and live delivery could not form a continuous sequence."""
+
+    code: str = "event_gap"
+
+
+class RpcCursorError(RpcClientError):
+    """A cursor does not belong to the initialized stream or is invalid."""
+
+    code: str = "cursor_error"
+
+
+class RpcSubprocessError(RpcClientError):
+    """The managed RPC subprocess could not be started or stopped safely."""
+
+    code: str = "subprocess_error"
+
+
 __all__ = [
     "EventCursorExpiredError",
     "EventCursorInvalidError",
@@ -117,8 +157,14 @@ __all__ = [
     "RpcCodecError",
     "RpcConnectionClosedError",
     "RpcConnectionProtocolError",
+    "RpcClientError",
+    "RpcCursorError",
+    "RpcEventGapError",
     "RpcError",
     "RpcEventDataError",
     "RpcHostError",
+    "RpcHandshakeError",
     "RpcProtocolError",
+    "RpcRemoteError",
+    "RpcSubprocessError",
 ]
