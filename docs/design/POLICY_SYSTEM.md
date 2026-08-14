@@ -516,6 +516,10 @@ ArtifactCandidate(kind, name, version, source, risk, sha256)
 → ActivationGate
 ```
 
+Activation Store v2/v3 恢复使用严格 JSON 与精确 DTO：拒绝重复 key、未知字段、字符串强制
+转换、非法 Artifact kind/risk、重复 Record ID 和非 JSON-safe metadata。Record ID、摘要、
+操作者、时间与 evidence 在进入 `ActivationGate` 前完成验证；Store symlink 同样 fail closed。
+
 旧 `ApprovalRecord` 仍可读取。warn 模式允许迁移期加载并记录 warning；strict 模式下
 Harness 注册 Policy 必须匹配当前实现摘要，同名同版本但源码或声明契约变化会失效。
 Plugin 额外复制到内容寻址不可变快照，批准不等于 OS 沙箱。
