@@ -43,13 +43,23 @@ class RemoteAuditError(RemoteError):
     """Raised when the mandatory Remote audit trail cannot be trusted."""
 
 
+class RemoteConnectionError(RemoteError):
+    """Raised when the authenticated Remote transport fails."""
+
+
+class RemoteOutcomeUnknownError(RemoteConnectionError):
+    """A side-effect request disconnected before its outcome was known."""
+
+
 __all__ = [
     "RemoteAuthenticationError",
     "RemoteAuditError",
     "RemoteAuthorizationError",
     "RemoteContractError",
+    "RemoteConnectionError",
     "RemoteError",
     "RemotePairingError",
+    "RemoteOutcomeUnknownError",
     "RemoteLeaseError",
     "RemoteRateLimitError",
     "RemoteSecurityError",
