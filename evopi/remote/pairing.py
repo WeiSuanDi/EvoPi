@@ -6,12 +6,12 @@ import hashlib
 import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 from uuid import uuid4
 
 from ._json import parse_utc_datetime
 from .crypto import jwk_fingerprint, public_key_from_jwk
-from .errors import RemotePairingError
+from .errors import RemoteContractError, RemotePairingError
 from .models import (
     DeviceRecord,
     PairingCode,
@@ -20,6 +20,26 @@ from .models import (
 )
 
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_CODE_FIELDS = {"digest", "expires_at"}
+_REQUEST_FIELDS = {
+    "request_id",
+    "device_name",
+    "public_jwk",
+    "fingerprint",
+    "created_at",
+    "status",
+}
+_DEVICE_FIELDS = {
+    "device_id",
+    "device_name",
+    "public_jwk",
+    "fingerprint",
+    "scopes",
+    "created_at",
+    "approved_at",
+    "revoked_at",
+    "revision",
+}
 
 
 def _code_digest(code: str) -> str:
@@ -209,46 +229,154 @@ class PairingRegistry:
         assert isinstance(devices, list)
         try:
             for value in codes:
-                if not isinstance(value, dict) or set(value) != {"digest", "expires_at"}:
+                if not isinstance(value, dict) or set(value) != _CODE_FIELDS:
                     raise ValueError
-                registry._codes[str(value["digest"])] = parse_utc_datetime(
-                    value["expires_at"]
-                )
+                digest = _hex_string(value["digest"], length=64)
+                if digest in registry._codes:
+                    raise ValueError
+                registry._codes[digest] = parse_utc_datetime(value["expires_at"])
             for value in requests:
-                if not isinstance(value, dict):
+                if not isinstance(value, dict) or set(value) != _REQUEST_FIELDS:
+                    raise ValueError
+                request_id = _hex_string(value["request_id"], length=32)
+                if request_id in registry._requests:
+                    raise ValueError
+                device_name = _device_name(value["device_name"])
+                fingerprint, public_jwk = _device_identity(
+                    value["public_jwk"], value["fingerprint"]
+                )
+                status = value["status"]
+                if status not in {"pending", "approved", "denied"}:
                     raise ValueError
                 request = PairingRequest(
-                    request_id=str(value["request_id"]),
-                    device_name=str(value["device_name"]),
-                    public_jwk=dict(value["public_jwk"]),
-                    fingerprint=str(value["fingerprint"]),
+                    request_id=request_id,
+                    device_name=device_name,
+                    public_jwk=public_jwk,
+                    fingerprint=fingerprint,
                     created_at=parse_utc_datetime(value["created_at"]),
-                    status=value["status"],
+                    status=cast(Literal["pending", "approved", "denied"], status),
                 )
                 registry._requests[request.request_id] = request
             for value in devices:
-                if not isinstance(value, dict):
+                if not isinstance(value, dict) or set(value) != _DEVICE_FIELDS:
                     raise ValueError
+                device_id = _hex_string(value["device_id"], length=32)
+                if device_id in registry._devices:
+                    raise ValueError
+                device_name = _device_name(value["device_name"])
+                fingerprint, public_jwk = _device_identity(
+                    value["public_jwk"], value["fingerprint"]
+                )
+                if any(
+                    item.fingerprint == fingerprint
+                    for item in registry._devices.values()
+                ):
+                    raise ValueError
+                scopes_raw = value["scopes"]
+                if not isinstance(scopes_raw, list) or any(
+                    not isinstance(item, str) for item in scopes_raw
+                ):
+                    raise ValueError
+                scopes = normalize_scopes(tuple(scopes_raw))
+                if [scope.value for scope in scopes] != scopes_raw:
+                    raise ValueError
+                created_at = parse_utc_datetime(value["created_at"])
+                approved_at = parse_utc_datetime(value["approved_at"])
                 revoked_raw = value["revoked_at"]
+                revoked_at = (
+                    parse_utc_datetime(revoked_raw)
+                    if revoked_raw is not None
+                    else None
+                )
+                revision = value["revision"]
+                if type(revision) is not int or revision < 1:
+                    raise ValueError
+                if approved_at < created_at or (
+                    revoked_at is not None and revoked_at < approved_at
+                ):
+                    raise ValueError
                 device = DeviceRecord(
-                    device_id=str(value["device_id"]),
-                    device_name=str(value["device_name"]),
-                    public_jwk=dict(value["public_jwk"]),
-                    fingerprint=str(value["fingerprint"]),
-                    scopes=normalize_scopes(tuple(value["scopes"])),
-                    created_at=parse_utc_datetime(value["created_at"]),
-                    approved_at=parse_utc_datetime(value["approved_at"]),
-                    revoked_at=(
-                        parse_utc_datetime(revoked_raw)
-                        if revoked_raw is not None
-                        else None
-                    ),
-                    revision=int(value["revision"]),
+                    device_id=device_id,
+                    device_name=device_name,
+                    public_jwk=public_jwk,
+                    fingerprint=fingerprint,
+                    scopes=scopes,
+                    created_at=created_at,
+                    approved_at=approved_at,
+                    revoked_at=revoked_at,
+                    revision=revision,
                 )
                 registry._devices[device.device_id] = device
-        except (KeyError, TypeError, ValueError) as exc:
+            _validate_registry_links(registry)
+        except (KeyError, TypeError, ValueError, RemoteContractError) as exc:
             raise RemotePairingError("Remote security state is malformed") from exc
         return registry
+
+
+def _hex_string(value: object, *, length: int) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError
+    return value
+
+
+def _device_name(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > 128
+    ):
+        raise ValueError
+    return value
+
+
+def _device_identity(
+    raw_jwk: object, raw_fingerprint: object
+) -> tuple[str, dict[str, str]]:
+    if not isinstance(raw_jwk, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in raw_jwk.items()
+    ):
+        raise ValueError
+    public_jwk = dict(raw_jwk)
+    fingerprint = _hex_string(raw_fingerprint, length=64)
+    if jwk_fingerprint(public_jwk) != fingerprint:
+        raise ValueError
+    return fingerprint, public_jwk
+
+
+def _validate_registry_links(registry: PairingRegistry) -> None:
+    pending_fingerprints: set[str] = set()
+    approved_requests: dict[str, PairingRequest] = {}
+    for request in registry._requests.values():
+        if request.status == "pending":
+            if request.fingerprint in pending_fingerprints:
+                raise ValueError
+            pending_fingerprints.add(request.fingerprint)
+        elif request.status == "approved":
+            if request.fingerprint in approved_requests:
+                raise ValueError
+            approved_requests[request.fingerprint] = request
+
+    devices_by_fingerprint = {
+        device.fingerprint: device for device in registry._devices.values()
+    }
+    if pending_fingerprints & devices_by_fingerprint.keys():
+        raise ValueError
+    if approved_requests.keys() != devices_by_fingerprint.keys():
+        raise ValueError
+    for fingerprint, request in approved_requests.items():
+        device = devices_by_fingerprint[fingerprint]
+        if (
+            request.device_name != device.device_name
+            or request.public_jwk != device.public_jwk
+            or request.created_at != device.created_at
+        ):
+            raise ValueError
 
 
 __all__ = ["PairingRegistry"]

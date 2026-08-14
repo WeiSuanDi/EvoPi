@@ -33,7 +33,9 @@ Policy 始终是唯一执行裁决链。设备不能直接调用 Tool、创建 C
 
 Remote Frame、管理 IPC、Host/Device Store 和配对安全状态使用严格版本化 Codec。未知字段、
 重复 JSON key、非有限数值和布尔值伪装的整数 schema version 均 fail closed。Challenge、
-Lease 与持久安全状态时间必须带显式 UTC offset。
+Lease 与持久安全状态时间必须带显式 UTC offset。Pairing State 恢复会重新验证精确字段、
+规范 ID/Scope、正 revision、时间顺序、pending 身份唯一性、approved Request 与 Device 的
+一一对应，以及 P-256 JWK 与 fingerprint 绑定，不信任落盘派生值。
 
 ## 网络边界
 
