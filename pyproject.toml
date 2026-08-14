@@ -27,6 +27,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+remote = [
+    "cryptography>=44.0.0",
+    "starlette>=0.45.0",
+    "uvicorn[standard]>=0.34.0",
+    "websockets>=14.0",
+]
 dev = [
     "build>=1.2.2",
     "mypy>=1.13.0",

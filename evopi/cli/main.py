@@ -40,6 +40,7 @@ from evopi.cli.product import (
     run_exit_code,
 )
 from evopi.cli.resume import pick_session
+from evopi.cli.remote import remote_main
 from evopi.cli.rpc import run_stdio_rpc
 from evopi.cli.repl import (
     ReplCommandContext,
@@ -767,6 +768,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"EvoPi update error: {exc}", file=sys.stderr)
             return 1
+    if raw_args[:1] == ["remote"]:
+        try:
+            return remote_main(raw_args[1:])
+        except KeyboardInterrupt:
+            print("\nEvoPi remote command aborted.", file=sys.stderr)
+            return 130
     if len(raw_args) == 2 and raw_args[0] in {"session", "policy", "plugin"} and raw_args[1] in {
         "--help",
         "-h",
