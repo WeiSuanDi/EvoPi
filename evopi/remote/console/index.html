@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EvoPi Remote</title>
+  <link rel="stylesheet" href="/console/styles.css">
+</head>
+<body>
+  <main>
+    <header><h1>EvoPi Remote</h1><span id="status">Disconnected</span></header>
+    <section aria-labelledby="connection-title">
+      <h2 id="connection-title">Device connection</h2>
+      <label>Gateway URL <input id="url" value="wss://localhost:8765/v1/connect"></label>
+      <label>Device ID <input id="device-id" autocomplete="off"></label>
+      <button id="connect">Connect</button>
+      <details>
+        <summary>Pair this browser</summary>
+        <label>Device name <input id="device-name" value="browser"></label>
+        <label>One-time pairing code <input id="pairing-code" autocomplete="off"></label>
+        <button id="pair">Submit pairing request</button>
+      </details>
+    </section>
+    <section aria-labelledby="run-title">
+      <h2 id="run-title">Run</h2>
+      <textarea id="prompt" rows="5" placeholder="Ask EvoPi to work…"></textarea>
+      <div class="actions">
+        <button id="run" disabled>Run</button>
+        <button id="abort" disabled>Abort</button>
+      </div>
+    </section>
+    <section aria-labelledby="output-title">
+      <h2 id="output-title">Activity</h2>
+      <pre id="output" aria-live="polite"></pre>
+    </section>
+  </main>
+  <script type="module" src="/console/app.js"></script>
+</body>
+</html>

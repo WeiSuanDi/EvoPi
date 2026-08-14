@@ -78,13 +78,19 @@ class RemoteGateway:
         except ImportError as exc:  # pragma: no cover - exercised by packaging smoke tests
             raise RemoteError("install EvoPi with the 'remote' optional feature") from exc
 
-        return Starlette(
-            routes=[
+        routes = [
                 Route("/health/live", self._health_live),
                 Route("/health/ready", self._health_ready),
                 WebSocketRoute("/v1/connect", self._connect),
             ]
-        )
+        if self.config.console_enabled:
+            routes.extend(
+                [
+                    Route("/", self._console_index),
+                    Route("/console/{name:str}", self._console_asset),
+                ]
+            )
+        return Starlette(routes=routes)
 
     async def _health_live(self, request: Any) -> Any:
         from starlette.responses import JSONResponse
@@ -100,6 +106,25 @@ class RemoteGateway:
             return JSONResponse({"status": "not_found"}, status_code=404)
         status = "ready" if self.ready else "not_ready"
         return JSONResponse({"status": status}, status_code=200 if self.ready else 503)
+
+    async def _console_index(self, request: Any) -> Any:
+        request.path_params["name"] = "index.html"
+        return await self._console_asset(request)
+
+    async def _console_asset(self, request: Any) -> Any:
+        from starlette.responses import Response
+
+        from .console import SECURITY_HEADERS, console_asset
+
+        try:
+            content, content_type = console_asset(request.path_params["name"])
+        except FileNotFoundError:
+            return Response(status_code=404, headers=SECURITY_HEADERS)
+        return Response(
+            content,
+            media_type=content_type.split(";", 1)[0],
+            headers={**SECURITY_HEADERS, "content-type": content_type},
+        )
 
     async def _connect(self, websocket: Any) -> None:
         from starlette.websockets import WebSocketDisconnect

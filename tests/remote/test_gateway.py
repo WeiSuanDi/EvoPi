@@ -295,3 +295,22 @@ def test_gateway_event_pages_are_bounded_to_one_hundred(tmp_path: Path) -> None:
         assert len(page.data["events"]) == 100
         assert page.data["complete"] is False
         assert page.data["next_sequence"] == 100
+
+
+def test_console_is_opt_in_and_has_strict_security_headers(tmp_path: Path) -> None:
+    gateway, _, _ = _gateway(tmp_path)
+    client = TestClient(gateway.create_app(), client=("127.0.0.1", 50000))
+    assert client.get("/").status_code == 404
+
+    gateway.config = RemoteGatewayConfig(
+        bind="127.0.0.1",
+        allowed_hosts=("testserver",),
+        console_enabled=True,
+    )
+    client = TestClient(gateway.create_app(), client=("127.0.0.1", 50000))
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+    script = client.get("/console/app.js").text
+    assert "innerHTML" not in script

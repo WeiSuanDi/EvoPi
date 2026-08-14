@@ -16,6 +16,13 @@ from .admin_service import RemoteAdminService
 from .audit import RemoteAuditEntry, RemoteAuditLog, verify_remote_audit_chain
 from .authorization import RemoteAuthorizedRpcHost
 from .connections import RemoteConnectionRegistry, RemoteSendQueue
+from .client import (
+    EvoPiRemoteClient,
+    RemoteClientConfig,
+    RemoteLeaseInfo,
+    RemoteRunHandle,
+    RemoteWebSocket,
+)
 from .crypto import (
     create_auth_challenge,
     generate_device_key,
@@ -24,14 +31,17 @@ from .crypto import (
     sign_auth_challenge,
     verify_auth_challenge,
 )
+from .device_keys import RemoteDeviceIdentity, RemoteDeviceKeyStore
 from .controller import RemoteHostController
 from .errors import (
     RemoteAuthenticationError,
     RemoteAuditError,
     RemoteAuthorizationError,
     RemoteContractError,
+    RemoteConnectionError,
     RemoteError,
     RemoteLeaseError,
+    RemoteOutcomeUnknownError,
     RemotePairingError,
     RemoteRateLimitError,
     RemoteSecurityError,
@@ -71,6 +81,7 @@ __all__ = [
     "ControlLeaseManager",
     "DeviceRecord",
     "DeviceScope",
+    "EvoPiRemoteClient",
     "MAX_INBOUND_FRAME_BYTES",
     "MAX_OUTBOUND_FRAME_BYTES",
     "PairingCode",
@@ -93,13 +104,19 @@ __all__ = [
     "RemoteAuthorizationError",
     "RemoteContractError",
     "RemoteConnectionRegistry",
+    "RemoteConnectionError",
     "RemoteError",
+    "RemoteDeviceIdentity",
+    "RemoteDeviceKeyStore",
     "RemoteGatewayConfig",
     "RemoteGateway",
+    "RemoteClientConfig",
     "RemoteHostConfig",
     "RemoteHostController",
     "RemoteHostStore",
     "RemoteLeaseError",
+    "RemoteLeaseInfo",
+    "RemoteOutcomeUnknownError",
     "RemotePairingError",
     "RemoteFrame",
     "RemoteFrameCodec",
@@ -108,6 +125,8 @@ __all__ = [
     "RemoteRateLimiter",
     "RemoteSecurityError",
     "RemoteSendQueue",
+    "RemoteRunHandle",
+    "RemoteWebSocket",
     "RemoteStoreError",
     "create_auth_challenge",
     "challenge_from_dict",

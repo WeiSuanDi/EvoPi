@@ -60,6 +60,7 @@ include = ["evopi*"]
 [tool.setuptools.package-data]
 "evopi.plugins" = ["sdk_templates/**/*"]
 "evopi.evolution" = ["policy_templates/**/*"]
+"evopi.remote" = ["console/*"]
 "evopi" = ["py.typed"]
 
 [tool.pytest.ini_options]

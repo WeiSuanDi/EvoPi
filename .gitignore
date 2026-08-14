@@ -35,6 +35,8 @@ __pypackages__/
 # Packaging
 build/
 dist/
+node_modules/
+.npm-cache/
 site/
 .eggs/
 *.egg
