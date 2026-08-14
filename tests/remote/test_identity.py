@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -71,5 +71,22 @@ def test_remote_challenge_codec_rejects_naive_timestamps() -> None:
                 "nonce": "nonce",
                 "issued_at": "2026-08-14T12:00:00",
                 "expires_at": "2026-08-14T12:00:30",
+            }
+        )
+
+
+def test_remote_challenge_codec_rejects_nonpositive_lifetime() -> None:
+    instant = datetime(2026, 8, 14, 12, tzinfo=UTC).isoformat()
+
+    with pytest.raises(RemoteProtocolError, match="lifetime"):
+        challenge_from_dict(
+            {
+                "protocol": "evopi.remote.v1",
+                "host_id": "a" * 32,
+                "device_id": "b" * 32,
+                "connection_id": "c" * 32,
+                "nonce": "nonce",
+                "issued_at": instant,
+                "expires_at": instant,
             }
         )

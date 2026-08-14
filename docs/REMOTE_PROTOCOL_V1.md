@@ -35,7 +35,10 @@ Signatures are SHA-256 ECDSA encoded as fixed 64-byte `r || s` values.
    issue time, and expiry.
 4. Client sends `auth.complete`; Host returns `auth.ok` with the current scopes.
 
-Challenges are single-use. A signature cannot be replayed on another connection or Host.
+Challenges are single-use. A signature cannot be replayed on another connection or Host. The typed
+Python client independently checks that the challenge and `auth.ok` remain bound to the requested
+device, that the scope list is canonical, and that a granted lease names the authenticated
+connection with a positive revision. Owned sockets are closed when authentication fails.
 
 Pairing uses `pairing.submit` with a local, 12-character, single-use code, device name, and public
 JWK. This creates only a pending request. Approval and scope assignment are possible only through

@@ -30,8 +30,9 @@ from evopi.rpc.client_codec import client_event_from_wire
 
 from ._json import parse_utc_datetime
 from .crypto import sign_auth_challenge
-from .errors import RemoteConnectionError, RemoteOutcomeUnknownError
+from .errors import RemoteConnectionError, RemoteContractError, RemoteOutcomeUnknownError
 from .gateway import REMOTE_SUBPROTOCOL, challenge_from_dict
+from .models import normalize_scopes
 from .protocol import RemoteFrame, RemoteFrameCodec, RemoteProtocolError, remote_frame
 
 
@@ -239,11 +240,13 @@ class EvoPiRemoteClient:
         *,
         device_id: str,
         scopes: tuple[str, ...],
+        connection_id: str | None = None,
         config: RemoteClientConfig | None = None,
     ) -> None:
         self._transport = transport
         self.rpc = rpc
         self.device_id = device_id
+        self._connection_id = connection_id
         self.scopes = scopes
         self._config = config
 
@@ -257,39 +260,17 @@ class EvoPiRemoteClient:
         owns_transport: bool = False,
         handshake_timeout: float = 30.0,
     ) -> EvoPiRemoteClient:
-        begin_id = uuid4().hex
-        await socket.send(
-            RemoteFrameCodec.encode(
-                remote_frame("auth.begin", begin_id, {"device_id": device_id})
+        try:
+            scopes, connection_id = await _authenticate_socket(
+                socket,
+                device_id=device_id,
+                private_key=private_key,
+                handshake_timeout=handshake_timeout,
             )
-        )
-        challenge_frame = RemoteFrameCodec.decode(
-            await asyncio.wait_for(socket.recv(), timeout=handshake_timeout)
-        )
-        if challenge_frame.type != "auth.challenge" or challenge_frame.request_id != begin_id:
-            raise RemoteProtocolError("Gateway returned an invalid authentication challenge")
-        challenge_data = challenge_frame.data.get("challenge")
-        if not isinstance(challenge_data, dict):
-            raise RemoteProtocolError("Gateway returned an invalid authentication challenge")
-        challenge = challenge_from_dict(challenge_data)
-        complete_id = uuid4().hex
-        await socket.send(
-            RemoteFrameCodec.encode(
-                remote_frame(
-                    "auth.complete",
-                    complete_id,
-                    {"signature": sign_auth_challenge(private_key, challenge)},
-                )
-            )
-        )
-        authenticated = RemoteFrameCodec.decode(
-            await asyncio.wait_for(socket.recv(), timeout=handshake_timeout)
-        )
-        if authenticated.type != "auth.ok" or authenticated.request_id != complete_id:
-            raise RemoteProtocolError("Gateway rejected device authentication")
-        scopes = authenticated.data.get("scopes")
-        if not isinstance(scopes, list) or any(not isinstance(item, str) for item in scopes):
-            raise RemoteProtocolError("Gateway returned invalid device scopes")
+        except BaseException:
+            if owns_transport:
+                await socket.close()
+            raise
         transport = _RemoteTransport(socket, owns_transport=owns_transport)
         transport.start()
         try:
@@ -303,7 +284,13 @@ class EvoPiRemoteClient:
         except BaseException:
             await transport.aclose()
             raise
-        return cls(transport, rpc, device_id=device_id, scopes=tuple(scopes))
+        return cls(
+            transport,
+            rpc,
+            device_id=device_id,
+            connection_id=connection_id,
+            scopes=scopes,
+        )
 
     @classmethod
     async def open(cls, config: RemoteClientConfig) -> EvoPiRemoteClient:
@@ -340,12 +327,16 @@ class EvoPiRemoteClient:
         return await self.rpc.runtime_status()
 
     async def acquire_control(self) -> RemoteLeaseInfo:
+        if self._connection_id is None:
+            raise RemoteProtocolError("Remote client has no authenticated connection identity")
         frame = await self._transport.request("lease.acquire", {})
-        return _lease_from_frame(frame)
+        return _lease_from_frame(frame, expected_connection_id=self._connection_id)
 
     async def renew_control(self) -> RemoteLeaseInfo:
+        if self._connection_id is None:
+            raise RemoteProtocolError("Remote client has no authenticated connection identity")
         frame = await self._transport.request("lease.renew", {})
-        return _lease_from_frame(frame)
+        return _lease_from_frame(frame, expected_connection_id=self._connection_id)
 
     async def release_control(self) -> bool:
         frame = await self._transport.request("lease.release", {})
@@ -461,16 +452,85 @@ async def _unknown_on_disconnect(operation: str, awaitable: Awaitable[_T]) -> _T
         raise RemoteOutcomeUnknownError(f"outcome of {operation} is unknown") from exc
 
 
-def _lease_from_frame(frame: RemoteFrame) -> RemoteLeaseInfo:
+async def _authenticate_socket(
+    socket: RemoteWebSocket,
+    *,
+    device_id: str,
+    private_key: Any,
+    handshake_timeout: float,
+) -> tuple[tuple[str, ...], str]:
+    if not device_id:
+        raise RemoteProtocolError("device identity must be a non-empty string")
+    begin_id = uuid4().hex
+    await socket.send(
+        RemoteFrameCodec.encode(
+            remote_frame("auth.begin", begin_id, {"device_id": device_id})
+        )
+    )
+    challenge_frame = RemoteFrameCodec.decode(
+        await asyncio.wait_for(socket.recv(), timeout=handshake_timeout)
+    )
+    if (
+        challenge_frame.type != "auth.challenge"
+        or challenge_frame.request_id != begin_id
+        or set(challenge_frame.data) != {"challenge"}
+    ):
+        raise RemoteProtocolError("Gateway returned an invalid authentication challenge")
+    challenge_data = challenge_frame.data["challenge"]
+    if not isinstance(challenge_data, dict):
+        raise RemoteProtocolError("Gateway returned an invalid authentication challenge")
+    challenge = challenge_from_dict(challenge_data)
+    if challenge.device_id != device_id:
+        raise RemoteProtocolError("Gateway challenge is bound to another device")
+
+    complete_id = uuid4().hex
+    await socket.send(
+        RemoteFrameCodec.encode(
+            remote_frame(
+                "auth.complete",
+                complete_id,
+                {"signature": sign_auth_challenge(private_key, challenge)},
+            )
+        )
+    )
+    authenticated = RemoteFrameCodec.decode(
+        await asyncio.wait_for(socket.recv(), timeout=handshake_timeout)
+    )
+    if (
+        authenticated.type != "auth.ok"
+        or authenticated.request_id != complete_id
+        or set(authenticated.data) != {"device_id", "scopes"}
+        or authenticated.data.get("device_id") != device_id
+    ):
+        raise RemoteProtocolError("Gateway returned an invalid authenticated identity")
+    scopes = authenticated.data["scopes"]
+    if not isinstance(scopes, list) or any(not isinstance(item, str) for item in scopes):
+        raise RemoteProtocolError("Gateway returned invalid device scopes")
+    try:
+        normalized = tuple(scope.value for scope in normalize_scopes(tuple(scopes)))
+    except RemoteContractError as exc:
+        raise RemoteProtocolError("Gateway returned invalid device scopes") from exc
+    if tuple(scopes) != normalized:
+        raise RemoteProtocolError("Gateway returned noncanonical device scopes")
+    return normalized, challenge.connection_id
+
+
+def _lease_from_frame(
+    frame: RemoteFrame, *, expected_connection_id: str
+) -> RemoteLeaseInfo:
     if frame.type != "lease.granted":
         raise RemoteProtocolError("Gateway did not grant the control lease")
+    if set(frame.data) != {"connection_id", "expires_at", "revision"}:
+        raise RemoteProtocolError("Gateway returned an invalid lease")
     connection_id = frame.data.get("connection_id")
     expires_at = frame.data.get("expires_at")
     revision = frame.data.get("revision")
     if (
         not isinstance(connection_id, str)
+        or connection_id != expected_connection_id
         or not isinstance(expires_at, str)
         or type(revision) is not int
+        or revision < 1
     ):
         raise RemoteProtocolError("Gateway returned an invalid lease")
     try:

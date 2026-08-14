@@ -642,7 +642,7 @@ def challenge_from_dict(value: JsonObject) -> AuthChallenge:
     if set(value) != expected or value.get("protocol") != REMOTE_SUBPROTOCOL:
         raise RemoteProtocolError("authentication challenge is malformed")
     try:
-        return AuthChallenge(
+        challenge = AuthChallenge(
             host_id=_required_string(value, "host_id"),
             device_id=_required_string(value, "device_id"),
             connection_id=_required_string(value, "connection_id"),
@@ -652,6 +652,9 @@ def challenge_from_dict(value: JsonObject) -> AuthChallenge:
         )
     except ValueError as exc:
         raise RemoteProtocolError("authentication challenge timestamp is malformed") from exc
+    if challenge.expires_at <= challenge.issued_at:
+        raise RemoteProtocolError("authentication challenge lifetime is invalid")
+    return challenge
 
 
 def _safe_run_id(params: JsonObject) -> str | None:

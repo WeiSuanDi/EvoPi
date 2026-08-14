@@ -33,6 +33,11 @@ class _FakeWebSocket:
         self.ignore_lease_requests = False
         self.rpc_methods: list[str] = []
         self.lease_expires_at: str | None = None
+        self.challenge_device_id: str | None = None
+        self.auth_device_id = "device-1"
+        self.auth_scopes = ["observe", "control"]
+        self.lease_connection_id: str | None = None
+        self.lease_revision: int = 1
 
     async def send(self, payload: str) -> None:
         try:
@@ -99,7 +104,7 @@ class _FakeWebSocket:
         if frame.type == "auth.begin":
             challenge = create_auth_challenge(
                 host_id="h" * 32,
-                device_id=frame.data["device_id"],
+                device_id=self.challenge_device_id or frame.data["device_id"],
                 connection_id=self.connection_id,
             )
             await self.incoming.put(
@@ -127,7 +132,10 @@ class _FakeWebSocket:
                     remote_frame(
                         "auth.ok",
                         frame.request_id,
-                        {"device_id": "device-1", "scopes": ["observe", "control"]},
+                        {
+                            "device_id": self.auth_device_id,
+                            "scopes": self.auth_scopes,
+                        },
                     )
                 )
             )
@@ -140,10 +148,12 @@ class _FakeWebSocket:
                         "lease.granted",
                         frame.request_id,
                         {
-                            "connection_id": self.connection_id,
+                            "connection_id": self.lease_connection_id
+                            if self.lease_connection_id is not None
+                            else self.connection_id,
                             "expires_at": self.lease_expires_at
                             or (datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
-                            "revision": 1,
+                            "revision": self.lease_revision,
                         },
                     )
                 )
@@ -264,6 +274,81 @@ def test_remote_client_rejects_naive_lease_timestamp() -> None:
         )
 
         with pytest.raises(RemoteProtocolError, match="timestamp"):
+            await client.acquire_control()
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_rejects_challenge_for_another_device_and_closes_owned_socket() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        socket = _FakeWebSocket(private_key)
+        socket.challenge_device_id = "device-2"
+
+        with pytest.raises(RemoteProtocolError, match="device"):
+            await EvoPiRemoteClient.connect(
+                socket,
+                device_id="device-1",
+                private_key=private_key,
+                owns_transport=True,
+            )
+
+        assert socket.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_rejects_mismatched_auth_identity_and_noncanonical_scopes() -> None:
+    async def connect_with(socket: _FakeWebSocket) -> None:
+        await EvoPiRemoteClient.connect(
+            socket,
+            device_id="device-1",
+            private_key=socket.private_key,
+            owns_transport=True,
+        )
+
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        wrong_device = _FakeWebSocket(private_key)
+        wrong_device.auth_device_id = "device-2"
+        with pytest.raises(RemoteProtocolError, match="identity"):
+            await connect_with(wrong_device)
+        assert wrong_device.closed is True
+
+        wrong_scopes = _FakeWebSocket(private_key)
+        wrong_scopes.auth_scopes = ["control"]
+        with pytest.raises(RemoteProtocolError, match="scopes"):
+            await connect_with(wrong_scopes)
+        assert wrong_scopes.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_remote_client_rejects_invalid_lease_identity_and_revision() -> None:
+    async def scenario() -> None:
+        private_key = generate_device_key()
+        wrong_connection = _FakeWebSocket(private_key)
+        client = await EvoPiRemoteClient.connect(
+            wrong_connection,
+            device_id="device-1",
+            private_key=private_key,
+            owns_transport=True,
+        )
+        wrong_connection.lease_connection_id = "other"
+        with pytest.raises(RemoteProtocolError, match="lease"):
+            await client.acquire_control()
+        await client.aclose()
+
+        zero_revision = _FakeWebSocket(private_key)
+        client = await EvoPiRemoteClient.connect(
+            zero_revision,
+            device_id="device-1",
+            private_key=private_key,
+            owns_transport=True,
+        )
+        zero_revision.lease_revision = 0
+        with pytest.raises(RemoteProtocolError, match="lease"):
             await client.acquire_control()
         await client.aclose()
 
