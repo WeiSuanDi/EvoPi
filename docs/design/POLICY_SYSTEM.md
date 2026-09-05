@@ -499,6 +499,17 @@ Evidence、Approval 和 Active Selection 是三个独立事实。`review_require
 摘要，并复制审查快照；不会自动启用。每个名称最多一个活动摘要，回滚只能选择仍然
 获批且快照完整的历史版本。
 
+正式 Review Evidence 的保存使用跨进程写锁和原子替换，同一 Review ID 的既有内容不可
+覆盖。恢复时除校验摘要外，还验证精确字段、类型、候选身份与 Worker 协议，拒绝重复
+JSON key 和非有限数值。Supervisor 顶层结论必须与内部检查及 Findings 一致；Schema
+不能缺失，`before_tool_call` 的 Replay 不能标记为不适用。Worker 返回非法协议或矛盾
+报告时保存为失败证据，不允许进入批准链。
+
+提供 Trace 时，Host 一次读取输入，使用同一份字节计算摘要并创建临时冻结副本供 Worker
+回放，避免原始 Trace 持续追加导致审查输入与摘要不一致。副本在审查结束后清理；正式
+Evidence 仍只记录 Trace 摘要，不复制原始输入。该机制不构成 OS 沙箱，也不保证能抵御
+当前用户权限下恶意代码对本地文件的任意篡改。
+
 运行时 Loader 会在 import 前重新校验目录摘要和 Manifest，import 后校验实例契约，
 再标注 Artifact digest、Activation ID 与 Selection ID。同名覆盖必须显式绑定替换
 名称和被替换 Policy 的当前摘要；缺失或漂移均 fail closed。Coding CLI 默认装配活动

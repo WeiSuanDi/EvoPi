@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from evopi.evolution.activation import ArtifactCandidate
+from evopi.evolution.file_lock import EvolutionFileLock
 from evopi.evolution.policy_candidates import (
     PolicyCandidate,
     PolicyCandidateInspection,
@@ -72,6 +74,19 @@ class PolicyReviewWorkerInfo:
     isolated_process: bool = True
     timeout: float = 30.0
 
+    def __post_init__(self) -> None:
+        if type(self.protocol_version) is not int or self.protocol_version != 1:
+            raise ValueError("unsupported review worker protocol")
+        _string(self.python_version, "python_version")
+        if self.isolated_process is not True:
+            raise ValueError("formal review requires an isolated worker")
+        if (
+            type(self.timeout) not in (int, float)
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("worker timeout must be a positive finite number")
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class PolicyReviewEvidence:
@@ -109,18 +124,16 @@ class PolicyEvidenceStore:
         return self.root / "reports" / f"{review_id}.json"
 
     def save(self, evidence: PolicyReviewEvidence) -> PolicyReviewEvidence:
+        with EvolutionFileLock(self.root / "reports" / ".evidence.lock"):
+            return self._save_locked(evidence)
+
+    def _save_locked(self, evidence: PolicyReviewEvidence) -> PolicyReviewEvidence:
         payload = _evidence_payload(evidence)
         digest = _payload_digest(payload)
-        stored = PolicyReviewEvidence(
-            candidate=evidence.candidate,
-            supervisor_report=evidence.supervisor_report,
-            worker=evidence.worker,
-            trace_digest=evidence.trace_digest,
-            review_id=evidence.review_id,
-            created_at=evidence.created_at,
-            schema_version=evidence.schema_version,
-            evidence_digest=digest,
-        )
+        try:
+            stored = _evidence_from_payload(payload, digest=digest)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PolicyEvidenceError(f"invalid review evidence: {exc}") from exc
         payload["evidence_digest"] = digest
         path = self.report_path(stored.review_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,15 +160,19 @@ class PolicyEvidenceStore:
     def load(self, review_id: str) -> PolicyReviewEvidence:
         path = self.report_path(review_id)
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+            )
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
             raise PolicyEvidenceError(f"invalid review evidence: {exc}") from exc
         if not isinstance(raw, dict):
             raise PolicyEvidenceError("review evidence must be an object")
         digest = raw.pop("evidence_digest", None)
-        if not isinstance(digest, str) or digest != _payload_digest(raw):
-            raise PolicyEvidenceError("review evidence digest does not match its content")
         try:
+            if not isinstance(digest, str) or digest != _payload_digest(raw):
+                raise ValueError("review evidence digest does not match its content")
             evidence = _evidence_from_payload(raw, digest=digest)
         except (KeyError, TypeError, ValueError) as exc:
             raise PolicyEvidenceError(f"invalid review evidence: {exc}") from exc
@@ -174,7 +191,7 @@ class PolicyReviewService:
         timeout: float = 30.0,
         environment: dict[str, str] | None = None,
     ) -> None:
-        if timeout <= 0:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Policy review timeout must be greater than zero")
         self.store = store
         self.timeout = timeout
@@ -189,12 +206,31 @@ class PolicyReviewService:
         inspection = inspect_policy_candidate(candidate_path)
         snapshot = self.store.snapshots.freeze(inspection.candidate)
         trace = Path(trace_path).expanduser().resolve() if trace_path is not None else None
-        trace_digest = _file_digest(trace) if trace is not None else None
+        trace_digest = None
+        trace_bytes = None
+        if trace is not None:
+            try:
+                trace_bytes = trace.read_bytes()
+            except OSError as exc:
+                raise PolicyEvidenceError("could not read Trace evidence") from exc
+            trace_digest = hashlib.sha256(trace_bytes).hexdigest()
 
         if inspection.errors:
             report = _failed_report(inspection, "; ".join(inspection.errors))
         else:
-            report = self._run_worker(inspection.candidate, snapshot, trace)
+            if trace_bytes is None:
+                report = self._run_worker(inspection.candidate, snapshot, None)
+            else:
+                # Hash and replay the same bytes; the caller's Trace may keep growing.
+                try:
+                    temp_root = self.store.root / "tmp"
+                    temp_root.mkdir(parents=True, exist_ok=True)
+                    with tempfile.TemporaryDirectory(prefix="trace-", dir=temp_root) as directory:
+                        frozen_trace = Path(directory) / "trace.jsonl"
+                        frozen_trace.write_bytes(trace_bytes)
+                        report = self._run_worker(inspection.candidate, snapshot, frozen_trace)
+                except OSError as exc:
+                    raise PolicyEvidenceError("could not freeze Trace evidence") from exc
         try:
             current_digest = policy_candidate_digest(snapshot)
         except Exception as exc:
@@ -264,11 +300,31 @@ class PolicyReviewService:
                 f"Policy review worker failed with exit code {completed.returncode}",
             )
         try:
-            payload = json.loads(completed.stdout)
-            if not isinstance(payload, dict) or payload.get("ok") is not True:
-                error = payload.get("error") if isinstance(payload, dict) else None
-                raise ValueError(str(error or "worker response was not successful"))
-            return supervisor_report_from_dict(payload["report"])
+            payload = json.loads(
+                completed.stdout,
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+            )
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"ok", "report"}
+                or payload["ok"] is not True
+            ):
+                raise ValueError("worker response was not successful")
+            report = supervisor_report_from_dict(payload["report"])
+            _validate_report_conclusion(report)
+            manifest = candidate.manifest
+            if report.status != "failed" and (
+                report.candidate.name != manifest.name
+                or report.candidate.version != manifest.version
+                or report.candidate.hooks != manifest.hooks
+                or report.candidate.source != manifest.source
+                or report.candidate.risk_level != manifest.risk_level
+            ):
+                raise ValueError("worker report candidate does not match manifest")
+            if _payload_digest(report.to_dict()) != _payload_digest(payload["report"]):
+                raise ValueError("worker report is not canonical")
+            return report
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return _failed_report(
                 PolicyCandidateInspection(candidate=candidate),
@@ -314,13 +370,6 @@ def _sanitized_environment(overrides: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _file_digest(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise PolicyEvidenceError(f"could not read Trace evidence: {exc}") from exc
-
-
 def _evidence_payload(evidence: PolicyReviewEvidence) -> dict[str, Any]:
     return {
         "schema_version": evidence.schema_version,
@@ -350,45 +399,144 @@ def _evidence_from_payload(
     *,
     digest: str,
 ) -> PolicyReviewEvidence:
-    if raw.get("schema_version") != POLICY_EVIDENCE_SCHEMA_VERSION:
+    if (
+        set(raw)
+        != {
+            "schema_version",
+            "review_id",
+            "created_at",
+            "status",
+            "candidate",
+            "supervisor_report",
+            "worker",
+            "trace_digest",
+        }
+        or type(raw.get("schema_version")) is not int
+        or raw["schema_version"] != POLICY_EVIDENCE_SCHEMA_VERSION
+    ):
         raise ValueError("unsupported Policy review evidence schema")
     candidate_raw = raw["candidate"]
     worker_raw = raw["worker"]
     if not isinstance(candidate_raw, dict) or not isinstance(worker_raw, dict):
         raise TypeError("candidate and worker must be objects")
-    created_at = datetime.fromisoformat(str(raw["created_at"]))
+    if (
+        set(candidate_raw)
+        != {"kind", "name", "version", "source", "risk_level", "digest", "metadata"}
+        or candidate_raw["kind"] != "policy"
+    ):
+        raise ValueError("invalid Policy evidence candidate")
+    if set(worker_raw) != {"protocol_version", "python_version", "isolated_process", "timeout"}:
+        raise ValueError("invalid worker fields")
+    created_at = datetime.fromisoformat(_string(raw["created_at"], "created_at"))
     if created_at.tzinfo is None:
         raise ValueError("created_at must include timezone")
     candidate = ArtifactCandidate(
         kind="policy",
-        name=str(candidate_raw["name"]),
-        version=str(candidate_raw["version"]),
-        source=str(candidate_raw["source"]),
+        name=_string(candidate_raw["name"], "name"),
+        version=_string(candidate_raw["version"], "version"),
+        source=_string(candidate_raw["source"], "source"),
         risk_level=candidate_raw["risk_level"],
-        digest=str(candidate_raw["digest"]),
-        metadata=dict(candidate_raw.get("metadata", {})),
+        digest=_string(candidate_raw["digest"], "digest"),
+        metadata=candidate_raw["metadata"],
     )
     trace_digest = raw.get("trace_digest")
-    if trace_digest is not None and not isinstance(trace_digest, str):
-        raise TypeError("trace_digest must be a string or null")
+    if trace_digest is not None:
+        _validate_hex(trace_digest, 64, "trace_digest")
     report = supervisor_report_from_dict(raw["supervisor_report"])
+    _validate_report_conclusion(report)
     if raw.get("status") != report.status:
         raise ValueError("evidence status does not match Supervisor Report")
-    return PolicyReviewEvidence(
+    if report.status not in {"passed", "review_required", "failed"}:
+        raise ValueError("invalid evidence status")
+    if report.status != "failed" and (
+        report.candidate.name != candidate.name
+        or report.candidate.version != candidate.version
+        or report.candidate.risk_level != candidate.risk_level
+    ):
+        raise ValueError("Supervisor Report candidate does not match evidence")
+    _validate_hex(raw["review_id"], 32, "review_id")
+    evidence = PolicyReviewEvidence(
         schema_version=POLICY_EVIDENCE_SCHEMA_VERSION,
-        review_id=str(raw["review_id"]),
+        review_id=raw["review_id"],
         created_at=created_at.astimezone(UTC),
         candidate=candidate,
         supervisor_report=report,
         worker=PolicyReviewWorkerInfo(
-            protocol_version=int(worker_raw["protocol_version"]),
-            python_version=str(worker_raw["python_version"]),
-            isolated_process=bool(worker_raw["isolated_process"]),
-            timeout=float(worker_raw["timeout"]),
+            protocol_version=worker_raw["protocol_version"],
+            python_version=worker_raw["python_version"],
+            isolated_process=worker_raw["isolated_process"],
+            timeout=worker_raw["timeout"],
         ),
         trace_digest=trace_digest,
         evidence_digest=digest,
     )
+    if _payload_digest(_evidence_payload(evidence)) != digest:
+        raise ValueError("review evidence contains noncanonical fields")
+    return evidence
+
+
+def _string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
+def _validate_report_conclusion(report: SupervisorReport) -> None:
+    """Do not let a cached top-level verdict weaken its underlying checks."""
+    names = [check.name for check in report.checks]
+    required = {"schema", "dry_run", "trace_replay"}
+    if len(names) != 3 or set(names) != required:
+        raise ValueError("Supervisor Report must contain each required check exactly once")
+    for check in report.checks:
+        if check.status not in {"passed", "failed", "missing", "not_applicable"}:
+            raise ValueError("invalid Supervisor check status")
+        if check.name == "schema" and check.status not in {"passed", "failed"}:
+            raise ValueError("Schema check is mandatory")
+        if check.name == "dry_run" and check.status == "not_applicable":
+            raise ValueError("Dry Run cannot be not_applicable")
+        if (
+            check.name == "trace_replay"
+            and "before_tool_call" in report.candidate.hooks
+            and check.status == "not_applicable"
+        ):
+            raise ValueError("before_tool_call requires Replay evidence")
+    for finding in report.findings:
+        if finding.check not in required or finding.severity not in {"warning", "error"}:
+            raise ValueError("invalid Supervisor finding")
+    if any(check.status == "failed" or check.errors for check in report.checks) or any(
+        finding.severity == "error" for finding in report.findings
+    ):
+        expected = "failed"
+    elif any(check.status == "missing" or check.warnings for check in report.checks) or any(
+        finding.severity == "warning" for finding in report.findings
+    ):
+        expected = "review_required"
+    else:
+        expected = "passed"
+    if report.status != expected:
+        raise ValueError("Supervisor Report conclusion does not match its checks")
+
+
+def _validate_hex(value: object, length: int, name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{name} must be {length} lowercase hexadecimal characters")
+
+
+def _unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _validate_identifier(value: str, name: str) -> None:
